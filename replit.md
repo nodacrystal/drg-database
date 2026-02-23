@@ -19,6 +19,7 @@ A Japanese rap battle tool that uses Gemini AI to generate fictional targets, di
 - `GET /api/target` - Generate a fictional target person
 - `POST /api/diss` - Generate diss words (`{ target, level }`)
 - `POST /api/rhyme` - Find rhyming words (`{ word, level }`)
+- `POST /api/final_rhyme` - Score-ranked rhymes with vowel match count (`{ word }`) → `{ rhymes: [{ word, score, vowels }] }`
 
 ## Tech Stack
 - Frontend on port 5000 (served by Express + Vite)
@@ -26,4 +27,5 @@ A Japanese rap battle tool that uses Gemini AI to generate fictional targets, di
 - Dark mode by default
 
 ## Recent Changes
+- 2026-02-23: Added final word input form and /api/final_rhyme endpoint with vowel scoring/ranking
 - 2026-02-23: Initial build with all core features

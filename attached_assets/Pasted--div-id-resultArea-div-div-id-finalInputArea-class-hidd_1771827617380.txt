@@ -1,0 +1,94 @@
+        <div id="resultArea"></div>
+        
+        <div id="finalInputArea" class="hidden" style="margin-top:20px; border-top:2px solid #333; padding-top:20px;">
+            <h3>最終的なディスりワードを決定</h3>
+            <input type="text" id="finalWord" placeholder="悪口を入力...">
+            <button onclick="getFinalRhymes()">このワードで韻を生成</button>
+        </div>
+        <div id="finalRhymeResult"></div>
+
+    <script>
+        // generateDiss関数を修正（結果表示後にフォームを出す）
+        async function generateDiss() {
+            const lvl = document.getElementById('lvl').value;
+            if(lvl >= 8 && !document.getElementById('ageConfirm').checked) {
+                alert("年齢確認にチェックを入れてください。");
+                return;
+            }
+            const res = await fetch('/api/diss', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({target: currentTarget, level: lvl})
+            });
+            const data = await res.json();
+            let html = "<h3>ワードを選択して韻を踏む、または下のフォームに入力</h3>";
+            data.words.forEach(w => {
+                html += `<div class="word-item" onclick="getRhyme('${w}')">${w}</div>`;
+            });
+            document.getElementById('resultArea').innerHTML = html;
+            
+            // 入力フォームを表示
+            document.getElementById('finalInputArea').classList.remove('hidden');
+        }
+
+        // 追加：最終ワードでの韻生成とランク表示
+        async function getFinalRhymes() {
+            const word = document.getElementById('finalWord').value;
+            if(!word) return alert("ワードを入力してください");
+            
+            const res = await fetch('/api/final_rhyme', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({word: word})
+            });
+            const data = await res.json();
+            
+            let html = "<h3>韻のランク（母音一致数順）</h3>";
+            data.rhymes.forEach(item => {
+                html += `<p>【${item.score}文字一致】 ${item.word} (母音: ${item.vowels})</p>`;
+            });
+            document.getElementById('finalRhymeResult').innerHTML = html;
+        }
+    </script>
+  @app.route('/api/final_rhyme', methods=['POST'])
+def get_final_rhyme():
+    data = request.json
+    base_word = data.get('word')
+    
+    # 母音変換（Vowel/バウエル：アイウエオの音）
+    base_vowels = to_vowel_numbers(base_word)
+    
+    model = genai.GenerativeModel(MODEL_NAME)
+    # プロンプト：子音（Consonant/コンソナント：K, S, Tなどの音）や漢字の重複を厳禁する指示
+    prompt = f"""
+    「{base_word}」と韻を踏む言葉を15個生成してください。
+    【ルール】
+    1. 「{base_word}」に含まれる漢字を1文字も使わないこと。
+    2. 単語の後半が「{base_word}」と同じ読み（子音＋母音の一致）になる「同音語」を絶対に避けること。
+    3. 可能な限り長く母音が一致する言葉を選ぶこと。
+    4. 出力はカンマ区切りの単語のみ。
+    """
+    
+    response = model.generate_content(prompt)
+    candidates = [w.strip() for w in response.text.replace('、', ',').split(',')]
+    
+    scored_rhymes = []
+    for cand in candidates:
+        if cand == base_word: continue
+        cand_vowels = to_vowel_numbers(cand)
+        
+        # 母音の一致数を計算（末尾からの最大一致数）
+        score = 0
+        min_len = min(len(base_vowels), len(cand_vowels))
+        for i in range(1, min_len + 1):
+            if base_vowels[-i] == cand_vowels[-i]:
+                score += 1
+            else:
+                break
+        
+        if score > 0:
+            scored_rhymes.append({"word": cand, "score": score, "vowels": cand_vowels})
+    
+    # スコア（一致数）が高い順にソートして上位10個を返す
+    scored_rhymes.sort(key=lambda x: x['score'], reverse=True)
+    return jsonify({"rhymes": scored_rhymes[:10]})

@@ -13,6 +13,10 @@ const rhymeRequestSchema = z.object({
   level: z.number().int().min(1).max(10),
 });
 
+const finalRhymeRequestSchema = z.object({
+  word: z.string().min(1),
+});
+
 const ai = new GoogleGenAI({
   apiKey: process.env.AI_INTEGRATIONS_GEMINI_API_KEY,
   httpOptions: {
@@ -152,6 +156,66 @@ export async function registerRoutes(
       res.json({ rhymes: results.length > 0 ? results : ["韻を踏むワードが見つかりませんでした。もう一度試してください"] });
     } catch (error) {
       console.error("Rhyme generation error:", error);
+      res.status(500).json({ error: "韻の生成に失敗しました" });
+    }
+  });
+
+  app.post("/api/final_rhyme", async (req, res) => {
+    try {
+      const parsed = finalRhymeRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "ワードが必要です" });
+      }
+      const { word } = parsed.data;
+
+      const baseVowels = toVowelNumbers(word);
+
+      const prompt = `「${word}」と韻を踏む言葉を15個生成してください。
+【ルール】
+1. 「${word}」に含まれる漢字を1文字も使わないこと。
+2. 単語の後半が「${word}」と同じ読み（子音＋母音の一致）になる「同音語」を絶対に避けること。
+3. 可能な限り長く母音が一致する言葉を選ぶこと。
+4. 出力はカンマ区切りの単語のみ。`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: prompt,
+        config: { maxOutputTokens: 8192 },
+      });
+
+      const text = response.text || "";
+      const candidates = text
+        .replace(/、/g, ",")
+        .replace(/\n/g, ",")
+        .split(",")
+        .map((w: string) => w.trim())
+        .filter((w: string) => w.length > 0 && w.length < 30);
+
+      const scoredRhymes: { word: string; score: number; vowels: string }[] = [];
+
+      for (const cand of candidates) {
+        if (cand === word) continue;
+        const candVowels = toVowelNumbers(cand);
+
+        let score = 0;
+        const minLen = Math.min(baseVowels.length, candVowels.length);
+        for (let i = 1; i <= minLen; i++) {
+          if (baseVowels[baseVowels.length - i] === candVowels[candVowels.length - i]) {
+            score++;
+          } else {
+            break;
+          }
+        }
+
+        if (score > 0) {
+          scoredRhymes.push({ word: cand, score, vowels: candVowels });
+        }
+      }
+
+      scoredRhymes.sort((a, b) => b.score - a.score);
+      res.json({ rhymes: scoredRhymes.slice(0, 10) });
+    } catch (error) {
+      console.error("Final rhyme generation error:", error);
       res.status(500).json({ error: "韻の生成に失敗しました" });
     }
   });

@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
+import { Input } from "@/components/ui/input";
 import {
   Crosshair,
   Flame,
@@ -25,6 +26,8 @@ import {
   AlertTriangle,
   Music,
   Loader2,
+  PenLine,
+  Trophy,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -53,6 +56,8 @@ export default function Home() {
   const [selectedWord, setSelectedWord] = useState<string>("");
   const [rhymes, setRhymes] = useState<string[]>([]);
   const [rhymeDialogOpen, setRhymeDialogOpen] = useState(false);
+  const [finalWord, setFinalWord] = useState<string>("");
+  const [finalRhymes, setFinalRhymes] = useState<{ word: string; score: number; vowels: string }[]>([]);
 
   const targetMutation = useMutation({
     mutationFn: async () => {
@@ -95,6 +100,28 @@ export default function Home() {
       toast({ title: "エラー", description: "韻の生成に失敗しました", variant: "destructive" });
     },
   });
+
+  const finalRhymeMutation = useMutation({
+    mutationFn: async (word: string) => {
+      const res = await apiRequest("POST", "/api/final_rhyme", { word });
+      return res.json();
+    },
+    onSuccess: (data: { rhymes: { word: string; score: number; vowels: string }[] }) => {
+      setFinalRhymes(data.rhymes);
+    },
+    onError: () => {
+      toast({ title: "エラー", description: "韻の生成に失敗しました", variant: "destructive" });
+    },
+  });
+
+  const handleFinalRhyme = useCallback(() => {
+    if (!finalWord.trim()) {
+      toast({ title: "入力エラー", description: "ワードを入力してください" });
+      return;
+    }
+    setFinalRhymes([]);
+    finalRhymeMutation.mutate(finalWord.trim());
+  }, [finalWord, finalRhymeMutation, toast]);
 
   const handleGenerateDiss = useCallback(() => {
     if (!target) {
@@ -348,6 +375,86 @@ export default function Home() {
                         </motion.div>
                       ))}
                     </div>
+                  )}
+                </CardContent>
+              </Card>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {dissWords.length > 0 && (
+            <motion.div
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -12 }}
+            >
+              <Card>
+                <CardContent className="p-5 space-y-4">
+                  <div className="flex items-center gap-2">
+                    <PenLine className="w-5 h-5 text-primary" />
+                    <h2 className="text-lg font-semibold" data-testid="text-final-heading">最終的なディスりワードを決定</h2>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <Input
+                      value={finalWord}
+                      onChange={(e) => setFinalWord(e.target.value)}
+                      placeholder="悪口を入力..."
+                      onKeyDown={(e) => { if (e.key === "Enter") handleFinalRhyme(); }}
+                      data-testid="input-final-word"
+                    />
+                    <Button
+                      onClick={handleFinalRhyme}
+                      disabled={finalRhymeMutation.isPending}
+                      data-testid="button-final-rhyme"
+                    >
+                      {finalRhymeMutation.isPending ? (
+                        <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                      ) : (
+                        <Mic2 className="w-4 h-4 mr-2" />
+                      )}
+                      韻を生成
+                    </Button>
+                  </div>
+
+                  {finalRhymeMutation.isPending && (
+                    <div className="space-y-2">
+                      {Array.from({ length: 4 }).map((_, i) => (
+                        <Skeleton key={i} className="h-10 w-full rounded-md" />
+                      ))}
+                    </div>
+                  )}
+
+                  {finalRhymes.length > 0 && (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2 pt-2">
+                        <Trophy className="w-4 h-4 text-yellow-500" />
+                        <h3 className="text-sm font-semibold text-muted-foreground">韻のランク（母音一致数順）</h3>
+                      </div>
+                      {finalRhymes.map((item, i) => (
+                        <motion.div
+                          key={`${item.word}-${i}`}
+                          initial={{ opacity: 0, x: -8 }}
+                          animate={{ opacity: 1, x: 0 }}
+                          transition={{ delay: i * 0.05 }}
+                          className="flex items-center gap-3 px-3 py-2.5 rounded-md bg-muted/40 dark:bg-muted/20 border border-border/40"
+                          data-testid={`text-final-rhyme-${i}`}
+                        >
+                          <Badge variant="outline" className="text-xs font-mono shrink-0">
+                            {item.score}文字一致
+                          </Badge>
+                          <span className="text-sm font-medium">{item.word}</span>
+                          <span className="text-xs text-muted-foreground ml-auto font-mono">(母音: {item.vowels})</span>
+                        </motion.div>
+                      ))}
+                    </div>
+                  )}
+
+                  {!finalRhymeMutation.isPending && finalRhymes.length === 0 && finalRhymeMutation.isSuccess && (
+                    <p className="text-sm text-muted-foreground text-center py-4" data-testid="text-final-empty">
+                      韻を踏むワードが見つかりませんでした
+                    </p>
                   )}
                 </CardContent>
               </Card>
