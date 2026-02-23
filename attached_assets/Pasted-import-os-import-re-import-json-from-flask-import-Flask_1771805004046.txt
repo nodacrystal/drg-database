@@ -1,0 +1,187 @@
+import os
+import re
+import json
+from flask import Flask, render_template_string, request, jsonify
+import google.generativeai as genai
+
+app = Flask(__name__)
+
+# API設定 (gemini-3.0-flash-preview を指定)
+API_KEY = os.environ.get("GOOGLE_API_KEY")
+genai.configure(api_key=API_KEY)
+MODEL_NAME = "gemini-3.0-flash-preview"
+
+# --- 母音変換ロジック ---
+VOWEL_MAP = {
+    'a': '1', 'i': '2', 'u': '3', 'e': '4', 'o': '5',
+    'n': '6', 'ー': '7', 'っ': '8'
+}
+
+def to_vowel_numbers(text):
+    """
+    日本語のテキストを母音数字に変換する簡易的な処理
+    (実用性を考慮し、ひらがな/カタカナを母音に変換)
+    """
+    # 簡易的な音訳マップ
+    kana_map = {
+        'あ':'1','い':'2','う':'3','え':'4','お':'5','か':'1','き':'2','く':'3','け':'4','こ':'5',
+        'さ':'1','し':'2','す':'3','せ':'4','そ':'5','た':'1','ち':'2','つ':'3','て':'4','と':'5',
+        'な':'1','に':'2','ぬ':'3','ね':'4','の':'5','は':'1','ひ':'2','ふ':'3','へ':'4','ほ':'5',
+        'ま':'1','み':'2','む':'3','め':'4','も':'5','や':'1','ゆ':'3','よ':'5','ら':'1','り':'2',
+        'る':'3','れ':'4','ろ':'5','わ':'1','を':'5','ん':'6','ー':'7','っ':'8','が':'1','ぎ':'2',
+        'ぐ':'3','げ':'4','ご':'5','ざ':'1','じ':'2','ず':'3','ぜ':'4','ぞ':'5','だ':'1','ぢ':'2',
+        'づ':'3','で':'4','ど':'5','ば':'1','び':'2','ぶ':'3','べ':'4','ぼ':'5','ぱ':'1','ぴ':'2',
+        'ぷ':'3','ぺ':'4','ぽ':'5','ゃ':'1','ゅ':'3','ょ':'5'
+    }
+    res = ""
+    for char in text:
+        res += kana_map.get(char, "")
+    return res
+
+# --- UI (HTML/JS) ---
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Diss & Rhyme Generator</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 20px auto; padding: 10px; background: #f0f0f0; }
+        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .word-item { cursor: pointer; padding: 5px; border-bottom: 1px solid #eee; }
+        .word-item:hover { background: #e0f7fa; }
+        .rhyme-list { margin-top: 10px; color: #d32f2f; font-weight: bold; }
+        input[type="range"] { width: 100%; }
+        button { background: #333; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>Target Setup</h2>
+        <button onclick="generateTarget()">人物を生成</button>
+        <p id="targetInfo"><b>ターゲット:</b> 未設定</p>
+
+        <hr>
+
+        <h3>Level: <span id="lvlDisp">5</span></h3>
+        <input type="range" id="lvl" min="1" max="10" value="5" oninput="checkLevel(this.value)">
+        <div id="ageCheckArea" class="hidden">
+            <label><input type="checkbox" id="ageConfirm"> 私は18歳以上です(過激な表現を含みます)</label>
+        </div>
+
+        <br><button onclick="generateDiss()">ディスりワード20個生成</button>
+
+        <div id="resultArea"></div>
+    </div>
+
+    <script>
+        let currentTarget = "";
+
+        function checkLevel(val) {
+            document.getElementById('lvlDisp').innerText = val;
+            const area = document.getElementById('ageCheckArea');
+            if(val >= 8) area.classList.remove('hidden');
+            else area.classList.add('hidden');
+        }
+
+        async function generateTarget() {
+            const res = await fetch('/api/target');
+            const data = await res.json();
+            currentTarget = data.target;
+            document.getElementById('targetInfo').innerHTML = "<b>ターゲット:</b> " + currentTarget;
+        }
+
+        async function generateDiss() {
+            const lvl = document.getElementById('lvl').value;
+            if(lvl >= 8 && !document.getElementById('ageConfirm').checked) {
+                alert("年齢確認にチェックを入れてください。");
+                return;
+            }
+            const res = await fetch('/api/diss', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({target: currentTarget, level: lvl})
+            });
+            const data = await res.json();
+            let html = "<h3>ワードを選択して韻を踏む</h3>";
+            data.words.forEach(w => {
+                html += `<div class="word-item" onclick="getRhyme('${w}')">${w}</div>`;
+            });
+            document.getElementById('resultArea').innerHTML = html;
+        }
+
+        async function getRhyme(word) {
+            const lvl = document.getElementById('lvl').value;
+            const res = await fetch('/api/rhyme', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({word: word, level: lvl})
+            });
+            const data = await res.json();
+            alert("「" + word + "」の韻リスト:\\n" + data.rhymes.join('\\n'));
+        }
+    </script>
+</body>
+</html>
+"""
+
+# --- API ルート ---
+
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/api/target')
+def get_target():
+    model = genai.GenerativeModel(MODEL_NAME)
+    prompt = "架空の人物（ラッパーである必要はない）を一人、その見た目や性格の欠点を含めて30文字以内で簡潔に作成してください。"
+    response = model.generate_content(prompt)
+    return jsonify({"target": response.text.strip()})
+
+@app.route('/api/diss', methods=['POST'])
+def get_diss():
+    data = request.json
+    target = data.get('target')
+    level = data.get('level')
+    
+    model = genai.GenerativeModel(MODEL_NAME)
+    prompt = f"ターゲット: {target}\\nレベル: {level}/10\\nこの人物に対する一言の悪口（名詞、または短いフレーズ）を20個、カンマ区切りで作成してください。文章にせず、「バカ丸出し」のような単純な言葉を使ってください。レベルが高いほど酷い内容にしてください。"
+    
+    response = model.generate_content(prompt)
+    words = [w.strip() for w in response.text.replace('、', ',').split(',')][:20]
+    return jsonify({"words": words})
+
+@app.route('/api/rhyme', methods=['POST'])
+def get_rhyme():
+    data = request.json
+    base_word = data.get('word')
+    level = data.get('level')
+    
+    # 韻の候補を多めに生成させてからフィルタリング
+    model = genai.GenerativeModel(MODEL_NAME)
+    prompt = f"「{base_word}」と韻を踏める、レベル{level}/10の悪口を30個挙げてください。条件：一言であること、母音が「{base_word}」の末尾3つ以上と一致すること。ただし「{base_word}」という言葉自体やその一部を含んではいけません。"
+    
+    response = model.generate_content(prompt)
+    candidates = [w.strip() for w in response.text.replace('、', ',').split(',')]
+    
+    # 韻の判定チェック
+    target_vowels = to_vowel_numbers(base_word)[-3:]
+    valid_rhymes = []
+    
+    for cand in candidates:
+        if cand == base_word: continue # 同じ言葉は除外
+        cand_vowels = to_vowel_numbers(cand)
+        
+        # 末尾3つの母音が一致するか
+        if len(cand_vowels) >= 3 and cand_vowels[-3:] == target_vowels:
+            # 同じ言葉（子音一致）を避けるため、文字列そのものが含まれていないか簡易チェック
+            if base_word[-2:] not in cand:
+                valid_rhymes.append(cand)
+        
+        if len(valid_rhymes) >= 10: break
+
+    return jsonify({"rhymes": valid_rhymes if valid_rhymes else ["(韻を踏むワードが見つかりませんでした。もう一度試してください)"]})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080)
