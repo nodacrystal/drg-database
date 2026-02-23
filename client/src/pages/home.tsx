@@ -49,6 +49,7 @@ export default function Home() {
   const [activeTab, setActiveTab] = useState<"gen" | "fav">("gen");
   const [favorites, setFavorites] = useState<string[]>([]);
   const [checkedWords, setCheckedWords] = useState<Set<string>>(new Set());
+  const [generatedHistory, setGeneratedHistory] = useState<string[]>([]);
 
   const toggleChecked = useCallback((word: string) => {
     setCheckedWords((prev) => {
@@ -102,14 +103,24 @@ export default function Home() {
     },
   });
 
+  const resetHistory = useCallback(() => {
+    setGeneratedHistory([...favorites]);
+    toast({ title: "リセット完了", description: "出現済みワードの記録をリセットしました（お気に入りは残っています）" });
+  }, [favorites, toast]);
+
   const dissMutation = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/diss", { target, level, favorites });
+      const res = await apiRequest("POST", "/api/diss", { target, level, history: generatedHistory });
       return res.json();
     },
     onSuccess: (data: { words: string[] }) => {
       setDissWords(data.words);
       setCheckedWords(new Set());
+      setGeneratedHistory((prev) => {
+        const next = [...prev];
+        data.words.forEach((w) => { if (!next.includes(w)) next.push(w); });
+        return next;
+      });
     },
     onError: () => {
       toast({ title: "エラー", description: "ワード生成に失敗しました", variant: "destructive" });
@@ -351,7 +362,7 @@ export default function Home() {
                           onCheckedChange={(v) => setAgeConfirmed(!!v)}
                           data-testid="checkbox-age-confirm"
                         />
-                        <span className="text-sm">私は18歳以上です</span>
+                        <span className="text-sm">18歳以上の過激な汚い表現を許可します</span>
                       </label>
                     </div>
                   </div>
@@ -370,8 +381,20 @@ export default function Home() {
               ) : (
                 <Zap className="w-4 h-4 mr-2" />
               )}
-              ディスりワード30個生成
+              ワード30個を生成
             </Button>
+
+            {generatedHistory.length > 0 && (
+              <Button
+                variant="outline"
+                onClick={resetHistory}
+                className="w-full"
+                data-testid="button-reset-history"
+              >
+                <RotateCcw className="w-4 h-4 mr-2" />
+                出現済みワードをリセット ({generatedHistory.length}個)
+              </Button>
+            )}
           </CardContent>
         </Card>
 

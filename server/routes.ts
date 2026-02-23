@@ -6,7 +6,7 @@ import { z } from "zod";
 const dissRequestSchema = z.object({
   target: z.string().min(1),
   level: z.number().int().min(1).max(10),
-  favorites: z.array(z.string()).optional().default([]),
+  history: z.array(z.string()).optional().default([]),
 });
 
 const ai = new GoogleGenAI({
@@ -43,30 +43,27 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ error: "ターゲットとレベル(1-10)が必要です" });
       }
-      const { target, level, favorites } = parsed.data;
+      const { target, level, history } = parsed.data;
 
       let severityInstruction = "";
       if (level >= 8) {
-        severityInstruction = "【最重要】18歳以上向けの極めて冷酷な罵倒語にしてください。人格や存在を根底から否定する鋭い単語を選んでください。";
+        severityInstruction = "【警告：極限まで過激に】18歳以上向けの、放送禁止用語に近い直接的で汚い罵倒語を使用してください。上品さは一切不要です。人間の尊厳を徹底的に踏みにじる、最も下劣で攻撃的な言葉を選んでください。";
       } else {
-        severityInstruction = `レベル${level}/10に応じた強さのダメ出しにしてください。`;
+        severityInstruction = `レベル${level}/10に応じた、非常に直接的で容赦のない辛辣なダメ出しにしてください。`;
       }
 
-      const excludeList = favorites.length > 0 ? favorites.join(",") : "なし";
+      const historyList = history.length > 0 ? history.join(",") : "なし";
 
       const prompt = `ターゲット: ${target}
-
 ${severityInstruction}
 
 【厳守ルール】
-1. 悪口・ダメ出しワードを合計30個、カンマ区切りで生成してください。
-2. 文字数制限：ひらがなにした際、各ワード「4文字以上、8文字以内」に必ず収めてください。
-3. 内容：抽象的な悪口ではなく「役立たず」「口だけ野郎」のような、相手の欠点を突く「明確なダメ出し」にしてください。
-4. 使用文字：難しい漢字は一切禁止。小学生が習う漢字、または、ひらがな・カタカナのみを使用してください。
-5. 重複禁止：以下のリストに含まれる単語は、お気に入り登録済みのため「絶対に」出力しないでください：
-   リスト：${excludeList}
-6. 一般性：専門用語や造語は禁止。誰もが意味を理解できる一般的な単語の組み合わせにしてください。
-7. 形式：出力はカンマ区切りの単語リストのみ。解説や前置きは不要です。`;
+1. 悪口を30個、カンマ区切りで生成。
+2. 文字数：ひらがな換算で「4文字以上、8文字以内」。
+3. 性格：曖昧（あいまい）な表現は避け、「底辺」「クズ」等の直接的で汚い表現を積極的に使うこと。
+4. 漢字：小学生が理解できる範囲。難しい漢字は禁止。
+5. 重複禁止：以下の【既出リスト】にあるワードは、過去に生成済みのため「絶対に」出力しないでください。
+【既出リスト】: ${historyList}`;
 
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",

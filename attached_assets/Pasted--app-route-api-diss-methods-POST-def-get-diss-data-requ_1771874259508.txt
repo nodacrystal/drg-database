@@ -1,0 +1,101 @@
+@app.route('/api/diss', methods=['POST'])
+def get_diss():
+    data = request.json
+    target = data.get('target')
+    level = int(data.get('level'))
+    # フロントエンドから「過去に出た全ワード」と「お気に入り」を合算したリストを受け取る
+    history = data.get('history', [])
+    
+    severity_instruction = ""
+    if level >= 8:
+        # 年齢制限時の過激さを最大化
+        severity_instruction = "【警告：極限まで過激に】18歳以上向けの、放送禁止用語に近い直接的で汚い罵倒語を使用してください。上品さは一切不要です。人間の尊厳を徹底的に踏みにじる、最も下劣で攻撃的な言葉を選んでください。"
+    else:
+        severity_instruction = f"レベル{level}/10に応じた、非常に直接的で容赦のない辛辣なダメ出しにしてください。"
+
+    model = genai.GenerativeModel(MODEL_NAME)
+    prompt = f"""
+    ターゲット: {target}
+    {severity_instruction}
+
+    【厳守ルール】
+    1. 悪口を30個、カンマ区切りで生成。
+    2. 文字数：ひらがな換算で「4文字以上、8文字以内」。
+    3. 性格：曖昧（あいまい）な表現は避け、「底辺」「クズ」等の直接的で汚い表現を積極的に使うこと。
+    4. 漢字：小学生が理解できる範囲。難しい漢字は禁止。
+    5. 重複禁止：以下の【既出リスト】にあるワードは、過去に生成済みのため「絶対に」出力しないでください。
+    【既出リスト】: {",".join(history)}
+    """
+    
+    response = model.generate_content(prompt)
+    words = [w.strip() for w in response.text.replace('、', ',').split(',')][:30]
+    return jsonify({"words": words})
+  <div id="genSection">
+    <h2>ターゲット設定</h2>
+    <button onclick="generateTarget()">人物を生成</button>
+    <p id="targetInfo"><b>ターゲット:</b> 未設定</p>
+    <hr>
+    <h3>悪口の激しさ: <span id="lvlDisp">5</span></h3>
+    <input type="range" id="lvl" min="1" max="10" value="5" oninput="checkLevel(this.value)">
+    <div id="ageCheckArea" class="hidden" style="color: red; margin: 10px 0;">
+        <label><input type="checkbox" id="ageConfirm"> 【警告】18歳以上の過激な汚い表現を許可します</label>
+    </div>
+    <br>
+    <button onclick="generateDiss()" style="width: 100%; height: 50px; font-size: 1.2em;">ワード30個を生成</button>
+    
+    <div style="margin-top: 10px; display: flex; gap: 5px;">
+        <button onclick="resetHistory()" style="background: #666; font-size: 0.8em; flex: 1;">出現済みワードをリセット</button>
+    </div>
+
+    <div id="resultArea" style="margin-top: 20px;"></div>
+    <button id="addFavBtn" class="hidden" style="margin-top:10px; background:#d32f2f; width: 100%;" onclick="addToFavorites()">選択したワードをお気に入りに追加</button>
+</div>
+
+<script>
+    // 内部保管用：アプリ起動後に生成されたすべてのワードを記録
+    let generatedHistory = [];
+    let favorites = [];
+
+    async function generateDiss() {
+        const lvl = document.getElementById('lvl').value;
+        if(lvl >= 8 && !document.getElementById('ageConfirm').checked) {
+            alert("18歳以上の確認にチェックを入れてください。");
+            return;
+        }
+        
+        document.getElementById('resultArea').innerHTML = "過激な言葉を厳選中...";
+        
+        const res = await fetch('/api/diss', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                target: currentTarget, 
+                level: lvl,
+                history: generatedHistory // 過去に出た全ワードを送信
+            })
+        });
+        const data = await res.json();
+        
+        // 今回生成されたワードを履歴に追加
+        data.words.forEach(w => {
+            if(!generatedHistory.includes(w)) generatedHistory.push(w);
+        });
+
+        let html = "<h4>気に入ったワードを選択（複数可）</h4>";
+        data.words.forEach((w, i) => {
+            html += `<div class="word-item"><input type="checkbox" name="dissWord" value="${w}" id="w${i}"><label for="w${i}">${w}</label></div>`;
+        });
+        document.getElementById('resultArea').innerHTML = html;
+        document.getElementById('addFavBtn').classList.remove('hidden');
+    }
+
+    // 内部保管ワードのリセット機能
+    function resetHistory() {
+        if(confirm("一度出たワードの記録をリセットしますか？（再度同じワードが出るようになります）")) {
+            generatedHistory = [...favorites]; // お気に入りは残す
+            alert("履歴をリセットしました。");
+        }
+    }
+
+    // （他の既存関数：addToFavorites, switchTab, renderFavorites 等は変更なしで維持）
+</script>
