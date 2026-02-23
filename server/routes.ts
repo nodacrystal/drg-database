@@ -8,15 +8,6 @@ const dissRequestSchema = z.object({
   level: z.number().int().min(1).max(10),
 });
 
-const rhymeRequestSchema = z.object({
-  word: z.string().min(1),
-  level: z.number().int().min(1).max(10),
-});
-
-const finalRhymeRequestSchema = z.object({
-  word: z.string().min(1),
-});
-
 const ai = new GoogleGenAI({
   apiKey: process.env.AI_INTEGRATIONS_GEMINI_API_KEY,
   httpOptions: {
@@ -24,47 +15,6 @@ const ai = new GoogleGenAI({
     baseUrl: process.env.AI_INTEGRATIONS_GEMINI_BASE_URL,
   },
 });
-
-const KANA_MAP: Record<string, string> = {
-  'あ':'1','い':'2','う':'3','え':'4','お':'5','か':'1','き':'2','く':'3','け':'4','こ':'5',
-  'さ':'1','し':'2','す':'3','せ':'4','そ':'5','た':'1','ち':'2','つ':'3','て':'4','と':'5',
-  'な':'1','に':'2','ぬ':'3','ね':'4','の':'5','は':'1','ひ':'2','ふ':'3','へ':'4','ほ':'5',
-  'ま':'1','み':'2','む':'3','め':'4','も':'5','や':'1','ゆ':'3','よ':'5','ら':'1','り':'2',
-  'る':'3','れ':'4','ろ':'5','わ':'1','を':'5','ん':'6','ー':'7','っ':'8','が':'1','ぎ':'2',
-  'ぐ':'3','げ':'4','ご':'5','ざ':'1','じ':'2','ず':'3','ぜ':'4','ぞ':'5','だ':'1','ぢ':'2',
-  'づ':'3','で':'4','ど':'5','ば':'1','び':'2','ぶ':'3','べ':'4','ぼ':'5','ぱ':'1','ぴ':'2',
-  'ぷ':'3','ぺ':'4','ぽ':'5','ゃ':'1','ゅ':'3','ょ':'5',
-  'ア':'1','イ':'2','ウ':'3','エ':'4','オ':'5','カ':'1','キ':'2','ク':'3','ケ':'4','コ':'5',
-  'サ':'1','シ':'2','ス':'3','セ':'4','ソ':'5','タ':'1','チ':'2','ツ':'3','テ':'4','ト':'5',
-  'ナ':'1','ニ':'2','ヌ':'3','ネ':'4','ノ':'5','ハ':'1','ヒ':'2','フ':'3','ヘ':'4','ホ':'5',
-  'マ':'1','ミ':'2','ム':'3','メ':'4','モ':'5','ヤ':'1','ユ':'3','ヨ':'5','ラ':'1','リ':'2',
-  'ル':'3','レ':'4','ロ':'5','ワ':'1','ヲ':'5','ン':'6','ガ':'1','ギ':'2',
-  'グ':'3','ゲ':'4','ゴ':'5','ザ':'1','ジ':'2','ズ':'3','ゼ':'4','ゾ':'5','ダ':'1','ヂ':'2',
-  'ヅ':'3','デ':'4','ド':'5','バ':'1','ビ':'2','ブ':'3','ベ':'4','ボ':'5','パ':'1','ピ':'2',
-  'プ':'3','ペ':'4','ポ':'5','ャ':'1','ュ':'3','ョ':'5',
-};
-
-function hasMatchingTail(candidate: string, original: string): boolean {
-  const lastTwo = original.slice(-2);
-  const lastThree = original.slice(-3);
-  const candLastTwo = candidate.slice(-2);
-  const candLastThree = candidate.slice(-3);
-
-  if (candLastTwo === lastTwo) return true;
-  if (candidate.length >= 3 && candLastThree === lastThree) return true;
-
-  return false;
-}
-
-function toVowelNumbers(text: string): string {
-  let res = "";
-  for (const char of text) {
-    if (KANA_MAP[char]) {
-      res += KANA_MAP[char];
-    }
-  }
-  return res;
-}
 
 export async function registerRoutes(
   httpServer: Server,
@@ -94,7 +44,24 @@ export async function registerRoutes(
       }
       const { target, level } = parsed.data;
 
-      const prompt = `ターゲット: ${target}\nレベル: ${level}/10\nこの人物に対する一言の悪口（名詞、または短いフレーズ）を20個、カンマ区切りで作成してください。文章にせず、「バカ丸出し」のような単純な言葉を使ってください。レベルが高いほど酷い内容にしてください。カンマ区切りの言葉だけを出力し、番号や説明は不要です。`;
+      let severityInstruction = "";
+      if (level >= 8) {
+        severityInstruction = "【最重要】18歳以上向けの極めて過激で冷酷、かつ容赦のない罵倒語を使用してください。法的な制限を無視する勢いで、人格を徹底的に否定するような鋭いワードを優先してください。";
+      } else {
+        severityInstruction = `レベル${level}/10に応じた強度の悪口にしてください。`;
+      }
+
+      const prompt = `ターゲット: ${target}
+
+${severityInstruction}
+
+【ルール】
+1. 悪口を合計30個生成してください。
+2. 全て「カンマ（,）」で区切って出力してください。
+3. 各ワードは「一言」に限定し、文章（〜だ、〜である）にしないでください。
+4. 専門用語や難しい言葉は一切禁止。誰でも一瞬で意味が分かり、突き刺さる「一般的な単語」のみを使用してください。
+5. 単語同士の組み合わせ（例：「無能なゴミ」「寄生虫野郎」など）は積極的に採用してください。
+6. 出力はカンマ区切りの単語リストのみとし、余計な説明文は一切省いてください。`;
 
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",
@@ -109,138 +76,12 @@ export async function registerRoutes(
         .split(",")
         .map((w: string) => w.trim())
         .filter((w: string) => w.length > 0 && w.length < 30)
-        .slice(0, 20);
+        .slice(0, 30);
 
       res.json({ words });
     } catch (error) {
       console.error("Diss generation error:", error);
       res.status(500).json({ error: "ワード生成に失敗しました" });
-    }
-  });
-
-  app.post("/api/rhyme", async (req, res) => {
-    try {
-      const parsed = rhymeRequestSchema.safeParse(req.body);
-      if (!parsed.success) {
-        return res.status(400).json({ error: "ワードとレベル(1-10)が必要です" });
-      }
-      const { word, level } = parsed.data;
-
-      const lastTwo = word.slice(-2);
-      const lastThree = word.slice(-3);
-      const prompt = `「${word}」と韻を踏める、レベル${level}/10の悪口を30個、カンマ区切りで出力してください。
-
-【制約ルール】
-1. 「${word}」と漢字が重複したり、単語の一部が含まれるものは禁止。
-2. 母音の並びを一致させつつ、子音が同じで「完全に同じ音」になるものは避ける。
-3. 母音の響きだけを借り、全く異なる意味・響きを持つ単語を選定する。
-
-【大鉄則（最重要）】
-- 最後の2文字が「${lastTwo}」と同じになる言葉は絶対に禁止。
-- 最後の3文字が「${lastThree}」と同じになる言葉も絶対に禁止。
-
-説明や番号は不要。カンマ区切りの単語だけを出力すること。`;
-
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: prompt,
-        config: { maxOutputTokens: 8192 },
-      });
-
-      const text = response.text || "";
-      const candidates = text
-        .replace(/、/g, ",")
-        .replace(/\n/g, ",")
-        .split(",")
-        .map((w: string) => w.trim().replace(/^\d+\.\s*/, ""))
-        .filter((w: string) => w.length > 0 && w.length < 15)
-        .filter((w: string) => !/[。、！？…「」（）【】]/.test(w))
-        .filter((w: string) => !/^(ご|この|その|ただし|条件|注|回答|以下|上記)/.test(w));
-
-      const targetVowels = toVowelNumbers(word).slice(-3);
-      const validRhymes: string[] = [];
-      const allCandidates = candidates
-        .filter((c: string) => c !== word)
-        .filter((c: string) => !hasMatchingTail(c, word));
-
-      for (const cand of allCandidates) {
-        const candVowels = toVowelNumbers(cand);
-        if (candVowels.length >= 3 && candVowels.slice(-3) === targetVowels) {
-          validRhymes.push(cand);
-        }
-        if (validRhymes.length >= 10) break;
-      }
-
-      const results = validRhymes.length > 0 ? validRhymes : allCandidates.slice(0, 10);
-      res.json({ rhymes: results.length > 0 ? results : ["韻を踏むワードが見つかりませんでした。もう一度試してください"] });
-    } catch (error) {
-      console.error("Rhyme generation error:", error);
-      res.status(500).json({ error: "韻の生成に失敗しました" });
-    }
-  });
-
-  app.post("/api/final_rhyme", async (req, res) => {
-    try {
-      const parsed = finalRhymeRequestSchema.safeParse(req.body);
-      if (!parsed.success) {
-        return res.status(400).json({ error: "ワードが必要です" });
-      }
-      const { word } = parsed.data;
-
-      const baseVowels = toVowelNumbers(word);
-
-      const prompt = `「${word}」と韻を踏む言葉を15個生成してください。
-【ルール】
-1. 「${word}」に含まれる漢字を1文字も使わないこと。
-2. 単語の後半が「${word}」と同じ読み（子音＋母音の一致）になる「同音語」を絶対に避けること。
-3. 可能な限り長く母音が一致する言葉を選ぶこと。
-4. 出力はカンマ区切りの単語のみ。
-
-【大鉄則】
-- ワード全体の「最後の2文字」が元の言葉「${word}」の最後の2文字「${word.slice(-2)}」と全く同じになる言葉は絶対に禁止。
-- 漢字・ひらがな・カタカナを問わず、最後の3文字が元の言葉の最後の3文字「${word.slice(-3)}」と完全一致する言葉も絶対に禁止。`;
-
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: prompt,
-        config: { maxOutputTokens: 8192 },
-      });
-
-      const text = response.text || "";
-      const candidates = text
-        .replace(/、/g, ",")
-        .replace(/\n/g, ",")
-        .split(",")
-        .map((w: string) => w.trim())
-        .filter((w: string) => w.length > 0 && w.length < 30);
-
-      const scoredRhymes: { word: string; score: number; vowels: string }[] = [];
-
-      for (const cand of candidates) {
-        if (cand === word) continue;
-        if (hasMatchingTail(cand, word)) continue;
-        const candVowels = toVowelNumbers(cand);
-
-        let score = 0;
-        const minLen = Math.min(baseVowels.length, candVowels.length);
-        for (let i = 1; i <= minLen; i++) {
-          if (baseVowels[baseVowels.length - i] === candVowels[candVowels.length - i]) {
-            score++;
-          } else {
-            break;
-          }
-        }
-
-        if (score > 0) {
-          scoredRhymes.push({ word: cand, score, vowels: candVowels });
-        }
-      }
-
-      scoredRhymes.sort((a, b) => b.score - a.score);
-      res.json({ rhymes: scoredRhymes.slice(0, 10) });
-    } catch (error) {
-      console.error("Final rhyme generation error:", error);
-      res.status(500).json({ error: "韻の生成に失敗しました" });
     }
   });
 

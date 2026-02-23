@@ -7,31 +7,20 @@ import { Slider } from "@/components/ui/slider";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
-import { Input } from "@/components/ui/input";
 import {
   Crosshair,
   Flame,
   Mic2,
   RotateCcw,
   Sparkles,
-  Volume2,
   Zap,
   AlertTriangle,
   Music,
   Loader2,
-  PenLine,
-  Trophy,
   Star,
   Copy,
   Trash2,
-  Check,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -57,11 +46,6 @@ export default function Home() {
   const [level, setLevel] = useState<number>(5);
   const [ageConfirmed, setAgeConfirmed] = useState(false);
   const [dissWords, setDissWords] = useState<string[]>([]);
-  const [selectedWord, setSelectedWord] = useState<string>("");
-  const [rhymes, setRhymes] = useState<string[]>([]);
-  const [rhymeDialogOpen, setRhymeDialogOpen] = useState(false);
-  const [finalWord, setFinalWord] = useState<string>("");
-  const [finalRhymes, setFinalRhymes] = useState<{ word: string; score: number; vowels: string }[]>([]);
   const [activeTab, setActiveTab] = useState<"gen" | "fav">("gen");
   const [favorites, setFavorites] = useState<string[]>([]);
   const [checkedWords, setCheckedWords] = useState<Set<string>>(new Set());
@@ -112,7 +96,6 @@ export default function Home() {
     onSuccess: (data: { target: string }) => {
       setTarget(data.target);
       setDissWords([]);
-      setRhymes([]);
     },
     onError: () => {
       toast({ title: "エラー", description: "ターゲット生成に失敗しました", variant: "destructive" });
@@ -126,47 +109,12 @@ export default function Home() {
     },
     onSuccess: (data: { words: string[] }) => {
       setDissWords(data.words);
+      setCheckedWords(new Set());
     },
     onError: () => {
       toast({ title: "エラー", description: "ワード生成に失敗しました", variant: "destructive" });
     },
   });
-
-  const rhymeMutation = useMutation({
-    mutationFn: async (word: string) => {
-      const res = await apiRequest("POST", "/api/rhyme", { word, level });
-      return res.json();
-    },
-    onSuccess: (data: { rhymes: string[] }) => {
-      setRhymes(data.rhymes);
-      setRhymeDialogOpen(true);
-    },
-    onError: () => {
-      toast({ title: "エラー", description: "韻の生成に失敗しました", variant: "destructive" });
-    },
-  });
-
-  const finalRhymeMutation = useMutation({
-    mutationFn: async (word: string) => {
-      const res = await apiRequest("POST", "/api/final_rhyme", { word });
-      return res.json();
-    },
-    onSuccess: (data: { rhymes: { word: string; score: number; vowels: string }[] }) => {
-      setFinalRhymes(data.rhymes);
-    },
-    onError: () => {
-      toast({ title: "エラー", description: "韻の生成に失敗しました", variant: "destructive" });
-    },
-  });
-
-  const handleFinalRhyme = useCallback(() => {
-    if (!finalWord.trim()) {
-      toast({ title: "入力エラー", description: "ワードを入力してください" });
-      return;
-    }
-    setFinalRhymes([]);
-    finalRhymeMutation.mutate(finalWord.trim());
-  }, [finalWord, finalRhymeMutation, toast]);
 
   const handleGenerateDiss = useCallback(() => {
     if (!target) {
@@ -179,14 +127,6 @@ export default function Home() {
     }
     dissMutation.mutate();
   }, [target, level, ageConfirmed, dissMutation, toast]);
-
-  const handleWordClick = useCallback(
-    (word: string) => {
-      setSelectedWord(word);
-      rhymeMutation.mutate(word);
-    },
-    [rhymeMutation],
-  );
 
   return (
     <div className="min-h-screen bg-background">
@@ -201,7 +141,7 @@ export default function Home() {
             <Music className="w-7 h-7 text-primary" />
           </div>
           <p className="text-muted-foreground text-sm">
-            AIがターゲットを生成し、ディスワードと韻を踏むフレーズを提案します
+            AIがターゲットを生成し、ディスワードを提案します
           </p>
         </div>
       </div>
@@ -430,7 +370,7 @@ export default function Home() {
               ) : (
                 <Zap className="w-4 h-4 mr-2" />
               )}
-              ディスりワード20個生成
+              ディスりワード30個生成
             </Button>
           </CardContent>
         </Card>
@@ -445,8 +385,8 @@ export default function Home() {
               <Card>
                 <CardContent className="p-5">
                   <div className="flex items-center gap-2 mb-4">
-                    <Volume2 className="w-5 h-5 text-primary" />
-                    <h2 className="text-lg font-semibold">ワードを選択して韻を踏む</h2>
+                    <Zap className="w-5 h-5 text-primary" />
+                    <h2 className="text-lg font-semibold">生成されたワード</h2>
                   </div>
 
                   {dissMutation.isPending ? (
@@ -472,24 +412,12 @@ export default function Home() {
                             onCheckedChange={() => toggleChecked(word)}
                             data-testid={`checkbox-word-${i}`}
                           />
-                          <div
-                            role="button"
-                            tabIndex={0}
-                            onClick={() => handleWordClick(word)}
-                            onKeyDown={(e) => { if (e.key === 'Enter') handleWordClick(word); }}
-                            className="flex-1 flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"
-                            data-testid={`button-word-${i}`}
-                          >
+                          <div className="flex-1 flex items-center gap-2">
                             <span className="text-xs text-muted-foreground font-mono w-5">
                               {String(i + 1).padStart(2, "0")}
                             </span>
                             <span className="text-sm font-medium truncate">{word}</span>
                           </div>
-                          {rhymeMutation.isPending && selectedWord === word && (
-                            <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                              <Loader2 className="w-4 h-4 animate-spin text-primary" />
-                            </div>
-                          )}
                         </motion.div>
                       ))}
                     </div>
@@ -512,123 +440,9 @@ export default function Home() {
             </motion.div>
           )}
         </AnimatePresence>
-
-        <AnimatePresence>
-          {dissWords.length > 0 && (
-            <motion.div
-              initial={{ opacity: 0, y: 12 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -12 }}
-            >
-              <Card>
-                <CardContent className="p-5 space-y-4">
-                  <div className="flex items-center gap-2">
-                    <PenLine className="w-5 h-5 text-primary" />
-                    <h2 className="text-lg font-semibold" data-testid="text-final-heading">最終的なディスりワードを決定</h2>
-                  </div>
-
-                  <div className="flex gap-2">
-                    <Input
-                      value={finalWord}
-                      onChange={(e) => setFinalWord(e.target.value)}
-                      placeholder="悪口を入力..."
-                      onKeyDown={(e) => { if (e.key === "Enter") handleFinalRhyme(); }}
-                      data-testid="input-final-word"
-                    />
-                    <Button
-                      onClick={handleFinalRhyme}
-                      disabled={finalRhymeMutation.isPending}
-                      data-testid="button-final-rhyme"
-                    >
-                      {finalRhymeMutation.isPending ? (
-                        <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                      ) : (
-                        <Mic2 className="w-4 h-4 mr-2" />
-                      )}
-                      韻を生成
-                    </Button>
-                  </div>
-
-                  {finalRhymeMutation.isPending && (
-                    <div className="space-y-2">
-                      {Array.from({ length: 4 }).map((_, i) => (
-                        <Skeleton key={i} className="h-10 w-full rounded-md" />
-                      ))}
-                    </div>
-                  )}
-
-                  {finalRhymes.length > 0 && (
-                    <div className="space-y-2">
-                      <div className="flex items-center gap-2 pt-2">
-                        <Trophy className="w-4 h-4 text-yellow-500" />
-                        <h3 className="text-sm font-semibold text-muted-foreground">韻のランク（母音一致数順）</h3>
-                      </div>
-                      {finalRhymes.map((item, i) => (
-                        <motion.div
-                          key={`${item.word}-${i}`}
-                          initial={{ opacity: 0, x: -8 }}
-                          animate={{ opacity: 1, x: 0 }}
-                          transition={{ delay: i * 0.05 }}
-                          className="flex items-center gap-3 px-3 py-2.5 rounded-md bg-muted/40 dark:bg-muted/20 border border-border/40"
-                          data-testid={`text-final-rhyme-${i}`}
-                        >
-                          <Badge variant="outline" className="text-xs font-mono shrink-0">
-                            {item.score}文字一致
-                          </Badge>
-                          <span className="text-sm font-medium">{item.word}</span>
-                          <span className="text-xs text-muted-foreground ml-auto font-mono">(母音: {item.vowels})</span>
-                        </motion.div>
-                      ))}
-                    </div>
-                  )}
-
-                  {!finalRhymeMutation.isPending && finalRhymes.length === 0 && finalRhymeMutation.isSuccess && (
-                    <p className="text-sm text-muted-foreground text-center py-4" data-testid="text-final-empty">
-                      韻を踏むワードが見つかりませんでした
-                    </p>
-                  )}
-                </CardContent>
-              </Card>
-            </motion.div>
-          )}
-        </AnimatePresence>
         </>
         )}
       </div>
-
-      <Dialog open={rhymeDialogOpen} onOpenChange={setRhymeDialogOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Mic2 className="w-5 h-5 text-primary" />
-              <span>「{selectedWord}」の韻リスト</span>
-            </DialogTitle>
-          </DialogHeader>
-          <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
-            {rhymes.length === 0 ? (
-              <div className="text-center py-6 text-muted-foreground text-sm">
-                韻を踏むワードが見つかりませんでした
-              </div>
-            ) : (
-              rhymes.map((rhyme, i) => (
-                <motion.div
-                  key={`${rhyme}-${i}`}
-                  initial={{ opacity: 0, x: -8 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: i * 0.05 }}
-                  className="flex items-center gap-3 px-3 py-2 rounded-md bg-muted/40 dark:bg-muted/20 border border-border/40"
-                  data-testid={`text-rhyme-${i}`}
-                >
-                  <span className="text-xs text-primary font-mono font-bold">
-                    {String(i + 1).padStart(2, "0")}
-                  </span>
-                  <span className="text-sm font-medium">{rhyme}</span>
-                </motion.div>
-              ))
-            )}
-          </div>
-        </DialogContent>
-      </Dialog>
 
       <footer className="text-center py-6 text-xs text-muted-foreground">
         Powered by Gemini AI

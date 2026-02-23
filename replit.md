@@ -1,7 +1,7 @@
 # Diss & Rhyme Generator
 
 ## Overview
-A Japanese rap battle tool that uses Gemini AI to generate fictional targets, diss words, and rhyming phrases. Single-page application with a dark hip-hop themed aesthetic.
+A Japanese rap battle tool that uses Gemini AI to generate fictional targets and diss words. Single-page application with a dark hip-hop themed aesthetic.
 
 ## Architecture
 - **Frontend**: React + TypeScript with Tailwind CSS, shadcn/ui components, framer-motion animations
@@ -12,16 +12,13 @@ A Japanese rap battle tool that uses Gemini AI to generate fictional targets, di
 - Generate fictional target characters via AI
 - Adjustable intensity level (1-10) with age confirmation for level 8+
 - Generate 30 diss words against the target (with checkbox selection)
-- Find rhyming words using Japanese vowel matching logic (kana → vowel number conversion)
-- Rhyme results shown in a dialog
+- Level 8+ uses extra-aggressive prompt for harsher insults
 - **Favorites system**: Select diss words with checkboxes, add to favorites (あいうえお sorted), copy all to clipboard, clear all
 - Tab-based UI: "生成" (generation) tab and "お気に入り一覧" (favorites) tab
 
 ## API Routes
 - `GET /api/target` - Generate a fictional target person
-- `POST /api/diss` - Generate diss words (`{ target, level }`)
-- `POST /api/rhyme` - Find rhyming words (`{ word, level }`)
-- `POST /api/final_rhyme` - Score-ranked rhymes with vowel match count (`{ word }`) → `{ rhymes: [{ word, score, vowels }] }`
+- `POST /api/diss` - Generate 30 diss words (`{ target, level }`)
 
 ## Tech Stack
 - Frontend on port 5000 (served by Express + Vite)
@@ -29,6 +26,7 @@ A Japanese rap battle tool that uses Gemini AI to generate fictional targets, di
 - Dark mode by default
 
 ## Recent Changes
+- 2026-02-23: Removed rhyme APIs (/api/rhyme, /api/final_rhyme) and all rhyme-related frontend UI
+- 2026-02-23: Updated /api/diss prompt with severity-based instructions and word combination encouragement
 - 2026-02-23: Added favorites system with tab UI, checkbox selection, あいうえお sort, clipboard copy, clear
-- 2026-02-23: Added final word input form and /api/final_rhyme endpoint with vowel scoring/ranking
 - 2026-02-23: Initial build with all core features
