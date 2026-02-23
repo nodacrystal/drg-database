@@ -37,3 +37,11 @@ author = "agent"
 task = "shell.exec"
 args = "npm run dev"
 waitForPort = 5000
+
+[userenv]
+
+[userenv.shared]
+"GEMINI API KEY" = "AIzaSyDnbFqcXkUvKW5gA3yRMuNlfHMHuRglqmo"
+
+[agent]
+integrations = ["javascript_gemini_ai_integrations:2.0.0"]
