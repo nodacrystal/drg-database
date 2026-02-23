@@ -44,6 +44,18 @@ const KANA_MAP: Record<string, string> = {
   'プ':'3','ペ':'4','ポ':'5','ャ':'1','ュ':'3','ョ':'5',
 };
 
+function hasMatchingTail(candidate: string, original: string): boolean {
+  const lastTwo = original.slice(-2);
+  const lastThree = original.slice(-3);
+  const candLastTwo = candidate.slice(-2);
+  const candLastThree = candidate.slice(-3);
+
+  if (candLastTwo === lastTwo) return true;
+  if (candidate.length >= 3 && candLastThree === lastThree) return true;
+
+  return false;
+}
+
 function toVowelNumbers(text: string): string {
   let res = "";
   for (const char of text) {
@@ -114,14 +126,20 @@ export async function registerRoutes(
       }
       const { word, level } = parsed.data;
 
-      const prompt = `「${word}」と韻を踏める、レベル${level}/10の悪口を30個挙げてください。
+      const lastTwo = word.slice(-2);
+      const lastThree = word.slice(-3);
+      const prompt = `「${word}」と韻を踏める、レベル${level}/10の悪口を30個、カンマ区切りで出力してください。
 
-【厳守すべき制約ルール】
-1. **完全な別単語の徹底**: 「${word}」と漢字が1文字でも重複したり、単語の一部が含まれるものは一切禁止します。
-2. **子音の重複回避**: 母音（アイウエオ）の並びは一致させる必要がありますが、子音（K, S, T, N...）が一致してワードの中の単語が「完全に同じ音」になるもの（例：「豚野郎」に対して「雑魚野郎」「タコ野郎」など単語が完全に同じもの）は避けてください。
-3. **語尾の一致禁止**: 単語の後半（特に語尾2文字以上）において、子音と母音が完全に一致する「同音」の言葉は絶対に出力しないでください。
-4. **構造**: 母音の響きだけを借り、全く異なる意味・響きを持つ単語を選定してください。
-5. **形式**: カンマ区切りの一言（名詞または短いフレーズ）で出力してください。`;
+【制約ルール】
+1. 「${word}」と漢字が重複したり、単語の一部が含まれるものは禁止。
+2. 母音の並びを一致させつつ、子音が同じで「完全に同じ音」になるものは避ける。
+3. 母音の響きだけを借り、全く異なる意味・響きを持つ単語を選定する。
+
+【大鉄則（最重要）】
+- 最後の2文字が「${lastTwo}」と同じになる言葉は絶対に禁止。
+- 最後の3文字が「${lastThree}」と同じになる言葉も絶対に禁止。
+
+説明や番号は不要。カンマ区切りの単語だけを出力すること。`;
 
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",
@@ -134,20 +152,21 @@ export async function registerRoutes(
         .replace(/、/g, ",")
         .replace(/\n/g, ",")
         .split(",")
-        .map((w: string) => w.trim())
-        .filter((w: string) => w.length > 0 && w.length < 30);
+        .map((w: string) => w.trim().replace(/^\d+\.\s*/, ""))
+        .filter((w: string) => w.length > 0 && w.length < 15)
+        .filter((w: string) => !/[。、！？…「」（）【】]/.test(w))
+        .filter((w: string) => !/^(ご|この|その|ただし|条件|注|回答|以下|上記)/.test(w));
 
       const targetVowels = toVowelNumbers(word).slice(-3);
       const validRhymes: string[] = [];
-      const allCandidates = candidates.filter((c: string) => c !== word);
+      const allCandidates = candidates
+        .filter((c: string) => c !== word)
+        .filter((c: string) => !hasMatchingTail(c, word));
 
       for (const cand of allCandidates) {
         const candVowels = toVowelNumbers(cand);
         if (candVowels.length >= 3 && candVowels.slice(-3) === targetVowels) {
-          const lastTwo = word.slice(-2);
-          if (!cand.includes(lastTwo)) {
-            validRhymes.push(cand);
-          }
+          validRhymes.push(cand);
         }
         if (validRhymes.length >= 10) break;
       }
@@ -175,7 +194,11 @@ export async function registerRoutes(
 1. 「${word}」に含まれる漢字を1文字も使わないこと。
 2. 単語の後半が「${word}」と同じ読み（子音＋母音の一致）になる「同音語」を絶対に避けること。
 3. 可能な限り長く母音が一致する言葉を選ぶこと。
-4. 出力はカンマ区切りの単語のみ。`;
+4. 出力はカンマ区切りの単語のみ。
+
+【大鉄則】
+- ワード全体の「最後の2文字」が元の言葉「${word}」の最後の2文字「${word.slice(-2)}」と全く同じになる言葉は絶対に禁止。
+- 漢字・ひらがな・カタカナを問わず、最後の3文字が元の言葉の最後の3文字「${word.slice(-3)}」と完全一致する言葉も絶対に禁止。`;
 
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",
@@ -195,6 +218,7 @@ export async function registerRoutes(
 
       for (const cand of candidates) {
         if (cand === word) continue;
+        if (hasMatchingTail(cand, word)) continue;
         const candVowels = toVowelNumbers(cand);
 
         let score = 0;
