@@ -104,7 +104,7 @@ export default function Home() {
 
   const dissMutation = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/diss", { target, level });
+      const res = await apiRequest("POST", "/api/diss", { target, level, favorites });
       return res.json();
     },
     onSuccess: (data: { words: string[] }) => {

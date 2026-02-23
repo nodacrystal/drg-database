@@ -1,0 +1,67 @@
+ご指示いただいた「文字数制限（4〜8文字）」「具体的ダメ出し」「重複排除」「難読漢字の排除」を厳格に守るためのプロンプトを作成しました。以下のコードをReplitのPythonバックエンド部分に反映してください。
+ @app.route('/api/diss', methods=['POST'])
+def get_diss():
+    data = request.json
+    target = data.get('target')
+    level = int(data.get('level'))
+    # お気に入り一覧をフロントエンドから受け取る（後述のJS修正とセット）
+    excluded_words = data.get('favorites', [])
+    
+    severity_instruction = ""
+    if level >= 8:
+        severity_instruction = "【最重要】18歳以上向けの極めて冷酷な罵倒語にしてください。人格や存在を根底から否定する鋭い単語を選んでください。"
+    else:
+        severity_instruction = f"レベル{level}/10に応じた強さのダメ出しにしてください。"
+
+    model = genai.GenerativeModel(MODEL_NAME)
+    
+    # 指示内容：文字数制限、ダメ出し、常用漢字、重複禁止
+    prompt = f"""
+    ターゲット: {target}
+    
+    {severity_instruction}
+    
+    【厳守ルール】
+    1. 悪口・ダメ出しワードを合計30個、カンマ区切りで生成してください。
+    2. 文字数制限：ひらがなにした際、各ワード「4文字以上、8文字以内」に必ず収めてください。
+    3. 内容：抽象的な悪口ではなく「役立たず」「口だけ野郎」のような、相手の欠点を突く「明確なダメ出し」にしてください。
+    4. 使用文字：難しい漢字は一切禁止。小学生が習う漢字、または、ひらがな・カタカナのみを使用してください。
+    5. 重複禁止：以下のリストに含まれる単語は、お気に入り登録済みのため「絶対に」出力しないでください：
+       リスト：{",".join(excluded_words)}
+    6. 一般性：専門用語や造語は禁止。誰もが意味を理解できる一般的な単語の組み合わせにしてください。
+    7. 形式：出力はカンマ区切りの単語リストのみ。解説や前置きは不要です。
+    """
+    
+    response = model.generate_content(prompt)
+    words = [w.strip() for w in response.text.replace('、', ',').split(',')][:30]
+    return jsonify({"words": words})
+ ーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーーー  JavaScript：お気に入りリストをAPIに送るための修正
+生成ボタンを押した際、現在のお気に入り（favorites）をAIに伝えて重複を避けるよう、generateDiss 関数を以下のように書き換えてください。
+
+async function generateDiss() {
+    const lvl = document.getElementById('lvl').value;
+    if(lvl >= 8 && !document.getElementById('ageConfirm').checked) {
+        alert("18歳以上の確認にチェックを入れてください。");
+        return;
+    }
+    
+    document.getElementById('resultArea').innerHTML = "思考中（重複を排除しています）...";
+    
+    const res = await fetch('/api/diss', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            target: currentTarget, 
+            level: lvl,
+            favorites: favorites // ここでお気に入りリストを送信
+        })
+    });
+    const data = await res.json();
+    
+    let html = "<h4>気に入ったワードを選択（複数可）</h4>";
+    data.words.forEach((w, i) => {
+        html += `<div class="word-item"><input type="checkbox" name="dissWord" value="${w}" id="w${i}"><label for="w${i}">${w}</label></div>`;
+    });
+    document.getElementById('resultArea').innerHTML = html;
+    document.getElementById('addFavBtn').classList.remove('hidden');
+}
