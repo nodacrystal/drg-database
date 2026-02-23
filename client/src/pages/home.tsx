@@ -28,6 +28,10 @@ import {
   Loader2,
   PenLine,
   Trophy,
+  Star,
+  Copy,
+  Trash2,
+  Check,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -58,6 +62,47 @@ export default function Home() {
   const [rhymeDialogOpen, setRhymeDialogOpen] = useState(false);
   const [finalWord, setFinalWord] = useState<string>("");
   const [finalRhymes, setFinalRhymes] = useState<{ word: string; score: number; vowels: string }[]>([]);
+  const [activeTab, setActiveTab] = useState<"gen" | "fav">("gen");
+  const [favorites, setFavorites] = useState<string[]>([]);
+  const [checkedWords, setCheckedWords] = useState<Set<string>>(new Set());
+
+  const toggleChecked = useCallback((word: string) => {
+    setCheckedWords((prev) => {
+      const next = new Set(prev);
+      if (next.has(word)) next.delete(word);
+      else next.add(word);
+      return next;
+    });
+  }, []);
+
+  const addToFavorites = useCallback(() => {
+    if (checkedWords.size === 0) {
+      toast({ title: "未選択", description: "ワードを選択してください" });
+      return;
+    }
+    setFavorites((prev) => {
+      const merged = new Set(prev);
+      checkedWords.forEach((w) => merged.add(w));
+      return Array.from(merged).sort((a, b) => a.localeCompare(b, "ja"));
+    });
+    toast({ title: "追加完了", description: `${checkedWords.size}個のワードをお気に入りに追加しました` });
+    setCheckedWords(new Set());
+  }, [checkedWords, toast]);
+
+  const copyFavorites = useCallback(() => {
+    if (favorites.length === 0) {
+      toast({ title: "コピー失敗", description: "お気に入りが空です" });
+      return;
+    }
+    navigator.clipboard.writeText(favorites.join("\n")).then(() => {
+      toast({ title: "コピー完了", description: "クリップボードにコピーしました" });
+    });
+  }, [favorites, toast]);
+
+  const clearFavorites = useCallback(() => {
+    setFavorites([]);
+    toast({ title: "削除完了", description: "お気に入りをすべて削除しました" });
+  }, [toast]);
 
   const targetMutation = useMutation({
     mutationFn: async () => {
@@ -162,6 +207,70 @@ export default function Home() {
       </div>
 
       <div className="max-w-2xl mx-auto px-4 py-6 space-y-5">
+        <div className="flex rounded-lg overflow-hidden border border-border/60">
+          <button
+            onClick={() => setActiveTab("gen")}
+            className={`flex-1 py-2.5 text-sm font-medium transition-colors ${
+              activeTab === "gen"
+                ? "bg-primary text-primary-foreground"
+                : "bg-muted/40 text-muted-foreground hover:bg-muted/60"
+            }`}
+            data-testid="tab-gen"
+          >
+            生成
+          </button>
+          <button
+            onClick={() => setActiveTab("fav")}
+            className={`flex-1 py-2.5 text-sm font-medium transition-colors flex items-center justify-center gap-1.5 ${
+              activeTab === "fav"
+                ? "bg-primary text-primary-foreground"
+                : "bg-muted/40 text-muted-foreground hover:bg-muted/60"
+            }`}
+            data-testid="tab-fav"
+          >
+            <Star className="w-4 h-4" />
+            お気に入り一覧
+            {favorites.length > 0 && (
+              <Badge variant="secondary" className="ml-1 text-xs px-1.5 py-0">
+                {favorites.length}
+              </Badge>
+            )}
+          </button>
+        </div>
+
+        {activeTab === "fav" ? (
+          <Card>
+            <CardContent className="p-5 space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Star className="w-5 h-5 text-yellow-500" />
+                  <h2 className="text-lg font-semibold">お気に入り一覧（あいうえお順）</h2>
+                </div>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={copyFavorites} data-testid="button-copy-favorites">
+                    <Copy className="w-4 h-4 mr-1" />
+                    一括コピー
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={clearFavorites} data-testid="button-clear-favorites">
+                    <Trash2 className="w-4 h-4 mr-1" />
+                    全削除
+                  </Button>
+                </div>
+              </div>
+
+              {favorites.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground text-sm">
+                  お気に入りはまだありません。生成タブでワードを選択して追加してください。
+                </div>
+              ) : (
+                <div className="rounded-md border border-border/50 bg-muted/20 p-3 font-mono text-sm whitespace-pre-wrap" data-testid="text-favorites-list">
+                  {favorites.join("\n")}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        ) : (
+        <>
         <Card>
           <CardContent className="p-5 space-y-5">
             <div className="flex items-center gap-2 mb-1">
@@ -347,6 +456,7 @@ export default function Home() {
                       ))}
                     </div>
                   ) : (
+                    <>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       {dissWords.map((word, i) => (
                         <motion.div
@@ -354,14 +464,22 @@ export default function Home() {
                           initial={{ opacity: 0, scale: 0.95 }}
                           animate={{ opacity: 1, scale: 1 }}
                           transition={{ delay: i * 0.03 }}
-                          role="button"
-                          tabIndex={0}
-                          onClick={() => handleWordClick(word)}
-                          onKeyDown={(e) => { if (e.key === 'Enter') handleWordClick(word); }}
-                          className={`group relative text-left px-4 py-2.5 rounded-md border border-border/60 bg-card transition-colors cursor-pointer hover:border-primary/40 hover:bg-primary/5`}
-                          data-testid={`button-word-${i}`}
+                          className="group relative flex items-center gap-2 px-3 py-2.5 rounded-md border border-border/60 bg-card transition-colors"
+                          data-testid={`word-row-${i}`}
                         >
-                          <div className="flex items-center gap-2">
+                          <Checkbox
+                            checked={checkedWords.has(word)}
+                            onCheckedChange={() => toggleChecked(word)}
+                            data-testid={`checkbox-word-${i}`}
+                          />
+                          <div
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => handleWordClick(word)}
+                            onKeyDown={(e) => { if (e.key === 'Enter') handleWordClick(word); }}
+                            className="flex-1 flex items-center gap-2 cursor-pointer hover:text-primary transition-colors"
+                            data-testid={`button-word-${i}`}
+                          >
                             <span className="text-xs text-muted-foreground font-mono w-5">
                               {String(i + 1).padStart(2, "0")}
                             </span>
@@ -375,6 +493,19 @@ export default function Home() {
                         </motion.div>
                       ))}
                     </div>
+                    <div className="mt-3">
+                      <Button
+                        onClick={addToFavorites}
+                        disabled={checkedWords.size === 0}
+                        variant="destructive"
+                        className="w-full"
+                        data-testid="button-add-favorites"
+                      >
+                        <Star className="w-4 h-4 mr-2" />
+                        選択したワードをお気に入りに追加 {checkedWords.size > 0 && `(${checkedWords.size})`}
+                      </Button>
+                    </div>
+                    </>
                   )}
                 </CardContent>
               </Card>
@@ -461,6 +592,8 @@ export default function Home() {
             </motion.div>
           )}
         </AnimatePresence>
+        </>
+        )}
       </div>
 
       <Dialog open={rhymeDialogOpen} onOpenChange={setRhymeDialogOpen}>

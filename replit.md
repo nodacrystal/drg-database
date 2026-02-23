@@ -11,9 +11,11 @@ A Japanese rap battle tool that uses Gemini AI to generate fictional targets, di
 ## Key Features
 - Generate fictional target characters via AI
 - Adjustable intensity level (1-10) with age confirmation for level 8+
-- Generate 20 diss words against the target
+- Generate 30 diss words against the target (with checkbox selection)
 - Find rhyming words using Japanese vowel matching logic (kana → vowel number conversion)
 - Rhyme results shown in a dialog
+- **Favorites system**: Select diss words with checkboxes, add to favorites (あいうえお sorted), copy all to clipboard, clear all
+- Tab-based UI: "生成" (generation) tab and "お気に入り一覧" (favorites) tab
 
 ## API Routes
 - `GET /api/target` - Generate a fictional target person
@@ -27,5 +29,6 @@ A Japanese rap battle tool that uses Gemini AI to generate fictional targets, di
 - Dark mode by default
 
 ## Recent Changes
+- 2026-02-23: Added favorites system with tab UI, checkbox selection, あいうえお sort, clipboard copy, clear
 - 2026-02-23: Added final word input form and /api/final_rhyme endpoint with vowel scoring/ranking
 - 2026-02-23: Initial build with all core features

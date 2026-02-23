@@ -1,0 +1,117 @@
+@app.route('/api/diss', methods=['POST'])
+def get_diss():
+    data = request.json
+    target = data.get('target')
+    level = data.get('level')
+    
+    model = genai.GenerativeModel(MODEL_NAME)
+    # 韻のロジックは不安定なため排除し、純粋なワード生成に特化
+    prompt = f"ターゲット: {target}\nレベル: {level}/10\nこの人物に対する一言の悪口（名詞、または短いフレーズ）を30個、カンマ区切りで作成してください。文章にせず、単語のみで出力してください。レベルが高いほど辛辣（しんらつ：非常に厳しい）な内容にしてください。"
+    
+    response = model.generate_content(prompt)
+    # 生成数を30個に拡張
+    words = [w.strip() for w in response.text.replace('、', ',').split(',')][:30]
+    return jsonify({"words": words})
+
+
+
+<style>
+    /* UIの調整 */
+    .tab-container { display: flex; margin-bottom: 10px; }
+    .tab { padding: 10px 20px; cursor: pointer; background: #ccc; border: 1px solid #999; }
+    .tab.active { background: #333; color: white; }
+    .word-item { display: flex; align-items: center; padding: 8px; border-bottom: 1px solid #eee; }
+    .word-item input { margin-right: 10px; }
+    textarea { width: 100%; height: 200px; margin-top: 10px; font-family: monospace; }
+</style>
+
+<div class="card">
+    <div class="tab-container">
+        <div id="genTab" class="tab active" onclick="switchTab('gen')">生成</div>
+        <div id="favTab" class="tab" onclick="switchTab('fav')">お気に入り一覧</div>
+    </div>
+
+    <div id="genSection">
+        <h2>Target Setup</h2>
+        <button onclick="generateTarget()">人物を生成</button>
+        <p id="targetInfo"><b>ターゲット:</b> 未設定</p>
+        <hr>
+        <h3>Level: <span id="lvlDisp">5</span></h3>
+        <input type="range" id="lvl" min="1" max="10" value="5" oninput="document.getElementById('lvlDisp').innerText=this.value">
+        <br><br>
+        <button onclick="generateDiss()">ディスりワード30個生成</button>
+        <div id="resultArea"></div>
+        <button id="addFavBtn" class="hidden" style="margin-top:10px; background:#d32f2f;" onclick="addToFavorites()">選択したワードをお気に入りに追加</button>
+    </div>
+
+    <div id="favSection" class="hidden">
+        <h3>お気に入り一覧（あいうえお順）</h3>
+        <button onclick="copyAllFavorites()">一括コピー</button>
+        <button onclick="clearFavorites()" style="background:#666;">全削除</button>
+        <textarea id="favListText" readonly></textarea>
+    </div>
+</div>
+
+<script>
+    let favorites = [];
+
+    function switchTab(type) {
+        if(type === 'gen') {
+            document.getElementById('genSection').classList.remove('hidden');
+            document.getElementById('favSection').classList.add('hidden');
+            document.getElementById('genTab').classList.add('active');
+            document.getElementById('favTab').classList.remove('active');
+        } else {
+            document.getElementById('genSection').classList.add('hidden');
+            document.getElementById('favSection').classList.remove('hidden');
+            document.getElementById('genTab').classList.remove('active');
+            document.getElementById('favTab').classList.add('active');
+            renderFavorites();
+        }
+    }
+
+    async function generateDiss() {
+        const lvl = document.getElementById('lvl').value;
+        const res = await fetch('/api/diss', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({target: currentTarget, level: lvl})
+        });
+        const data = await res.json();
+        let html = "<h3>気に入ったものにチェックを入れてください</h3>";
+        data.words.forEach((w, i) => {
+            html += `<div class="word-item"><input type="checkbox" name="dissWord" value="${w}" id="w${i}"><label for="w${i}">${w}</label></div>`;
+        });
+        document.getElementById('resultArea').innerHTML = html;
+        document.getElementById('addFavBtn').classList.remove('hidden');
+    }
+
+    function addToFavorites() {
+        const checkboxes = document.querySelectorAll('input[name="dissWord"]:checked');
+        checkboxes.forEach(cb => {
+            if(!favorites.includes(cb.value)) favorites.push(cb.value);
+        });
+        // あいうえお順（ロケール順）に整理整頓
+        favorites.sort((a, b) => a.localeCompare(b, 'ja'));
+        alert(checkboxes.length + "個のワードを追加しました。お気に入りタブを確認してください。");
+    }
+
+    function renderFavorites() {
+        // 改行して整理
+        document.getElementById('favListText').value = favorites.join('\n');
+    }
+
+    function copyAllFavorites() {
+        const text = document.getElementById('favListText');
+        text.select();
+        document.execCommand('copy');
+        alert("クリップボードにコピーしました");
+    }
+
+    function clearFavorites() {
+        if(confirm("お気に入りをすべて削除しますか？")) {
+            favorites = [];
+            renderFavorites();
+        }
+    }
+</script>
