@@ -3,6 +3,7 @@ import { useMutation } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
@@ -42,6 +43,7 @@ function getLevelColor(level: number): string {
 
 export default function Home() {
   const { toast } = useToast();
+  const [nameInput, setNameInput] = useState<string>("");
   const [target, setTarget] = useState<string>("");
   const [level, setLevel] = useState<number>(5);
   const [ageConfirmed, setAgeConfirmed] = useState(false);
@@ -91,7 +93,10 @@ export default function Home() {
 
   const targetMutation = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest("GET", "/api/target");
+      const url = nameInput.trim()
+        ? `/api/target?name=${encodeURIComponent(nameInput.trim())}`
+        : "/api/target";
+      const res = await apiRequest("GET", url);
       return res.json();
     },
     onSuccess: (data: { target: string }) => {
@@ -227,6 +232,22 @@ export default function Home() {
             <div className="flex items-center gap-2 mb-1">
               <Crosshair className="w-5 h-5 text-primary" />
               <h2 className="text-lg font-semibold">ターゲット設定</h2>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-sm text-muted-foreground" htmlFor="name-input">
+                名前を入力（任意）
+              </label>
+              <Input
+                id="name-input"
+                placeholder="例：ヒカキン、松本人志、岸田文雄..."
+                value={nameInput}
+                onChange={(e) => setNameInput(e.target.value)}
+                data-testid="input-name"
+              />
+              <p className="text-xs text-muted-foreground">
+                入力すると指定した人物ベースで生成。空欄ならランダム生成。
+              </p>
             </div>
 
             <div className="flex items-start gap-3">

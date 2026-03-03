@@ -29,11 +29,36 @@ export async function registerRoutes(
   app: Express
 ): Promise<Server> {
 
-  app.get("/api/target", async (_req, res) => {
+  app.get("/api/target", async (req, res) => {
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: `あなたは架空のキャラクター生成AIです。
+      const nameQuery = typeof req.query.name === "string" ? req.query.name.trim() : "";
+
+      let prompt: string;
+      if (nameQuery) {
+        prompt = `あなたは架空のキャラクター生成AIです。
+ユーザーが「${nameQuery}」という名前を入力しました。
+この名前に該当する実在の有名人・著名人を特定し、その人物を元にした架空キャラクターを生成してください。
+
+【ルール】
+1. 名前：「${nameQuery}」の名前を少しだけもじった偽名にすること（例：松本人志→松元仁志、ヒカキン→ピカキンなど）
+2. 元ネタ：「${nameQuery}」の実際の情報をできるだけ正確に反映すること
+3. プロフィール：以下の情報を含めること。知っている情報はできるだけ正確に、わからない情報は架空で補完すること。
+   - 職業・肩書き
+   - 見た目の特徴（体型、顔立ち、服装など）
+   - 性格の特徴（長所と短所）
+   - 世間からの評判やイメージ
+   - 過去のスキャンダルや問題行動（実際の話をベースに脚色。見つからなければ架空で作成）
+4. 出力フォーマット：
+   名前：〇〇〇〇
+   職業：〇〇
+   見た目：〇〇
+   性格：〇〇
+   評判：〇〇
+   黒歴史：〇〇
+
+必ず上記フォーマットで出力してください。余計な前置きや説明は不要です。`;
+      } else {
+        prompt = `あなたは架空のキャラクター生成AIです。
 以下のルールに従って、実在する有名人（タレント、政治家、インフルエンサー、YouTuber、歌手、俳優、お笑い芸人など）を一人ランダムに選び、その人物を元にした架空キャラクターを生成してください。
 
 【ルール】
@@ -53,7 +78,12 @@ export async function registerRoutes(
    評判：〇〇
    黒歴史：〇〇
 
-必ず上記フォーマットで出力してください。余計な前置きや説明は不要です。`,
+必ず上記フォーマットで出力してください。余計な前置きや説明は不要です。`;
+      }
+
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: prompt,
         config: {
           maxOutputTokens: 8192,
           safetySettings,

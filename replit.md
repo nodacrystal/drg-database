@@ -10,6 +10,9 @@ A Japanese rap battle tool that uses Gemini AI to generate fictional targets bas
 - **Gemini Safety Settings**: All harm categories set to OFF for unrestricted content generation
 
 ## Key Features
+- **Name input field** (optional): User can type a specific person's name to generate a profile based on that person
+  - If name is provided: searches for that person and generates profile based on their real traits (unknown info filled with fiction)
+  - If name is empty: randomly picks a celebrity and generates profile
 - Generate fictional target characters based on real celebrities (name slightly modified, detailed profile)
 - Target profiles include: 職業, 見た目, 性格, 評判, 黒歴史
 - Adjustable intensity level (1-10) with age confirmation for level 8+
@@ -21,7 +24,7 @@ A Japanese rap battle tool that uses Gemini AI to generate fictional targets bas
 - Tab-based UI: "生成" (generation) tab and "お気に入り一覧" (favorites) tab
 
 ## API Routes
-- `GET /api/target` - Generate a fictional target based on a real public figure (modified name + detailed profile)
+- `GET /api/target?name=` - Generate a fictional target based on a real public figure (modified name + detailed profile). Optional `name` query param for specific person lookup.
 - `POST /api/diss` - Generate 30 personalized diss words (`{ target, level, history }`)
 
 ## Tech Stack
@@ -30,6 +33,7 @@ A Japanese rap battle tool that uses Gemini AI to generate fictional targets bas
 - Dark mode by default
 
 ## Recent Changes
+- 2026-03-03: Added optional name input field for targeted person search
 - 2026-03-03: Target generation now based on real celebrities with modified names and detailed profiles
 - 2026-03-03: Diss words now personalized to target's traits, appearance, reputation, and scandals
 - 2026-03-03: Gemini API safety settings disabled (all HarmCategory set to OFF)
