@@ -81,7 +81,7 @@ export default function Home() {
       toast({ title: "コピー失敗", description: "お気に入りが空です" });
       return;
     }
-    navigator.clipboard.writeText(favorites.join("\n")).then(() => {
+    navigator.clipboard.writeText(favorites.map((w) => `[${w}]`).join("")).then(() => {
       toast({ title: "コピー完了", description: "クリップボードにコピーしました" });
     });
   }, [favorites, toast]);
@@ -220,7 +220,7 @@ export default function Home() {
                 </div>
               ) : (
                 <div className="rounded-md border border-border/50 bg-muted/20 p-3 font-mono text-sm whitespace-pre-wrap" data-testid="text-favorites-list">
-                  {favorites.join("\n")}
+                  {favorites.map((w) => `[${w}]`).join("")}
                 </div>
               )}
             </CardContent>
