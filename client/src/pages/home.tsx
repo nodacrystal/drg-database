@@ -277,7 +277,7 @@ export default function Home() {
                   className="rounded-md bg-muted/50 dark:bg-muted/30 px-4 py-3 border border-border/50"
                 >
                   <p className="text-sm text-muted-foreground mb-1">ターゲット:</p>
-                  <p className="font-medium" data-testid="text-target">{target}</p>
+                  <div className="font-medium whitespace-pre-line text-sm leading-relaxed" data-testid="text-target">{target}</div>
                 </motion.div>
               ) : (
                 <motion.div
