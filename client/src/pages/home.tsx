@@ -25,6 +25,12 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
+interface DissGroups {
+  four: string[];
+  three: string[];
+  two: string[];
+}
+
 function getLevelLabel(level: number): string {
   if (level <= 2) return "マイルド";
   if (level <= 4) return "ピリ辛";
@@ -47,14 +53,30 @@ export default function Home() {
   const [target, setTarget] = useState<string>("");
   const [level, setLevel] = useState<number>(5);
   const [ageConfirmed, setAgeConfirmed] = useState(false);
-  const [dissWords, setDissWords] = useState<string[]>([]);
+  const [dissGroups, setDissGroups] = useState<DissGroups | null>(null);
   const [activeTab, setActiveTab] = useState<"gen" | "fav">("gen");
   const [favorites, setFavorites] = useState<string[]>([]);
   const [checkedWords, setCheckedWords] = useState<Set<string>>(new Set());
   const [generatedHistory, setGeneratedHistory] = useState<string[]>([]);
+  const [selectedFavWord, setSelectedFavWord] = useState<string | null>(null);
+  const [rhymeWords, setRhymeWords] = useState<string[]>([]);
+  const [checkedRhymes, setCheckedRhymes] = useState<Set<string>>(new Set());
+
+  const allDissWords = dissGroups
+    ? [...dissGroups.four, ...dissGroups.three, ...dissGroups.two]
+    : [];
 
   const toggleChecked = useCallback((word: string) => {
     setCheckedWords((prev) => {
+      const next = new Set(prev);
+      if (next.has(word)) next.delete(word);
+      else next.add(word);
+      return next;
+    });
+  }, []);
+
+  const toggleRhymeChecked = useCallback((word: string) => {
+    setCheckedRhymes((prev) => {
       const next = new Set(prev);
       if (next.has(word)) next.delete(word);
       else next.add(word);
@@ -76,6 +98,20 @@ export default function Home() {
     setCheckedWords(new Set());
   }, [checkedWords, toast]);
 
+  const addRhymesToFavorites = useCallback(() => {
+    if (checkedRhymes.size === 0) {
+      toast({ title: "未選択", description: "ワードを選択してください" });
+      return;
+    }
+    setFavorites((prev) => {
+      const merged = new Set(prev);
+      checkedRhymes.forEach((w) => merged.add(w));
+      return Array.from(merged).sort((a, b) => a.localeCompare(b, "ja"));
+    });
+    toast({ title: "追加完了", description: `${checkedRhymes.size}個のワードをお気に入りに追加しました` });
+    setCheckedRhymes(new Set());
+  }, [checkedRhymes, toast]);
+
   const copyFavorites = useCallback(() => {
     if (favorites.length === 0) {
       toast({ title: "コピー失敗", description: "お気に入りが空です" });
@@ -88,6 +124,9 @@ export default function Home() {
 
   const clearFavorites = useCallback(() => {
     setFavorites([]);
+    setSelectedFavWord(null);
+    setRhymeWords([]);
+    setCheckedRhymes(new Set());
     toast({ title: "削除完了", description: "お気に入りをすべて削除しました" });
   }, [toast]);
 
@@ -101,7 +140,7 @@ export default function Home() {
     },
     onSuccess: (data: { target: string }) => {
       setTarget(data.target);
-      setDissWords([]);
+      setDissGroups(null);
     },
     onError: () => {
       toast({ title: "エラー", description: "ターゲット生成に失敗しました", variant: "destructive" });
@@ -118,17 +157,32 @@ export default function Home() {
       const res = await apiRequest("POST", "/api/diss", { target, level, history: generatedHistory });
       return res.json();
     },
-    onSuccess: (data: { words: string[] }) => {
-      setDissWords(data.words);
+    onSuccess: (data: { groups: DissGroups }) => {
+      setDissGroups(data.groups);
       setCheckedWords(new Set());
+      const allWords = [...data.groups.four, ...data.groups.three, ...data.groups.two];
       setGeneratedHistory((prev) => {
         const next = [...prev];
-        data.words.forEach((w) => { if (!next.includes(w)) next.push(w); });
+        allWords.forEach((w) => { if (!next.includes(w)) next.push(w); });
         return next;
       });
     },
     onError: () => {
       toast({ title: "エラー", description: "ワード生成に失敗しました", variant: "destructive" });
+    },
+  });
+
+  const rhymeMutation = useMutation({
+    mutationFn: async (word: string) => {
+      const res = await apiRequest("POST", "/api/rhyme", { word, target, level });
+      return res.json();
+    },
+    onSuccess: (data: { words: string[] }) => {
+      setRhymeWords(data.words);
+      setCheckedRhymes(new Set());
+    },
+    onError: () => {
+      toast({ title: "エラー", description: "韻の生成に失敗しました", variant: "destructive" });
     },
   });
 
@@ -144,6 +198,49 @@ export default function Home() {
     dissMutation.mutate();
   }, [target, level, ageConfirmed, dissMutation, toast]);
 
+  const handleRhymeGenerate = useCallback((word: string) => {
+    if (!target) {
+      toast({ title: "ターゲット未設定", description: "先に生成タブでターゲットを生成してください" });
+      return;
+    }
+    if (level >= 8 && !ageConfirmed) {
+      toast({ title: "年齢確認", description: "レベル8以上は年齢確認が必要です", variant: "destructive" });
+      return;
+    }
+    setSelectedFavWord(word);
+    setRhymeWords([]);
+    setCheckedRhymes(new Set());
+    rhymeMutation.mutate(word);
+  }, [target, level, ageConfirmed, rhymeMutation, toast]);
+
+  const renderWordGroup = (title: string, words: string[], startIndex: number) => (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <Badge variant="outline" className="text-xs font-mono">{title}</Badge>
+        <span className="text-xs text-muted-foreground">{words.length}個</span>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+        {words.map((word, i) => (
+          <motion.div
+            key={`${word}-${startIndex + i}`}
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ delay: (startIndex + i) * 0.02 }}
+            className="flex items-center gap-2 px-2.5 py-2 rounded-md border border-border/60 bg-card transition-colors"
+            data-testid={`word-row-${startIndex + i}`}
+          >
+            <Checkbox
+              checked={checkedWords.has(word)}
+              onCheckedChange={() => toggleChecked(word)}
+              data-testid={`checkbox-word-${startIndex + i}`}
+            />
+            <span className="text-sm font-medium truncate">{word}</span>
+          </motion.div>
+        ))}
+      </div>
+    </div>
+  );
+
   return (
     <div className="min-h-screen bg-background">
       <div className="relative overflow-hidden border-b border-border/50">
@@ -157,7 +254,7 @@ export default function Home() {
             <Music className="w-7 h-7 text-primary" />
           </div>
           <p className="text-muted-foreground text-sm">
-            AIがターゲットを生成し、ディスワードを提案します
+            AIがターゲットを生成し、ディスワードと韻を提案します
           </p>
         </div>
       </div>
@@ -195,36 +292,122 @@ export default function Home() {
         </div>
 
         {activeTab === "fav" ? (
-          <Card>
-            <CardContent className="p-5 space-y-4">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Star className="w-5 h-5 text-yellow-500" />
-                  <h2 className="text-lg font-semibold">お気に入り一覧（あいうえお順）</h2>
+          <div className="space-y-5">
+            <Card>
+              <CardContent className="p-5 space-y-4">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-2">
+                    <Star className="w-5 h-5 text-yellow-500" />
+                    <h2 className="text-lg font-semibold">お気に入り一覧</h2>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button variant="outline" size="sm" onClick={copyFavorites} data-testid="button-copy-favorites">
+                      <Copy className="w-4 h-4 mr-1" />
+                      一括コピー
+                    </Button>
+                    <Button variant="outline" size="sm" onClick={clearFavorites} data-testid="button-clear-favorites">
+                      <Trash2 className="w-4 h-4 mr-1" />
+                      全削除
+                    </Button>
+                  </div>
                 </div>
-                <div className="flex gap-2">
-                  <Button variant="outline" size="sm" onClick={copyFavorites} data-testid="button-copy-favorites">
-                    <Copy className="w-4 h-4 mr-1" />
-                    一括コピー
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={clearFavorites} data-testid="button-clear-favorites">
-                    <Trash2 className="w-4 h-4 mr-1" />
-                    全削除
-                  </Button>
-                </div>
-              </div>
 
-              {favorites.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground text-sm">
-                  お気に入りはまだありません。生成タブでワードを選択して追加してください。
-                </div>
-              ) : (
-                <div className="rounded-md border border-border/50 bg-muted/20 p-3 font-mono text-sm whitespace-pre-wrap" data-testid="text-favorites-list">
-                  {favorites.map((w) => `[${w}]`).join("")}
-                </div>
+                {favorites.length === 0 ? (
+                  <div className="text-center py-8 text-muted-foreground text-sm">
+                    お気に入りはまだありません。生成タブでワードを選択して追加してください。
+                  </div>
+                ) : (
+                  <>
+                    <div className="rounded-md border border-border/50 bg-muted/20 p-3 font-mono text-sm whitespace-pre-wrap" data-testid="text-favorites-list">
+                      {favorites.map((w) => `[${w}]`).join("")}
+                    </div>
+
+                    <div className="space-y-2">
+                      <p className="text-sm text-muted-foreground">
+                        ワードをタップして韻を踏んだ悪口を生成：
+                      </p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {favorites.map((word) => (
+                          <Button
+                            key={word}
+                            variant={selectedFavWord === word ? "default" : "outline"}
+                            size="sm"
+                            onClick={() => handleRhymeGenerate(word)}
+                            disabled={rhymeMutation.isPending}
+                            className="text-sm"
+                            data-testid={`button-rhyme-${word}`}
+                          >
+                            {word}
+                          </Button>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </CardContent>
+            </Card>
+
+            <AnimatePresence>
+              {(selectedFavWord && (rhymeMutation.isPending || rhymeWords.length > 0)) && (
+                <motion.div
+                  initial={{ opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -12 }}
+                >
+                  <Card>
+                    <CardContent className="p-5 space-y-4">
+                      <div className="flex items-center gap-2">
+                        <Music className="w-5 h-5 text-primary" />
+                        <h2 className="text-lg font-semibold">
+                          「{selectedFavWord}」の韻ワード
+                        </h2>
+                      </div>
+
+                      {rhymeMutation.isPending ? (
+                        <div className="space-y-2">
+                          {Array.from({ length: 5 }).map((_, i) => (
+                            <Skeleton key={i} className="h-10 w-full rounded-md" />
+                          ))}
+                        </div>
+                      ) : (
+                        <>
+                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                            {rhymeWords.map((word, i) => (
+                              <motion.div
+                                key={`rhyme-${word}-${i}`}
+                                initial={{ opacity: 0, scale: 0.95 }}
+                                animate={{ opacity: 1, scale: 1 }}
+                                transition={{ delay: i * 0.03 }}
+                                className="flex items-center gap-2 px-2.5 py-2 rounded-md border border-border/60 bg-card transition-colors"
+                                data-testid={`rhyme-row-${i}`}
+                              >
+                                <Checkbox
+                                  checked={checkedRhymes.has(word)}
+                                  onCheckedChange={() => toggleRhymeChecked(word)}
+                                  data-testid={`checkbox-rhyme-${i}`}
+                                />
+                                <span className="text-sm font-medium truncate">{word}</span>
+                              </motion.div>
+                            ))}
+                          </div>
+                          <Button
+                            onClick={addRhymesToFavorites}
+                            disabled={checkedRhymes.size === 0}
+                            variant="destructive"
+                            className="w-full"
+                            data-testid="button-add-rhymes-favorites"
+                          >
+                            <Star className="w-4 h-4 mr-2" />
+                            選択した韻ワードをお気に入りに追加 {checkedRhymes.size > 0 && `(${checkedRhymes.size})`}
+                          </Button>
+                        </>
+                      )}
+                    </CardContent>
+                  </Card>
+                </motion.div>
               )}
-            </CardContent>
-          </Card>
+            </AnimatePresence>
+          </div>
         ) : (
         <>
         <Card>
@@ -270,7 +453,7 @@ export default function Home() {
                   size="icon"
                   onClick={() => {
                     setTarget("");
-                    setDissWords([]);
+                    setDissGroups(null);
                   }}
                   data-testid="button-reset-target"
                 >
@@ -402,7 +585,7 @@ export default function Home() {
               ) : (
                 <Zap className="w-4 h-4 mr-2" />
               )}
-              ワード30個を生成
+              ワード30個を生成（4文字×10 / 3文字×10 / 2文字×10）
             </Button>
 
             {generatedHistory.length > 0 && (
@@ -420,7 +603,7 @@ export default function Home() {
         </Card>
 
         <AnimatePresence>
-          {(dissWords.length > 0 || dissMutation.isPending) && (
+          {(dissGroups || dissMutation.isPending) && (
             <motion.div
               initial={{ opacity: 0, y: 12 }}
               animate={{ opacity: 1, y: 0 }}
@@ -439,33 +622,14 @@ export default function Home() {
                         <Skeleton key={i} className="h-10 w-full rounded-md" />
                       ))}
                     </div>
-                  ) : (
+                  ) : dissGroups ? (
                     <>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      {dissWords.map((word, i) => (
-                        <motion.div
-                          key={`${word}-${i}`}
-                          initial={{ opacity: 0, scale: 0.95 }}
-                          animate={{ opacity: 1, scale: 1 }}
-                          transition={{ delay: i * 0.03 }}
-                          className="group relative flex items-center gap-2 px-3 py-2.5 rounded-md border border-border/60 bg-card transition-colors"
-                          data-testid={`word-row-${i}`}
-                        >
-                          <Checkbox
-                            checked={checkedWords.has(word)}
-                            onCheckedChange={() => toggleChecked(word)}
-                            data-testid={`checkbox-word-${i}`}
-                          />
-                          <div className="flex-1 flex items-center gap-2">
-                            <span className="text-xs text-muted-foreground font-mono w-5">
-                              {String(i + 1).padStart(2, "0")}
-                            </span>
-                            <span className="text-sm font-medium truncate">{word}</span>
-                          </div>
-                        </motion.div>
-                      ))}
+                    <div className="space-y-5">
+                      {renderWordGroup("4文字", dissGroups.four, 0)}
+                      {renderWordGroup("3文字", dissGroups.three, 10)}
+                      {renderWordGroup("2文字", dissGroups.two, 20)}
                     </div>
-                    <div className="mt-3">
+                    <div className="mt-4">
                       <Button
                         onClick={addToFavorites}
                         disabled={checkedWords.size === 0}
@@ -478,7 +642,7 @@ export default function Home() {
                       </Button>
                     </div>
                     </>
-                  )}
+                  ) : null}
                 </CardContent>
               </Card>
             </motion.div>
