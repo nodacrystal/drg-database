@@ -11,6 +11,7 @@ const dissRequestSchema = z.object({
 
 const rhymeRequestSchema = z.object({
   word: z.string().min(1),
+  romaji: z.string().min(1),
   target: z.string().min(1),
   level: z.number().int().min(1).max(10),
 });
@@ -29,6 +30,29 @@ const safetySettings = [
   { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.OFF },
   { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.OFF },
 ];
+
+interface WordEntry {
+  word: string;
+  romaji: string;
+}
+
+function parseWordEntries(section: string): WordEntry[] {
+  const normalized = section
+    .replace(/、/g, ",")
+    .replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  const entries: WordEntry[] = [];
+  for (const line of lines) {
+    const items = line.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+    for (const item of items) {
+      const match = item.match(/^(.+?)\s*[\(（]([a-zA-Z\s\-']+)[\)）]$/);
+      if (match) {
+        entries.push({ word: match[1].trim(), romaji: match[2].trim().toLowerCase() });
+      }
+    }
+  }
+  return entries;
+}
 
 export async function registerRoutes(
   httpServer: Server,
@@ -136,18 +160,27 @@ ${severityInstruction}
 6. 重複禁止：以下の【既出リスト】にあるワードは絶対に出力しないこと。
 【既出リスト】: ${historyList}
 
-【出力フォーマット】必ずこの形式で出力してください：
-===4文字===
-ワード1,ワード2,ワード3,ワード4,ワード5,ワード6,ワード7,ワード8,ワード9,ワード10
-===3文字===
-ワード1,ワード2,ワード3,ワード4,ワード5,ワード6,ワード7,ワード8,ワード9,ワード10
-===2文字===
-ワード1,ワード2,ワード3,ワード4,ワード5,ワード6,ワード7,ワード8,ワード9,ワード10
+【文字数ルール - 読み（発音）でカウント】
+- 文字数は「読み方」の音数でカウントする。書いた文字数ではない。
+- 例：「東京」→読み「とうきょう」→4音、「無能」→読み「むのう」→3音、「クズ」→読み「くず」→2音
+- 拗音（きょ、しゃ等）は1音としてカウント
+- 長音（ー）も1音としてカウント
 
-【文字数の数え方】
-- ひらがな・カタカナ・漢字はすべて1文字としてカウント
-- 例：「クズ」=2文字、「役立たず」=4文字、「デブ」=2文字、「ゴミ虫」=3文字
-- 各グループの文字数を厳密に守ること`;
+【出力フォーマット - 厳守】各ワードの後ろに半角括弧()でローマ字読みを付けること。全ての文字にローマ字で母音を含めた読みを記載すること。
+===4音===
+ワード1(romaji),ワード2(romaji),ワード3(romaji),ワード4(romaji),ワード5(romaji),ワード6(romaji),ワード7(romaji),ワード8(romaji),ワード9(romaji),ワード10(romaji)
+===3音===
+ワード1(romaji),ワード2(romaji),ワード3(romaji),ワード4(romaji),ワード5(romaji),ワード6(romaji),ワード7(romaji),ワード8(romaji),ワード9(romaji),ワード10(romaji)
+===2音===
+ワード1(romaji),ワード2(romaji),ワード3(romaji),ワード4(romaji),ワード5(romaji),ワード6(romaji),ワード7(romaji),ワード8(romaji),ワード9(romaji),ワード10(romaji)
+
+【例】
+===4音===
+役立たず(yakutatazu),面の皮(menno kawa),出しゃばり(deshabari)...
+===3音===
+ゴミ虫(gomimushi),無能(munou),臆病(okubyou)...
+===2音===
+クズ(kuzu),カス(kasu),ブタ(buta)...`;
 
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",
@@ -160,41 +193,33 @@ ${severityInstruction}
 
       const text = response.text || "";
 
-      const groups: { four: string[]; three: string[]; two: string[] } = {
+      const groups: { four: WordEntry[]; three: WordEntry[]; two: WordEntry[] } = {
         four: [],
         three: [],
         two: [],
       };
 
-      const sections = text.split(/===\s*[234]文字\s*===/);
-
-      const parseWords = (section: string): string[] => {
-        return section
-          .replace(/、/g, ",")
-          .replace(/\n/g, ",")
-          .split(",")
-          .map((w) => w.trim())
-          .filter((w) => w.length > 0 && w.length < 20);
-      };
+      const sections = text.split(/===\s*[234]音\s*===/);
 
       const seen = new Set<string>();
-      const dedupeFilter = (words: string[]): string[] => {
-        return words.filter((w) => {
-          if (seen.has(w)) return false;
-          seen.add(w);
+      const dedupeEntries = (entries: WordEntry[]): WordEntry[] => {
+        return entries.filter((e) => {
+          if (seen.has(e.word)) return false;
+          seen.add(e.word);
           return true;
         });
       };
 
       if (sections.length >= 4) {
-        groups.four = dedupeFilter(parseWords(sections[1])).slice(0, 10);
-        groups.three = dedupeFilter(parseWords(sections[2])).slice(0, 10);
-        groups.two = dedupeFilter(parseWords(sections[3])).slice(0, 10);
+        groups.four = dedupeEntries(parseWordEntries(sections[1])).slice(0, 10);
+        groups.three = dedupeEntries(parseWordEntries(sections[2])).slice(0, 10);
+        groups.two = dedupeEntries(parseWordEntries(sections[3])).slice(0, 10);
       } else {
-        const allWords = dedupeFilter(parseWords(text));
-        groups.four = allWords.filter((w) => w.length === 4).slice(0, 10);
-        groups.three = allWords.filter((w) => w.length === 3).slice(0, 10);
-        groups.two = allWords.filter((w) => w.length === 2).slice(0, 10);
+        const allEntries = dedupeEntries(parseWordEntries(text));
+        const countVowels = (r: string) => r.replace(/[^aeiou]/gi, "").length;
+        groups.four = allEntries.filter((e) => countVowels(e.romaji) >= 4).slice(0, 10);
+        groups.three = allEntries.filter((e) => countVowels(e.romaji) === 3).slice(0, 10);
+        groups.two = allEntries.filter((e) => countVowels(e.romaji) <= 2).slice(0, 10);
       }
 
       res.json({ groups });
@@ -208,9 +233,11 @@ ${severityInstruction}
     try {
       const parsed = rhymeRequestSchema.safeParse(req.body);
       if (!parsed.success) {
-        return res.status(400).json({ error: "ワード、ターゲット、レベルが必要です" });
+        return res.status(400).json({ error: "ワード、ローマ字、ターゲット、レベルが必要です" });
       }
-      const { word, target, level } = parsed.data;
+      const { word, romaji, target, level } = parsed.data;
+
+      const vowels = romaji.replace(/[^aeiou]/gi, "").toLowerCase();
 
       let severityInstruction = "";
       if (level >= 8) {
@@ -223,6 +250,8 @@ ${severityInstruction}
 以下のワードと「韻を踏んだ」悪口を10個生成してください。
 
 【元ワード】${word}
+【ローマ字読み】${romaji}
+【母音パターン】${vowels}
 
 【ターゲット情報】
 ${target}
@@ -230,11 +259,11 @@ ${target}
 ${severityInstruction}
 
 【韻の定義 - 最重要ルール】
-・「韻を踏む」とは、母音の並びが一致することです。
-・まず「${word}」をひらがなに変換し、各文字の母音を抽出してください。
-・生成するワードもその母音の並びに一致させてください。
-・母音の一致率は高いほど良い。完全一致が理想。最低でも半分以上の母音が一致すること。
-・文字数は元ワード「${word}」と同じ文字数にすること。
+・「韻を踏む」とは、ローマ字にした時の母音の並びが一致することです。
+・元ワードの母音パターンは「${vowels}」です。
+・生成するワードのローマ字の母音パターンが「${vowels}」に最大限一致するようにしてください。
+・母音の一致率が高いワードを優先的に採用すること。完全一致が理想。
+・その上で、悪口・汚い言葉・攻撃的な表現を選ぶこと。
 
 【絶対禁止 - 同一語の排除】
 ・元ワード「${word}」と同じ言葉、同じ意味の言葉は韻を踏んだことにならない。
@@ -242,7 +271,8 @@ ${severityInstruction}
 ・例：「ヤロウ」と「野郎」は同じ言葉なので禁止。「バカ」と「馬鹿」も禁止。
 
 【出力 - 厳守】
-カンマ区切りで10個のワードだけを1行で出力せよ。説明、注釈、前置き、思考プロセスは一切書くな。`;
+各ワードの後ろに半角括弧()でローマ字読みを付けること。カンマ区切りで10個だけ1行で出力せよ。説明、注釈、前置きは一切書くな。
+例：死にかけ(shinikake),腐りかけ(kusarikake),...`;
 
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",
@@ -254,22 +284,17 @@ ${severityInstruction}
       });
 
       const text = response.text || "";
+      const entries = parseWordEntries(text);
+
       const rhymeSeen = new Set<string>();
       rhymeSeen.add(word);
-      const words = text
-        .replace(/、/g, ",")
-        .replace(/\n/g, ",")
-        .split(",")
-        .map((w: string) => w.trim())
-        .filter((w: string) => {
-          if (w.length === 0 || w.length >= 20) return false;
-          if (rhymeSeen.has(w)) return false;
-          rhymeSeen.add(w);
-          return true;
-        })
-        .slice(0, 10);
+      const filtered = entries.filter((e) => {
+        if (rhymeSeen.has(e.word)) return false;
+        rhymeSeen.add(e.word);
+        return true;
+      }).slice(0, 10);
 
-      res.json({ words });
+      res.json({ words: filtered });
     } catch (error) {
       console.error("Rhyme generation error:", error);
       res.status(500).json({ error: "韻生成に失敗しました" });

@@ -25,10 +25,19 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
+interface WordEntry {
+  word: string;
+  romaji: string;
+}
+
 interface DissGroups {
-  four: string[];
-  three: string[];
-  two: string[];
+  four: WordEntry[];
+  three: WordEntry[];
+  two: WordEntry[];
+}
+
+function extractVowels(romaji: string): string {
+  return romaji.replace(/[^aeiou]/gi, "").toLowerCase();
 }
 
 function getLevelLabel(level: number): string {
@@ -55,16 +64,17 @@ export default function Home() {
   const [ageConfirmed, setAgeConfirmed] = useState(false);
   const [dissGroups, setDissGroups] = useState<DissGroups | null>(null);
   const [activeTab, setActiveTab] = useState<"gen" | "fav">("gen");
-  const [favorites, setFavorites] = useState<string[]>([]);
+  const [favorites, setFavorites] = useState<WordEntry[]>([]);
   const [checkedWords, setCheckedWords] = useState<Set<string>>(new Set());
   const [generatedHistory, setGeneratedHistory] = useState<string[]>([]);
-  const [selectedFavWord, setSelectedFavWord] = useState<string | null>(null);
-  const [rhymeWords, setRhymeWords] = useState<string[]>([]);
+  const [selectedFavWord, setSelectedFavWord] = useState<WordEntry | null>(null);
+  const [rhymeWords, setRhymeWords] = useState<WordEntry[]>([]);
   const [checkedRhymes, setCheckedRhymes] = useState<Set<string>>(new Set());
 
-  const allDissWords = dissGroups
-    ? [...dissGroups.four, ...dissGroups.three, ...dissGroups.two]
-    : [];
+  const getAllEntries = (): WordEntry[] => {
+    if (!dissGroups) return [];
+    return [...dissGroups.four, ...dissGroups.three, ...dissGroups.two];
+  };
 
   const toggleChecked = useCallback((word: string) => {
     setCheckedWords((prev) => {
@@ -89,35 +99,38 @@ export default function Home() {
       toast({ title: "未選択", description: "ワードを選択してください" });
       return;
     }
+    const allEntries = getAllEntries();
+    const selectedEntries = allEntries.filter((e) => checkedWords.has(e.word));
     setFavorites((prev) => {
-      const merged = new Set(prev);
-      checkedWords.forEach((w) => merged.add(w));
-      return Array.from(merged).sort((a, b) => a.localeCompare(b, "ja"));
+      const existingWords = new Set(prev.map((e) => e.word));
+      const newEntries = selectedEntries.filter((e) => !existingWords.has(e.word));
+      return [...prev, ...newEntries].sort((a, b) => a.word.localeCompare(b.word, "ja"));
     });
     toast({ title: "追加完了", description: `${checkedWords.size}個のワードをお気に入りに追加しました` });
     setCheckedWords(new Set());
-  }, [checkedWords, toast]);
+  }, [checkedWords, dissGroups, toast]);
 
   const addRhymesToFavorites = useCallback(() => {
     if (checkedRhymes.size === 0) {
       toast({ title: "未選択", description: "ワードを選択してください" });
       return;
     }
+    const selectedEntries = rhymeWords.filter((e) => checkedRhymes.has(e.word));
     setFavorites((prev) => {
-      const merged = new Set(prev);
-      checkedRhymes.forEach((w) => merged.add(w));
-      return Array.from(merged).sort((a, b) => a.localeCompare(b, "ja"));
+      const existingWords = new Set(prev.map((e) => e.word));
+      const newEntries = selectedEntries.filter((e) => !existingWords.has(e.word));
+      return [...prev, ...newEntries].sort((a, b) => a.word.localeCompare(b.word, "ja"));
     });
     toast({ title: "追加完了", description: `${checkedRhymes.size}個のワードをお気に入りに追加しました` });
     setCheckedRhymes(new Set());
-  }, [checkedRhymes, toast]);
+  }, [checkedRhymes, rhymeWords, toast]);
 
   const copyFavorites = useCallback(() => {
     if (favorites.length === 0) {
       toast({ title: "コピー失敗", description: "お気に入りが空です" });
       return;
     }
-    navigator.clipboard.writeText(favorites.map((w) => `[${w}]`).join("")).then(() => {
+    navigator.clipboard.writeText(favorites.map((e) => `[${e.word}]`).join("")).then(() => {
       toast({ title: "コピー完了", description: "クリップボードにコピーしました" });
     });
   }, [favorites, toast]);
@@ -148,7 +161,7 @@ export default function Home() {
   });
 
   const resetHistory = useCallback(() => {
-    setGeneratedHistory([...favorites]);
+    setGeneratedHistory(favorites.map((e) => e.word));
     toast({ title: "リセット完了", description: "出現済みワードの記録をリセットしました（お気に入りは残っています）" });
   }, [favorites, toast]);
 
@@ -160,7 +173,7 @@ export default function Home() {
     onSuccess: (data: { groups: DissGroups }) => {
       setDissGroups(data.groups);
       setCheckedWords(new Set());
-      const allWords = [...data.groups.four, ...data.groups.three, ...data.groups.two];
+      const allWords = [...data.groups.four, ...data.groups.three, ...data.groups.two].map((e) => e.word);
       setGeneratedHistory((prev) => {
         const next = [...prev];
         allWords.forEach((w) => { if (!next.includes(w)) next.push(w); });
@@ -173,11 +186,11 @@ export default function Home() {
   });
 
   const rhymeMutation = useMutation({
-    mutationFn: async (word: string) => {
-      const res = await apiRequest("POST", "/api/rhyme", { word, target, level });
+    mutationFn: async (entry: WordEntry) => {
+      const res = await apiRequest("POST", "/api/rhyme", { word: entry.word, romaji: entry.romaji, target, level });
       return res.json();
     },
-    onSuccess: (data: { words: string[] }) => {
+    onSuccess: (data: { words: WordEntry[] }) => {
       setRhymeWords(data.words);
       setCheckedRhymes(new Set());
     },
@@ -198,7 +211,7 @@ export default function Home() {
     dissMutation.mutate();
   }, [target, level, ageConfirmed, dissMutation, toast]);
 
-  const handleRhymeGenerate = useCallback((word: string) => {
+  const handleRhymeGenerate = useCallback((entry: WordEntry) => {
     if (!target) {
       toast({ title: "ターゲット未設定", description: "先に生成タブでターゲットを生成してください" });
       return;
@@ -207,22 +220,22 @@ export default function Home() {
       toast({ title: "年齢確認", description: "レベル8以上は年齢確認が必要です", variant: "destructive" });
       return;
     }
-    setSelectedFavWord(word);
+    setSelectedFavWord(entry);
     setRhymeWords([]);
     setCheckedRhymes(new Set());
-    rhymeMutation.mutate(word);
+    rhymeMutation.mutate(entry);
   }, [target, level, ageConfirmed, rhymeMutation, toast]);
 
-  const renderWordGroup = (title: string, words: string[], startIndex: number) => (
+  const renderWordGroup = (title: string, entries: WordEntry[], startIndex: number) => (
     <div className="space-y-2">
       <div className="flex items-center gap-2">
         <Badge variant="outline" className="text-xs font-mono">{title}</Badge>
-        <span className="text-xs text-muted-foreground">{words.length}個</span>
+        <span className="text-xs text-muted-foreground">{entries.length}個</span>
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
-        {words.map((word, i) => (
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+        {entries.map((entry, i) => (
           <motion.div
-            key={`${word}-${startIndex + i}`}
+            key={`${entry.word}-${startIndex + i}`}
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ delay: (startIndex + i) * 0.02 }}
@@ -230,11 +243,15 @@ export default function Home() {
             data-testid={`word-row-${startIndex + i}`}
           >
             <Checkbox
-              checked={checkedWords.has(word)}
-              onCheckedChange={() => toggleChecked(word)}
+              checked={checkedWords.has(entry.word)}
+              onCheckedChange={() => toggleChecked(entry.word)}
               data-testid={`checkbox-word-${startIndex + i}`}
             />
-            <span className="text-sm font-medium truncate">{word}</span>
+            <div className="flex-1 min-w-0">
+              <span className="text-sm font-medium">{entry.word}</span>
+              <span className="text-xs text-muted-foreground ml-1.5">({entry.romaji})</span>
+              <span className="text-xs text-primary/70 ml-1">[{extractVowels(entry.romaji)}]</span>
+            </div>
           </motion.div>
         ))}
       </div>
@@ -318,26 +335,28 @@ export default function Home() {
                   </div>
                 ) : (
                   <>
-                    <div className="rounded-md border border-border/50 bg-muted/20 p-3 font-mono text-sm whitespace-pre-wrap" data-testid="text-favorites-list">
-                      {favorites.map((w) => `[${w}]`).join("")}
+                    <div className="rounded-md border border-border/50 bg-muted/20 p-3 font-mono text-sm whitespace-pre-wrap leading-relaxed" data-testid="text-favorites-list">
+                      {favorites.map((e) => `${e.word}(${e.romaji})[${extractVowels(e.romaji)}]`).join(" ")}
                     </div>
 
-                    <div className="space-y-2">
+                    <div className="space-y-3">
                       <p className="text-sm text-muted-foreground">
                         ワードをタップして韻を踏んだ悪口を生成：
                       </p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {favorites.map((word) => (
+                      <div className="space-y-1.5">
+                        {favorites.map((entry) => (
                           <Button
-                            key={word}
-                            variant={selectedFavWord === word ? "default" : "outline"}
+                            key={entry.word}
+                            variant={selectedFavWord?.word === entry.word ? "default" : "outline"}
                             size="sm"
-                            onClick={() => handleRhymeGenerate(word)}
+                            onClick={() => handleRhymeGenerate(entry)}
                             disabled={rhymeMutation.isPending}
-                            className="text-sm"
-                            data-testid={`button-rhyme-${word}`}
+                            className="mr-1.5 mb-1 text-sm"
+                            data-testid={`button-rhyme-${entry.word}`}
                           >
-                            {word}
+                            <span>{entry.word}</span>
+                            <span className="text-xs opacity-70 ml-1">({entry.romaji})</span>
+                            <span className="text-xs text-primary ml-1">[{extractVowels(entry.romaji)}]</span>
                           </Button>
                         ))}
                       </div>
@@ -356,11 +375,14 @@ export default function Home() {
                 >
                   <Card>
                     <CardContent className="p-5 space-y-4">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <Music className="w-5 h-5 text-primary" />
                         <h2 className="text-lg font-semibold">
-                          「{selectedFavWord}」の韻ワード
+                          「{selectedFavWord.word}」の韻ワード
                         </h2>
+                        <Badge variant="secondary" className="text-xs">
+                          母音: {extractVowels(selectedFavWord.romaji)}
+                        </Badge>
                       </div>
 
                       {rhymeMutation.isPending ? (
@@ -371,10 +393,10 @@ export default function Home() {
                         </div>
                       ) : (
                         <>
-                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
-                            {rhymeWords.map((word, i) => (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                            {rhymeWords.map((entry, i) => (
                               <motion.div
-                                key={`rhyme-${word}-${i}`}
+                                key={`rhyme-${entry.word}-${i}`}
                                 initial={{ opacity: 0, scale: 0.95 }}
                                 animate={{ opacity: 1, scale: 1 }}
                                 transition={{ delay: i * 0.03 }}
@@ -382,11 +404,15 @@ export default function Home() {
                                 data-testid={`rhyme-row-${i}`}
                               >
                                 <Checkbox
-                                  checked={checkedRhymes.has(word)}
-                                  onCheckedChange={() => toggleRhymeChecked(word)}
+                                  checked={checkedRhymes.has(entry.word)}
+                                  onCheckedChange={() => toggleRhymeChecked(entry.word)}
                                   data-testid={`checkbox-rhyme-${i}`}
                                 />
-                                <span className="text-sm font-medium truncate">{word}</span>
+                                <div className="flex-1 min-w-0">
+                                  <span className="text-sm font-medium">{entry.word}</span>
+                                  <span className="text-xs text-muted-foreground ml-1.5">({entry.romaji})</span>
+                                  <span className="text-xs text-primary/70 ml-1">[{extractVowels(entry.romaji)}]</span>
+                                </div>
                               </motion.div>
                             ))}
                           </div>
@@ -585,7 +611,7 @@ export default function Home() {
               ) : (
                 <Zap className="w-4 h-4 mr-2" />
               )}
-              ワード30個を生成（4文字×10 / 3文字×10 / 2文字×10）
+              ワード30個を生成（4音×10 / 3音×10 / 2音×10）
             </Button>
 
             {generatedHistory.length > 0 && (
@@ -625,9 +651,9 @@ export default function Home() {
                   ) : dissGroups ? (
                     <>
                     <div className="space-y-5">
-                      {renderWordGroup("4文字", dissGroups.four, 0)}
-                      {renderWordGroup("3文字", dissGroups.three, 10)}
-                      {renderWordGroup("2文字", dissGroups.two, 20)}
+                      {renderWordGroup("4音", dissGroups.four, 0)}
+                      {renderWordGroup("3音", dissGroups.three, 10)}
+                      {renderWordGroup("2音", dissGroups.two, 20)}
                     </div>
                     <div className="mt-4">
                       <Button
