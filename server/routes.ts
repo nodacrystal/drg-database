@@ -33,29 +33,13 @@ const safetySettings = [
 
 interface WordEntry {
   word: string;
+  reading: string;
   romaji: string;
 }
 
-function countMorae(romaji: string): number {
-  const r = romaji.toLowerCase().replace(/[\s\-']/g, "");
-  let count = 0;
-  for (let i = 0; i < r.length; i++) {
-    const c = r[i];
-    if ("aeiou".includes(c)) {
-      count++;
-    } else if (c === "n") {
-      const next = i + 1 < r.length ? r[i + 1] : null;
-      if (next === null || (!"aeiou".includes(next) && next !== "y")) {
-        count++;
-      }
-    } else {
-      const next = i + 1 < r.length ? r[i + 1] : null;
-      if (next === c) {
-        count++;
-      }
-    }
-  }
-  return count;
+function isHiragana(ch: string): boolean {
+  const code = ch.charCodeAt(0);
+  return code >= 0x3040 && code <= 0x309F;
 }
 
 function parseWordEntries(section: string): WordEntry[] {
@@ -67,9 +51,22 @@ function parseWordEntries(section: string): WordEntry[] {
   for (const line of lines) {
     const items = line.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
     for (const item of items) {
-      const match = item.match(/^(.+?)\s*[\(（]([a-zA-Z\s\-']+)[\)）]$/);
+      const match = item.match(/^(.+?)\s*[\/／]\s*([ぁ-ゟ]+)\s*[\(（]([a-zA-Z\s\-']+)[\)）]$/);
       if (match) {
-        entries.push({ word: match[1].trim(), romaji: match[2].trim().toLowerCase() });
+        entries.push({
+          word: match[1].trim(),
+          reading: match[2].trim(),
+          romaji: match[3].trim().toLowerCase(),
+        });
+      } else {
+        const fallback = item.match(/^(.+?)\s*[\(（]([a-zA-Z\s\-']+)[\)）]$/);
+        if (fallback) {
+          entries.push({
+            word: fallback[1].trim(),
+            reading: "",
+            romaji: fallback[2].trim().toLowerCase(),
+          });
+        }
       }
     }
   }
@@ -174,39 +171,39 @@ ${target}
 ${severityInstruction}
 
 【厳守ルール - 必ず守ること】
-1. 以下の3グループに分けて生成すること。各グループの見出しも出力すること。
-2. 30個すべて異なるワードにすること。同じ言葉は絶対に使わない。
+1. 以下の3グループに分けて生成すること。各グループ15個ずつ、合計45個生成すること。各グループの見出しも出力すること。
+2. 45個すべて異なるワードにすること。同じ言葉は絶対に使わない。
 3. 内容：このターゲットの見た目・性格・評判・黒歴史に基づいた、相手が最も傷つく個人攻撃にすること。
 4. 表現：曖昧な表現は避け、直接的で汚い表現を積極的に使うこと。
 5. 漢字：小学生が理解できる範囲。難しい漢字は禁止。
 6. 重複禁止：以下の【既出リスト】にあるワードは絶対に出力しないこと。
 【既出リスト】: ${historyList}
 
-【音数ルール - 超重要・厳守】
-- 音数は「読み（ひらがな）」のモーラ数でカウントする。書いた文字数ではない。
-- 1モーラ = ひらがな1文字。ただし拗音（きょ、しゃ、ちゅ等）は2文字で1モーラ。
-- 促音（っ）= 1モーラ、撥音（ん）= 1モーラ、長音（ー）= 1モーラ
+【文字数ルール - 超重要・厳守】
+- 文字数は「全てひらがなに変換したときの文字数」でカウントする。
+- 拗音（しゃ、きょ等の小さい文字）も1文字としてカウントする。促音（っ）も1文字。撥音（ん）も1文字。
 - 具体例：
-  - 2音：クズ（く・ず）、カス（か・す）、ブタ（ぶ・た）、ゴミ（ご・み）、アホ（あ・ほ）
-  - 3音：ダサい（だ・さ・い）、ウザい（う・ざ・い）、無能（む・の・う）、ヘタレ（へ・た・れ）、チキン（ち・き・ん）
-  - 4音：うそつき（う・そ・つ・き）、ゴミクズ（ご・み・く・ず）、出しゃばり（で・しゃ・ば・り）、見栄張り（み・え・ば・り）
-- 必ず出力前にモーラ数を指折り確認すること！
+  - 2文字：クズ→くず(2文字)、カス→かす(2文字)、ブタ→ぶた(2文字)、ゴミ→ごみ(2文字)
+  - 3文字：ダサい→ださい(3文字)、無能→むのう(3文字)、ヘタレ→へたれ(3文字)、チキン→ちきん(3文字)
+  - 4文字：うそつき→うそつき(4文字)、ゴミクズ→ごみくず(4文字)、バカたれ→ばかたれ(4文字)
+- 必ず出力前にひらがなに変換して文字数を指折り確認すること！
 
-【出力フォーマット - 厳守】各ワードの後ろに半角括弧()でローマ字読みを付けること。
-===4音===
-ワード1(romaji),ワード2(romaji),ワード3(romaji),ワード4(romaji),ワード5(romaji),ワード6(romaji),ワード7(romaji),ワード8(romaji),ワード9(romaji),ワード10(romaji)
-===3音===
-ワード1(romaji),ワード2(romaji),ワード3(romaji),ワード4(romaji),ワード5(romaji),ワード6(romaji),ワード7(romaji),ワード8(romaji),ワード9(romaji),ワード10(romaji)
-===2音===
-ワード1(romaji),ワード2(romaji),ワード3(romaji),ワード4(romaji),ワード5(romaji),ワード6(romaji),ワード7(romaji),ワード8(romaji),ワード9(romaji),ワード10(romaji)
+【出力フォーマット - 厳守】
+各ワードは「ワード/ひらがな読み(romaji)」の形式で出力すること。スラッシュの後にひらがな読み、括弧内にローマ字。
+===4文字===
+ワード1/ひらがな(romaji),ワード2/ひらがな(romaji),...(15個)
+===3文字===
+ワード1/ひらがな(romaji),ワード2/ひらがな(romaji),...(15個)
+===2文字===
+ワード1/ひらがな(romaji),ワード2/ひらがな(romaji),...(15個)
 
 【例】
-===4音===
-うそつき(usotsuki),ゴミクズ(gomikuzu),出しゃばり(deshabari)...
-===3音===
-ダサい(dasai),無能(munou),ヘタレ(hetare)...
-===2音===
-クズ(kuzu),カス(kasu),ブタ(buta)...`;
+===4文字===
+嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu),バカたれ/ばかたれ(bakatare)...
+===3文字===
+ダサい/ださい(dasai),無能/むのう(munou),ヘタレ/へたれ(hetare)...
+===2文字===
+クズ/くず(kuzu),カス/かす(kasu),ブタ/ぶた(buta)...`;
 
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",
@@ -225,8 +222,6 @@ ${severityInstruction}
         two: [],
       };
 
-      const sections = text.split(/===\s*[234]音\s*===/);
-
       const seen = new Set<string>();
       const dedupeEntries = (entries: WordEntry[]): WordEntry[] => {
         return entries.filter((e) => {
@@ -238,12 +233,12 @@ ${severityInstruction}
 
       const allEntries = dedupeEntries(parseWordEntries(text));
       for (const entry of allEntries) {
-        const morae = countMorae(entry.romaji);
-        if (morae === 4 && groups.four.length < 10) {
+        const charCount = entry.reading.length;
+        if (charCount === 4 && groups.four.length < 10) {
           groups.four.push(entry);
-        } else if (morae === 3 && groups.three.length < 10) {
+        } else if (charCount === 3 && groups.three.length < 10) {
           groups.three.push(entry);
-        } else if (morae === 2 && groups.two.length < 10) {
+        } else if (charCount === 2 && groups.two.length < 10) {
           groups.two.push(entry);
         }
       }
@@ -297,8 +292,8 @@ ${severityInstruction}
 ・例：「ヤロウ」と「野郎」は同じ言葉なので禁止。「バカ」と「馬鹿」も禁止。
 
 【出力 - 厳守】
-各ワードの後ろに半角括弧()でローマ字読みを付けること。カンマ区切りで10個だけ1行で出力せよ。説明、注釈、前置きは一切書くな。
-例：死にかけ(shinikake),腐りかけ(kusarikake),...`;
+各ワードは「ワード/ひらがな読み(romaji)」の形式。カンマ区切りで10個だけ1行で出力せよ。説明、注釈、前置きは一切書くな。
+例：死にかけ/しにかけ(shinikake),腐りかけ/くさりかけ(kusarikake),...`;
 
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",

@@ -27,6 +27,7 @@ import { motion, AnimatePresence } from "framer-motion";
 
 interface WordEntry {
   word: string;
+  reading: string;
   romaji: string;
 }
 
@@ -38,28 +39,6 @@ interface DissGroups {
 
 function extractVowels(romaji: string): string {
   return romaji.replace(/[^aeiou]/gi, "").toLowerCase();
-}
-
-function countMorae(romaji: string): number {
-  const r = romaji.toLowerCase().replace(/[\s\-']/g, "");
-  let count = 0;
-  for (let i = 0; i < r.length; i++) {
-    const c = r[i];
-    if ("aeiou".includes(c)) {
-      count++;
-    } else if (c === "n") {
-      const next = i + 1 < r.length ? r[i + 1] : null;
-      if (next === null || (!"aeiou".includes(next) && next !== "y")) {
-        count++;
-      }
-    } else {
-      const next = i + 1 < r.length ? r[i + 1] : null;
-      if (next === c) {
-        count++;
-      }
-    }
-  }
-  return count;
 }
 
 function getLevelLabel(level: number): string {
@@ -271,9 +250,9 @@ export default function Home() {
             />
             <div className="flex-1 min-w-0">
               <span className="text-sm font-medium">{entry.word}</span>
-              <span className="text-xs text-muted-foreground ml-1.5">({entry.romaji})</span>
+              {entry.reading && <span className="text-xs text-muted-foreground ml-1.5">({entry.reading})</span>}
               <span className="text-xs text-primary/70 ml-1">[{extractVowels(entry.romaji)}]</span>
-              <Badge variant="outline" className="ml-1.5 text-[10px] px-1 py-0">{countMorae(entry.romaji)}音</Badge>
+              {entry.reading && <Badge variant="outline" className="ml-1.5 text-[10px] px-1 py-0">{entry.reading.length}文字</Badge>}
             </div>
           </motion.div>
         ))}
@@ -359,7 +338,7 @@ export default function Home() {
                 ) : (
                   <>
                     <div className="rounded-md border border-border/50 bg-muted/20 p-3 font-mono text-sm whitespace-pre-wrap leading-relaxed" data-testid="text-favorites-list">
-                      {favorites.map((e) => `${e.word}(${e.romaji})[${extractVowels(e.romaji)}]`).join(" ")}
+                      {favorites.map((e) => `${e.word}(${e.reading || e.romaji})[${extractVowels(e.romaji)}]`).join(" ")}
                     </div>
 
                     <div className="space-y-3">
@@ -378,7 +357,7 @@ export default function Home() {
                             data-testid={`button-rhyme-${entry.word}`}
                           >
                             <span>{entry.word}</span>
-                            <span className="text-xs opacity-70 ml-1">({entry.romaji})</span>
+                            <span className="text-xs opacity-70 ml-1">({entry.reading || entry.romaji})</span>
                             <span className="text-xs text-primary ml-1">[{extractVowels(entry.romaji)}]</span>
                           </Button>
                         ))}
@@ -433,7 +412,7 @@ export default function Home() {
                                 />
                                 <div className="flex-1 min-w-0">
                                   <span className="text-sm font-medium">{entry.word}</span>
-                                  <span className="text-xs text-muted-foreground ml-1.5">({entry.romaji})</span>
+                                  {entry.reading && <span className="text-xs text-muted-foreground ml-1.5">({entry.reading})</span>}
                                   <span className="text-xs text-primary/70 ml-1">[{extractVowels(entry.romaji)}]</span>
                                 </div>
                               </motion.div>
@@ -634,7 +613,7 @@ export default function Home() {
               ) : (
                 <Zap className="w-4 h-4 mr-2" />
               )}
-              ワード30個を生成（4音×10 / 3音×10 / 2音×10）
+              ワード30個を生成（4文字×10 / 3文字×10 / 2文字×10）
             </Button>
 
             {generatedHistory.length > 0 && (
@@ -674,9 +653,9 @@ export default function Home() {
                   ) : dissGroups ? (
                     <>
                     <div className="space-y-5">
-                      {renderWordGroup("4音", dissGroups.four, 0)}
-                      {renderWordGroup("3音", dissGroups.three, 10)}
-                      {renderWordGroup("2音", dissGroups.two, 20)}
+                      {renderWordGroup("4文字", dissGroups.four, 0)}
+                      {renderWordGroup("3文字", dissGroups.three, 10)}
+                      {renderWordGroup("2文字", dissGroups.two, 20)}
                     </div>
                     <div className="mt-4">
                       <Button
