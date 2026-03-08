@@ -36,6 +36,28 @@ interface WordEntry {
   romaji: string;
 }
 
+function countMorae(romaji: string): number {
+  const r = romaji.toLowerCase().replace(/[\s\-']/g, "");
+  let count = 0;
+  for (let i = 0; i < r.length; i++) {
+    const c = r[i];
+    if ("aeiou".includes(c)) {
+      count++;
+    } else if (c === "n") {
+      const next = i + 1 < r.length ? r[i + 1] : null;
+      if (next === null || (!"aeiou".includes(next) && next !== "y")) {
+        count++;
+      }
+    } else {
+      const next = i + 1 < r.length ? r[i + 1] : null;
+      if (next === c) {
+        count++;
+      }
+    }
+  }
+  return count;
+}
+
 function parseWordEntries(section: string): WordEntry[] {
   const normalized = section
     .replace(/、/g, ",")
@@ -160,13 +182,17 @@ ${severityInstruction}
 6. 重複禁止：以下の【既出リスト】にあるワードは絶対に出力しないこと。
 【既出リスト】: ${historyList}
 
-【文字数ルール - 読み（発音）でカウント】
-- 文字数は「読み方」の音数でカウントする。書いた文字数ではない。
-- 例：「東京」→読み「とうきょう」→4音、「無能」→読み「むのう」→3音、「クズ」→読み「くず」→2音
-- 拗音（きょ、しゃ等）は1音としてカウント
-- 長音（ー）も1音としてカウント
+【音数ルール - 超重要・厳守】
+- 音数は「読み（ひらがな）」のモーラ数でカウントする。書いた文字数ではない。
+- 1モーラ = ひらがな1文字。ただし拗音（きょ、しゃ、ちゅ等）は2文字で1モーラ。
+- 促音（っ）= 1モーラ、撥音（ん）= 1モーラ、長音（ー）= 1モーラ
+- 具体例：
+  - 2音：クズ（く・ず）、カス（か・す）、ブタ（ぶ・た）、ゴミ（ご・み）、アホ（あ・ほ）
+  - 3音：ダサい（だ・さ・い）、ウザい（う・ざ・い）、無能（む・の・う）、ヘタレ（へ・た・れ）、チキン（ち・き・ん）
+  - 4音：うそつき（う・そ・つ・き）、ゴミクズ（ご・み・く・ず）、出しゃばり（で・しゃ・ば・り）、見栄張り（み・え・ば・り）
+- 必ず出力前にモーラ数を指折り確認すること！
 
-【出力フォーマット - 厳守】各ワードの後ろに半角括弧()でローマ字読みを付けること。全ての文字にローマ字で母音を含めた読みを記載すること。
+【出力フォーマット - 厳守】各ワードの後ろに半角括弧()でローマ字読みを付けること。
 ===4音===
 ワード1(romaji),ワード2(romaji),ワード3(romaji),ワード4(romaji),ワード5(romaji),ワード6(romaji),ワード7(romaji),ワード8(romaji),ワード9(romaji),ワード10(romaji)
 ===3音===
@@ -176,9 +202,9 @@ ${severityInstruction}
 
 【例】
 ===4音===
-役立たず(yakutatazu),面の皮(menno kawa),出しゃばり(deshabari)...
+うそつき(usotsuki),ゴミクズ(gomikuzu),出しゃばり(deshabari)...
 ===3音===
-ゴミ虫(gomimushi),無能(munou),臆病(okubyou)...
+ダサい(dasai),無能(munou),ヘタレ(hetare)...
 ===2音===
 クズ(kuzu),カス(kasu),ブタ(buta)...`;
 
@@ -210,16 +236,16 @@ ${severityInstruction}
         });
       };
 
-      if (sections.length >= 4) {
-        groups.four = dedupeEntries(parseWordEntries(sections[1])).slice(0, 10);
-        groups.three = dedupeEntries(parseWordEntries(sections[2])).slice(0, 10);
-        groups.two = dedupeEntries(parseWordEntries(sections[3])).slice(0, 10);
-      } else {
-        const allEntries = dedupeEntries(parseWordEntries(text));
-        const countVowels = (r: string) => r.replace(/[^aeiou]/gi, "").length;
-        groups.four = allEntries.filter((e) => countVowels(e.romaji) >= 4).slice(0, 10);
-        groups.three = allEntries.filter((e) => countVowels(e.romaji) === 3).slice(0, 10);
-        groups.two = allEntries.filter((e) => countVowels(e.romaji) <= 2).slice(0, 10);
+      const allEntries = dedupeEntries(parseWordEntries(text));
+      for (const entry of allEntries) {
+        const morae = countMorae(entry.romaji);
+        if (morae === 4 && groups.four.length < 10) {
+          groups.four.push(entry);
+        } else if (morae === 3 && groups.three.length < 10) {
+          groups.three.push(entry);
+        } else if (morae === 2 && groups.two.length < 10) {
+          groups.two.push(entry);
+        }
       }
 
       res.json({ groups });

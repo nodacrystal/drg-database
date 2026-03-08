@@ -40,6 +40,28 @@ function extractVowels(romaji: string): string {
   return romaji.replace(/[^aeiou]/gi, "").toLowerCase();
 }
 
+function countMorae(romaji: string): number {
+  const r = romaji.toLowerCase().replace(/[\s\-']/g, "");
+  let count = 0;
+  for (let i = 0; i < r.length; i++) {
+    const c = r[i];
+    if ("aeiou".includes(c)) {
+      count++;
+    } else if (c === "n") {
+      const next = i + 1 < r.length ? r[i + 1] : null;
+      if (next === null || (!"aeiou".includes(next) && next !== "y")) {
+        count++;
+      }
+    } else {
+      const next = i + 1 < r.length ? r[i + 1] : null;
+      if (next === c) {
+        count++;
+      }
+    }
+  }
+  return count;
+}
+
 function getLevelLabel(level: number): string {
   if (level <= 2) return "マイルド";
   if (level <= 4) return "ピリ辛";
@@ -251,6 +273,7 @@ export default function Home() {
               <span className="text-sm font-medium">{entry.word}</span>
               <span className="text-xs text-muted-foreground ml-1.5">({entry.romaji})</span>
               <span className="text-xs text-primary/70 ml-1">[{extractVowels(entry.romaji)}]</span>
+              <Badge variant="outline" className="ml-1.5 text-[10px] px-1 py-0">{countMorae(entry.romaji)}音</Badge>
             </div>
           </motion.div>
         ))}
