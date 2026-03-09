@@ -16,10 +16,19 @@ import {
   getNgWordCount,
   clearNgWords,
 } from "./storage";
+import { TARGETS } from "./targets";
 
 const dissRequestSchema = z.object({
   target: z.string().min(1),
   level: z.number().int().min(1).max(10),
+});
+
+const wordArraySchema = z.object({
+  words: z.array(z.object({
+    word: z.string().min(1),
+    reading: z.string().min(1),
+    romaji: z.string().min(1),
+  })),
 });
 
 const ai = new GoogleGenAI({
@@ -37,6 +46,8 @@ const safetySettings = [
   { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.OFF },
 ];
 
+const geminiConfig = { maxOutputTokens: 8192, safetySettings, thinkingConfig: { thinkingBudget: 0 } };
+
 interface WordEntry {
   word: string;
   reading: string;
@@ -48,236 +59,49 @@ function extractVowels(romaji: string): string {
 }
 
 function parseWordEntries(section: string): WordEntry[] {
-  const normalized = section
-    .replace(/、/g, ",")
-    .replace(/\r\n/g, "\n");
-  const lines = normalized.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  const lines = section.replace(/、/g, ",").replace(/\r\n/g, "\n").split("\n").map(l => l.trim()).filter(l => l.length > 0);
   const entries: WordEntry[] = [];
   for (const line of lines) {
-    const items = line.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
-    for (const item of items) {
+    for (const item of line.split(",").map(s => s.trim()).filter(s => s.length > 0)) {
       const match = item.match(/^(.+?)\s*[\/／]\s*([ぁ-ゟ]+)\s*[\(（]([a-zA-Z\s\-']+)[\)）]$/);
       if (match) {
-        entries.push({
-          word: match[1].trim(),
-          reading: match[2].trim(),
-          romaji: match[3].trim().toLowerCase(),
-        });
+        entries.push({ word: match[1].trim(), reading: match[2].trim(), romaji: match[3].trim().toLowerCase() });
       }
     }
   }
   return entries;
 }
 
-const GROUP_TARGETS: Record<number, number> = {
-  2: 5,
-  3: 30,
-  4: 30,
-  5: 20,
-  6: 10,
-  7: 5,
-};
+const GROUP_TARGETS: Record<number, number> = { 2: 5, 3: 30, 4: 30, 5: 20, 6: 10, 7: 5 };
+const GROUP_BUFFER: Record<number, number> = { 2: 10, 3: 45, 4: 45, 5: 30, 6: 15, 7: 10 };
+const CHAR_TO_KEY: Record<number, string> = { 7: "seven", 6: "six", 5: "five", 4: "four", 3: "three", 2: "two" };
 
-const GROUP_BUFFER: Record<number, number> = {
-  2: 10,
-  3: 45,
-  4: 45,
-  5: 30,
-  6: 15,
-  7: 10,
-};
+function formatElapsed(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  return m > 0 ? `${m}分${s % 60}秒` : `${s}秒`;
+}
 
-export async function registerRoutes(
-  httpServer: Server,
-  app: Express
-): Promise<Server> {
-
-  const TARGETS = [
-    "松本人志,金髪・マッチョ・鋭い眼光,ダウンタウン・お笑い界の象徴,天才肌・カリスマ・孤独",
-    "浜田雅功,スカジャン・派手な服装・老化,ダウンタウン・ツッコミの頂点,ドS・情に厚い・せっかち",
-    "明石家さんま,出っ歯・細身・枯れない笑顔,お笑い怪獣・司会の神,サービス精神・自己愛・不眠",
-    "ビートたけし,チック症・独特の体型,世界のキタノ・漫才ブーム火付け役,照れ屋・博識・バイオレンス",
-    "タモリ,サングラス・落ち着いた佇まい,森田一義・密室芸出身,達観・多趣味・知的",
-    "内村光平,優しそうな顔・小柄,ウッチャンナンチャン・コント職人,ストイック・謙虚・人見知り",
-    "南原清隆,角張った顔・スポーティー,ウッチャンナンチャン・ヒルナンデス,真面目・社交的・古典芸能",
-    "上田晋也,ちりちり髪・細身・司会者顔,くりぃむしちゅー・うんちく王,博識・例えツッコミ・自信家",
-    "有田哲平,濃い顔・恰幅が良い,くりぃむしちゅー・プロレス好き,策士・エンタメ愛・お調子者",
-    "太田光,落ち着きがない・若々しい,爆笑問題・時事漫才,暴走・知識欲・繊細",
-    "田中裕二,小柄・片玉・猫好き,爆笑問題・ツッコミ担当,常識人・ギャンブル好き・頑固",
-    "有吉弘行,毒のある笑顔・スーツ,猿岩石・再ブレイクの王,現実主義・毒舌・疑り深い",
-    "マツコ・デラックス,大柄・女装・派手,コラムニスト出身,俯瞰的・情熱的・毒舌",
-    "バカリズム,童顔・マッシュヘア,ピン芸人・脚本家,理屈っぽい・計算高い・毒舌",
-    "設楽統,端正な顔立ち・清潔感,バナナマン・司会の王,冷静・Sっ気・鋭い観察眼",
-    "日村勇紀,マッシュヘア・特徴的な顔・肥満,バナナマン・リアクション王,天真爛漫・愛されキャラ・卑屈",
-    "若林正恭,童顔・猫背・斜に構えた目,オードリー・エッセイスト,内向的・ひねくれ・自意識過剰",
-    "春日俊彰,テクノカット・ピンクベスト,オードリー・肉体派,図太い・ケチ・自信満々",
-    "山里亮太,赤い眼鏡・くせ毛,南海キャンディーズ・天才司会者,嫉妬深い・努力家・逆襲",
-    "しずちゃん,長身・ボクサー体型,南海キャンディーズ・俳優,マイペース・天然・純粋",
-    "千鳥大悟,坊主・いかつい顔・酒焼け,千鳥・ロケの神,破天荒・漢気・昭和的",
-    "千鳥ノブ,癖のある顔・ツッコミ顔,千鳥・パワーワードの達人,親しみやすい・ミーハー・強欲",
-    "山内健司,サイコパス的な目・小太り,かまいたち・ロジカル漫才,傲慢・計算高い・自信家",
-    "濱家隆一,高身長・清潔感・色気,かまいたち・多才司会者,神経質・泣き虫・上昇志向",
-    "粗品,長い指・独特の髪型・細身,霜降り明星・M-1/R-1王者,傲慢・ギャンブル狂・天才自負",
-    "せいや,小太り・多動・愛嬌,霜降り明星・モノマネ天才,天然・昭和愛・情緒不安定",
-    "小峠英二,スキンヘッド・鋭い眼光,バイきんぐ・なんて日だ,真っ直ぐ・キレ芸・ロック好き",
-    "西村瑞樹,無表情・サイコパス感,バイきんぐ・キャンプ芸人,マイペース・変人・無頓着",
-    "富澤たけし,渋い声・がっしり体型,サンドウィッチマン・ネタ作成,寡黙・マイペース・情に厚い",
-    "伊達みきお,金髪・眼鏡・ラグビー体型,サンドウィッチマン・好感度王,礼儀正しい・食いしん坊・漢気",
-    "秋山竜次,黒髪ロング・恰幅・体モノマネ,ロバート・クリエイターズ,変態的・没頭型・天才",
-    "博多大吉,長身・清潔感・紳士的,博多華丸・大吉,理知的・ドライ・自虐的",
-    "博多華丸,目が大きい・笑顔・親父顔,博多華丸・大吉,陽気・飲み好き・地元愛",
-    "礼二,車掌風・おじさん顔,中川家・モノマネ名人,職人気質・保守的・観察眼",
-    "剛,細身・優しそうな顔,中川家・ボケ担当,繊細・マイペース・芸術家肌",
-    "今田耕司,若々しい・独身の顔,ダウンタウンの系譜・司会,潔癖・仕事人間・寂しがり",
-    "東野幸治,爬虫類顔・無機質な目,白い悪魔・司会,サイコパス・冷徹・好奇心",
-    "劇団ひとり,端正な顔・演技派,ピン芸人・映画監督,憑依型・卑屈・自己愛",
-    "陣内智則,シュッとした顔・スーツ,ピン芸人・映像ネタ,天然・不器用・モテ志向",
-    "千原ジュニア,鋭い顔立ち・ジャックナイフ,千原兄弟・喋り手,神経質・ストイック・寂しがり",
-    "千原せいじ,ガサツな顔・大柄,千原兄弟・ガサツの王,社交的・無神経・ポジティブ",
-    "加藤浩次,狂犬・スーツ,極楽とんぼ・朝の顔,熱い・頑固・反骨心",
-    "山本圭壱,肥満・おじさん顔,極楽とんぼ・不祥事からの復帰,天真爛漫・しぶとい・自由",
-    "渡部建,清潔感・グルメ顔,アンジャッシュ・不祥事,計算高い・理論派・自惚れ",
-    "児嶋一哉,普通の人・キレ顔,アンジャッシュ・大島さん,いじられ・真面目・天然",
-    "藤森慎吾,チャラ男・眼鏡・筋肉,オリエンタルラジオ,社交的・マメ・ミーハー",
-    "中田敦彦,理知的・独裁者風,オリエンタルラジオ・教育系,野心家・極端・自己愛",
-    "ケンドーコバヤシ,髭・ガテン系・エロ顔,ピン芸人・ミスター深夜,エロ・多趣味・嘘つき",
-    "川島明,ええ声・シュッとしている,麒麟・朝の顔,知的・安定感・大喜利中毒",
-    "徳井義実,二枚目・猫好き,チュートリアル・脱税不祥事,変態的・マイペース・孤独",
-    "福田充徳,細身・普通のおじさん,チュートリアル・バイク好き,謙虚・地味・お酒好き",
-    "後藤輝基,鋭い目・スマート,フットボールアワー・例えツッコミ,せっかち・ミーハー・自信家",
-    "岩尾望,ブサイクキャラ・お洒落,フットボールアワー・ボケ担当,繊細・マイペース・自分好き",
-    "堀内健,自由人・若々しい,ネプチューン・ギャグマシン,破天荒・無垢・寂しがり",
-    "名倉潤,タイ人風・彫りが深い,ネプチューン・ツッコミ,真面目・家族思い・神経質",
-    "原田泰造,爽やか・筋肉質,ネプチューン・俳優,純粋・熱い・天然",
-    "田中直樹,長身・面長,ココリコ・俳優,真面目・生き物オタク・卑屈",
-    "遠藤章造,二枚目・野球好き,ココリコ・クセ歌,ポジティブ・チャラい・単純",
-    "宮迫博之,ナルシスト・時計マニア,雨上がり決死隊・YouTuber,目立ちたがり・臆病・自信過剰",
-    "蛍原徹,マッシュルームカット・競馬好き,雨上がり決死隊・ゴルフ好き,穏やか・頑固・常識人",
-    "土田晃之,不機嫌そうな顔・家電芸人,元U-turn,ドライ・リアリスト・保守的",
-    "カズレーザー,全身赤・金髪,メイプル超合金・クイズ王,合理的・冷淡・自由",
-    "安藤なつ,巨漢・紫の服,メイプル超合金,穏やか・面倒見が良い・冷静",
-    "サンシャイン池崎,タンクトップ・叫び,ピン芸人,真面目・貯金好き・孝行息子",
-    "あばれる君,坊主・一生懸命な目,ピン芸人・サバイバル,熱血・不器用・空回り",
-    "ひょっこりはん,マッシュヘア・眼鏡,ピン芸人,計算高い・一発屋の悲哀",
-    "とにかく明るい安村,パンツ一丁・肥満,ピン芸人・世界進出,楽天家・しぶとい・小心者",
-    "長田庄平,肩幅・器用な顔,チョコレートプラネット・小道具,職人・自信家・現実的",
-    "松尾駿,IKKOモノマネ・小太り,チョコレートプラネット,愛嬌・社交的・戦略的",
-    "森田哲矢,出っ歯・ストリート風,さらば青春の光・社長,野心家・下衆・仕事中毒",
-    "東ブクロ,クズ顔・清潔感,さらば青春の光・不倫,無責任・マイペース・強メンタル",
-    "津田篤宏,ゴイゴイスー・うるさい顔,ダイアン・いじられ,甘えん坊・小心者・天然",
-    "ユースケ,独特の空気感・低音,ダイアン・ボケ,ひねくれ・シャイ・こだわり",
-    "田中卓志,長身・キモキャラ,アンガールズ・紅茶好き,理知的・高学歴・マザコン",
-    "山根良顕,ガリガリ・パパ芸人,アンガールズ,マイペース・頑固・脱力",
-    "あんり,恰幅が良い・毒舌顔,ぼる塾・ツッコミ,冷静・強気・面倒見",
-    "きりやはるか,不思議な笑顔,ぼる塾,天然・マイペース・図太い",
-    "田辺智加,亀梨好き・スイーツ,ぼる塾,ポジティブ・マイペース・こだわり",
-    "ナダル,白タートル・イっちゃってる目,コロコロチキチキペッパーズ,クズ・プライド高い・小心",
-    "西野創人,普通の人・プロデューサー的,コロチキ,冷静・計算高い・努力家",
-    "斎藤司,ハゲ・ナルシスト,トレンディエンジェル,自信満々・ミーハー・臆病",
-    "たかし,ハゲ・アイドルオタク,トレンディエンジェル,無頓着・サイコパス・自由",
-    "井上裕介,ナルシスト・小柄,NON STYLE,超ポジティブ・嫌われ・メンタル強",
-    "石田明,真っ白・細身,NON STYLE・ネタ職人,ストイック・繊細・ネガティブ",
-    "村上信五,八重歯・うるさい,関ジャニ∞・芸人枠,強欲・社交的・仕事人",
-    "菊地亜美,うるさい顔・バラエティ,元アイドル,上昇志向・計算・お喋り",
-    "野田クリスタル,筋肉・ゲーマー,マヂカルラブリー・三冠,天才自負・ストイック・シャイ",
-    "村上,小太り・眼鏡・ピンク,マヂカルラブリー,常識人・酒好き・ツッコミ職人",
-    "伊藤俊介,髭・眼鏡・サスペンダー,オズワルド・妹が有名,知的・プライド高い・妹想い",
-    "畠中悠,不思議な顔・長身,オズワルド,天然・サイコパス・独特",
-    "じろう,女装・コント顔,シソンヌ,憑依型・内向的・変態",
-    "長谷川忍,高身長・眼鏡・お洒落,シソンヌ・ツッコミ,社交的・ミーハー・強気",
-    "おいでやす小田,絶叫顔・眼鏡,ユニット,大声・真面目・小心者",
-    "こがけん,オーマイガー・歌,ユニット,繊細・こだわり強・映画好き",
-    "ハリウッドザコシショウ,裸・誇張,ピン芸人,ストイック・狂気・計算された笑い",
-    "くっきー!,白塗り・タトゥー,野性爆弾,芸術家・狂気・後輩思い",
-    "ロッシー,天然な笑顔,野性爆弾,宇宙人・超天然・善人",
-    "西田幸治,髭・笑い飯,M-1王者,大喜利中毒・ひねくれ・職人",
-    "哲夫,笑い飯・仏教好き,M-1王者,理屈っぽい・郷土愛・教育",
-    "盛山晋太郎,長髪・いかつい,見取り図,熱い・いじられ・ミーハー",
-    "リリー,塩顔・タトゥー,見取り図,サイコパス・マイペース・モテ",
-    "井口浩之,小柄・前歯,ウエストランド・M-1王者,毒舌・僻み・お喋り",
-    "河本太,普通・キャンプ,ウエストランド,無気力・天然・自分勝手",
-    "渡辺隆,おじさん・AV好き,錦鯉,冷静・下衆・包容力",
-    "長谷川雅紀,スキンヘッド・奥歯なし,錦鯉,純粋・天然・おバカ",
-    "屋敷裕政,普通の若者・皮肉屋,ニューヨーク,毒舌・冷笑・上昇志向",
-    "嶋佐和也,独特の顔・感性,ニューヨーク,変人・マイペース・こだわり",
-    "芝大輔,リーゼント・男前,モグライダー,天才・社交的・器用",
-    "ともしげ,滑舌悪い・巨漢,モグライダー,超天然・パニック・ポンコツ",
-    "ヒコロヒー,煙草・やさぐれ,ピン芸人,サバサバ・読書家・冷静",
-    "吉住,一重・コント顔,ピン芸人,内向的・闇・ストイック",
-    "やす子,はい～・迷彩服,ピン芸人・自衛隊,純粋・働き者・実は頑固",
-    "フワちゃん,派手・自撮り,YouTuber芸人,自由奔放・非常識・頭脳派",
-    "あの,黒髪ボブ・独特な喋り,アーティスト芸人,偏食・内向的・鋭い",
-    "向井慧,ラジオ・パンサー,MC,闇・真面目・分析",
-    "菅良太郎,髭・パラパラ,パンサー,無口・猫・マイペース",
-    "尾形貴弘,サンキュー・筋肉,パンサー,熱血・バカ・一生懸命",
-    "斉藤慎二,濃い顔・不倫,ジャングルポケット,自惚れ・情熱・ギャンブル",
-    "太田博久,筋肉・柔道,ジャングルポケット,真面目・愛妻家・地味",
-    "おたけ,おたけサイコ・散髪,ジャングルポケット,おバカ・天然・ビジネス",
-    "福田麻貴,ツッコミ・元アイドル,3時のヒロイン,しっかり者・野心・繊細",
-    "かなで,巨漢・ダンス,3時のヒロイン,情熱・恋愛体質・自由",
-    "ゆめっち,派手・休養,3時のヒロイン,天然・奔放・不安定",
-    "小宮浩信,眼鏡・滑舌,三四郎,生意気・卑屈・実は熱い",
-    "相田周二,良い声・普通,三四郎,マイペース・美食・金持ち",
-    "友近,なりきり・演歌,ピン芸人,職人・こだわり・説教臭い",
-    "渡辺直美,ビヨンセ・巨漢,ピン芸人,国際的・ポジティブ・努力",
-    "ゆりやんレトリィバァ,変幻自在・英語,ピン芸人,天才・ストイック・変態",
-    "キンタロー。,前田敦子・顔デカ,ピン芸人,憑依・必死・情緒",
-    "永野,シェー・ラッセン,ピン芸人,孤高・ひねくれ・実は真面目",
-    "小島よしお,そんなの関係ねえ・筋肉,ピン芸人,教育的・ポジティブ・努力",
-    "狩野英孝,スタッフー・神主,ピン芸人,超天然・愛され・ポンコツ",
-    "出川哲朗,ヤバイよ・リアクション,ピン芸人,一生懸命・誠実・バカ",
-    "上島竜兵,帽子くるりん・キス,ダチョウ倶楽部,繊細・寂しがり・芸人愛",
-    "肥後克広,リーダー・モノマネ,ダチョウ倶楽部,天然・包容力・お酒",
-    "寺門ジモン,肉・ネイチャー,ダチョウ倶楽部,変執狂・多弁・こだわり",
-    "江頭2:50,黒タイツ・YouTube,ピン芸人,伝説・シャイ・真面目",
-    "久本雅美,よろぴく・細身,WAHAHA本舗,パワフル・寂しがり・信心深い",
-    "柴田理恵,号泣・おばさん,WAHAHA本舗,情に厚い・お酒・庶民",
-    "いとうあさこ,レオタード・老化,ピン芸人,明るい・お酒・寂しがり",
-    "大久保佳代子,OL風・性欲,オアシズ,現実的・卑屈・実は乙女",
-    "光浦靖子,眼鏡・手芸,オアシズ,知的・繊細・留学",
-    "黒沢かずこ,千手観音・独身,森三中,極度の人見知り・変態・純粋",
-    "村上知子,主婦・小太り,森三中,現実的・毒舌・しっかり者",
-    "大島美幸,坊主・体当たり,森三中,漢気・純粋・家族愛",
-    "近藤春菜,角野卓造・眼鏡,ハリセンボン,社交的・仕事人間・マメ",
-    "箕輪はるか,死神・歯が黒い,ハリセンボン,内向的・知的・マイペース",
-    "バービー,フォーリンラブ・巨漢,ピン芸人,野心家・実業家・肉食",
-    "イモトアヤコ,太眉・セーラー服,ピン芸人,努力家・勇敢・家庭的",
-    "なかやまきんに君,パワー・筋肉,ピン芸人,ストイック・天然・誠実",
-    "もう中学生,段ボール,ピン芸人,狂気・丁寧・実は闇",
-    "波田陽区,ギター侍,ピン芸人,一発屋・自虐・しぶとい",
-    "鉄拳,パラパラ漫画,ピン芸人,繊細・真面目・アーティスト",
-    "ZAZY,ピンク・羽・R-1,ピン芸人,プライド高い・独創的・変人",
-    "お見送り芸人しんいち,ギター・毒,ピン芸人,性格悪い・打算・寂しがり",
-    "街裏ぴんく,嘘漫談・巨漢,ピン芸人,妄想・職人・純粋",
-    "ルシファー吉岡,下ネタ・ハゲ,ピン芸人,卑屈・知的・変態",
-    "平野ノラ,バブリー,ピン芸人,真面目・絵画",
-    "ブルゾンちえみ,35億,引退,キャリア・繊細",
-  ];
+export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
 
   app.get("/api/target", (_req, res) => {
     const entry = TARGETS[Math.floor(Math.random() * TARGETS.length)];
     const parts = entry.split(",");
-    const name = parts[0];
-    const appearance = parts[1] || "";
-    const personality = parts[3] || parts[2] || "";
-    const text = `名前：${name}\n見た目：${appearance}\n性格：${personality}`;
-    res.json({ target: text });
+    res.json({ target: `名前：${parts[0]}\n見た目：${parts[1] || ""}\n性格：${parts[3] || parts[2] || ""}` });
   });
 
   app.post("/api/diss", async (req, res) => {
     let heartbeat: ReturnType<typeof setInterval> | null = null;
-    let clientDisconnected = false;
+    let disconnected = false;
 
     req.on("close", () => {
-      clientDisconnected = true;
+      disconnected = true;
       if (heartbeat) clearInterval(heartbeat);
     });
 
     try {
       const parsed = dissRequestSchema.safeParse(req.body);
-      if (!parsed.success) {
-        return res.status(400).json({ error: "ターゲットとレベル(1-10)が必要です" });
-      }
+      if (!parsed.success) return res.status(400).json({ error: "ターゲットとレベル(1-10)が必要です" });
       const { target, level } = parsed.data;
 
       res.setHeader("Content-Type", "text/event-stream");
@@ -286,280 +110,133 @@ export async function registerRoutes(
 
       const startTime = Date.now();
       let currentStep = "";
-      const stepTimings: Record<string, number> = {};
 
-      function formatElapsed(ms: number): string {
-        const s = Math.floor(ms / 1000);
-        const m = Math.floor(s / 60);
-        const sec = s % 60;
-        return m > 0 ? `${m}分${sec}秒` : `${sec}秒`;
-      }
-
-      function sendProgress(step: string, detail: string, pct?: number, eta?: string) {
-        if (clientDisconnected) return;
+      function send(step: string, detail: string) {
+        if (disconnected) return;
         currentStep = step;
-        const elapsed = formatElapsed(Date.now() - startTime);
-        const payload: Record<string, unknown> = { type: "progress", step, detail, elapsed };
-        if (pct !== undefined) payload.pct = pct;
-        if (eta) payload.eta = eta;
-        res.write(`data: ${JSON.stringify(payload)}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: "progress", step, detail, elapsed: formatElapsed(Date.now() - startTime) })}\n\n`);
       }
 
       heartbeat = setInterval(() => {
-        if (clientDisconnected) { if (heartbeat) clearInterval(heartbeat); return; }
-        const elapsed = formatElapsed(Date.now() - startTime);
-        res.write(`data: ${JSON.stringify({ type: "progress", step: currentStep, detail: `処理継続中... (経過: ${elapsed})`, elapsed })}\n\n`);
+        if (disconnected) { if (heartbeat) clearInterval(heartbeat); return; }
+        res.write(`data: ${JSON.stringify({ type: "progress", step: currentStep, detail: `処理継続中...`, elapsed: formatElapsed(Date.now() - startTime) })}\n\n`);
       }, 5000);
 
-      sendProgress("init", "データベース・リサーチ準備中...", 0, "約25秒");
+      send("init", "準備中...");
 
       const targetName = target.split("\n")[0]?.replace("名前：", "").trim() || "";
 
       const [existingWords, ngWordList, researchResult] = await Promise.all([
         getWordStrings(),
         getNgWordStrings(),
-        (async () => {
-          try {
-            const r = await ai.models.generateContent({
-              model: "gemini-2.5-flash",
-              contents: `「${targetName}」（日本のお笑い芸人）について、以下の情報を簡潔に箇条書きで出力せよ。前置き不要。
-1. 代表的なギャグ・フレーズ・決めゼリフ
-2. よく弄られるポイント・コンプレックス
-3. 有名なエピソード・スキャンダル・失敗談
-4. 身体的特徴・見た目の特徴
-5. 性格的な弱点・欠点
-6. ネット上でよく言われる悪口・あだ名
-7. 他の芸人からのイジり方
-各項目3-5個ずつ。`,
-              config: {
-                maxOutputTokens: 2048,
-                safetySettings,
-                thinkingConfig: { thinkingBudget: 0 },
-              },
-            });
-            return r.text || "";
-          } catch {
-            return "";
-          }
-        })(),
+        ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: `「${targetName}」（日本のお笑い芸人）について簡潔に箇条書き。前置き不要。
+1. 代表的ギャグ・決めゼリフ 2. よく弄られるポイント 3. 有名なスキャンダル・失敗談
+4. 身体的特徴 5. 性格的弱点 6. ネット上の悪口・あだ名 7. 他芸人からのイジり方
+各3-5個。`,
+          config: geminiConfig,
+        }).then(r => r.text || "").catch(() => ""),
       ]);
 
-      const recentHistory = existingWords.slice(-200);
-      const historyList = recentHistory.length > 0 ? recentHistory.join(",") : "なし";
-      const ngList = ngWordList.length > 0 ? ngWordList.slice(-100).join(",") : "";
+      const historyList = existingWords.length > 0 ? existingWords.slice(-200).join(",") : "なし";
+      const ngList = ngWordList.slice(-100).join(",");
+      const severity = level >= 8
+        ? "【極限まで過激に】放送禁止用語レベルの直接的で汚い罵倒語を使用せよ。"
+        : `レベル${level}/10の辛辣なディスワード。`;
+      const ngSection = ngList ? `\n【NGワード - 避けよ】\n${ngList}\n` : "";
+      const research = researchResult ? `\n【リサーチ情報】\n${researchResult}\n` : "";
 
-      let severityInstruction = "";
-      if (level >= 8) {
-        severityInstruction = "【警告：極限まで過激に】放送禁止用語に近い直接的で汚い罵倒語を使用。人間の尊厳を踏みにじる最も下劣で攻撃的な言葉を選べ。";
-      } else {
-        severityInstruction = `レベル${level}/10に応じた直接的で容赦のない辛辣なディスワードにすること。`;
-      }
+      send("init", `準備完了 (${formatElapsed(Date.now() - startTime)})`);
 
-      const ngSection = ngList ? `\n【NGワード - ユーザーが拒否した低品質ワード。これらと似た傾向のワードを避けよ】\n${ngList}\n` : "";
-      const researchSection = researchResult ? `\n【リサーチ情報 - この情報を元にワードを考案せよ】\n${researchResult}\n` : "";
-
-      const initElapsed = Date.now() - startTime;
-      stepTimings["init"] = initElapsed;
-      sendProgress("init", `準備完了 (${formatElapsed(initElapsed)})`, 10, "約20秒");
-
-      const groups: Record<string, WordEntry[]> = {
-        seven: [], six: [], five: [], four: [], three: [], two: [],
-      };
-      const charCountToKey: Record<number, string> = {
-        7: "seven", 6: "six", 5: "five", 4: "four", 3: "three", 2: "two",
-      };
+      const groups: Record<string, WordEntry[]> = { seven: [], six: [], five: [], four: [], three: [], two: [] };
       const seen = new Set<string>([...existingWords, ...ngWordList]);
       const suffixCounts: Record<string, number> = {};
 
-      function addEntriesToGroups(entries: WordEntry[]) {
-        for (const entry of entries) {
-          if (seen.has(entry.word)) continue;
-          seen.add(entry.word);
-          const reading = entry.reading;
-          let skipDueSuffix = false;
-          for (let sLen = 2; sLen <= Math.min(reading.length - 1, 4); sLen++) {
-            const readingSuffix = reading.slice(-sLen);
-            const key2 = `${sLen}:${readingSuffix}`;
-            if ((suffixCounts[key2] || 0) >= 2) { skipDueSuffix = true; break; }
+      function addEntries(entries: WordEntry[]) {
+        for (const e of entries) {
+          if (seen.has(e.word)) continue;
+          seen.add(e.word);
+          let skip = false;
+          for (let s = 2; s <= Math.min(e.reading.length - 1, 4); s++) {
+            if ((suffixCounts[`${s}:${e.reading.slice(-s)}`] || 0) >= 2) { skip = true; break; }
           }
-          if (skipDueSuffix) continue;
-          const charCount = entry.reading.length;
-          const key = charCountToKey[charCount];
-          const groupTarget = GROUP_TARGETS[charCount];
-          if (key && groupTarget && groups[key].length < groupTarget) {
-            groups[key].push(entry);
-            for (let sLen = 2; sLen <= Math.min(reading.length - 1, 4); sLen++) {
-              const readingSuffix = reading.slice(-sLen);
-              const key2 = `${sLen}:${readingSuffix}`;
-              suffixCounts[key2] = (suffixCounts[key2] || 0) + 1;
+          if (skip) continue;
+          const key = CHAR_TO_KEY[e.reading.length];
+          const tgt = GROUP_TARGETS[e.reading.length];
+          if (key && tgt && groups[key].length < tgt) {
+            groups[key].push(e);
+            for (let s = 2; s <= Math.min(e.reading.length - 1, 4); s++) {
+              const k = `${s}:${e.reading.slice(-s)}`;
+              suffixCounts[k] = (suffixCounts[k] || 0) + 1;
             }
           }
         }
       }
 
-      function getTotal() {
-        return Object.values(groups).reduce((s, g) => s + g.length, 0);
-      }
+      function total() { return Object.values(groups).reduce((s, g) => s + g.length, 0); }
 
-      const commonRules = `【厳守ルール】
-1. 全て異なるワードにすること。同じ言葉は絶対に使わない。
-2. ターゲットの特徴・弱点に基づいた個人攻撃にすること。
-3. 直接的で汚い表現を積極的に使うこと。
-4. 漢字：小学生が理解できる範囲。難しい漢字は禁止。
-5. 重複禁止：以下のワードは絶対に出力しないこと。
-6. 意味の通じる悪口のみ。造語不可。一般形容詞は不可。
+      const rules = `【厳守ルール】
+全て異なるワード。ターゲット特化の個人攻撃。漢字は小学生レベル。意味の通じる悪口のみ。造語不可。一般形容詞不可。
+語尾2文字以上同じ読みは最大2個まで。多様な語尾パターンを使え。
 【既出リスト】: ${historyList}
+【文字数ルール】ひらがな変換後の文字数。拗音・促音・撥音も各1文字。出力前に指折り確認！
+【フォーマット】各ワード「ワード/ひらがな読み(romaji)」形式。前置き不要。即座に出力。`;
 
-【語尾の重複禁止 - 超重要】
-- 語尾2文字以上が同じ読みの言葉は最大2個まで。多様な語尾パターンを使え。
+      const makePrompt = (groupDefs: string, examples: string) =>
+        `悪口・ディスりワードを生成せよ。\n\n【ターゲット】\n${target}\n${research}${severity}\n${ngSection}${rules}\n\n${groupDefs}\n\n【例】\n${examples}`;
 
-【文字数ルール - 超重要・厳守】
-- 文字数は「全てひらがなに変換したときの文字数」でカウント。拗音・促音・撥音も各1文字。
-- 必ず出力前にひらがなに変換して文字数を指折り確認すること！
+      const shortGroups = [2, 3, 4].map(n => `===${n}文字===\nワード/ひらがな(romaji),...(${GROUP_BUFFER[n]}個 ※目標${GROUP_TARGETS[n]}個)`).join("\n");
+      const longGroups = [5, 6, 7].map(n => `===${n}文字===\nワード/ひらがな(romaji),...(${GROUP_BUFFER[n]}個 ※目標${GROUP_TARGETS[n]}個)`).join("\n");
 
-【出力フォーマット - 厳守】
-各ワードは「ワード/ひらがな読み(romaji)」形式。前置き不要。即座に出力開始。`;
+      send("generate", "AI並列生成中...");
 
-      const promptA = `以下のターゲットに特化した悪口・ディスりワードを生成せよ。
-
-【ターゲット】
-${target}
-${researchSection}
-${severityInstruction}
-${ngSection}
-${commonRules}
-
-===2文字===
-ワード/ひらがな(romaji),...(${GROUP_BUFFER[2]}個 ※目標${GROUP_TARGETS[2]}個)
-===3文字===
-ワード/ひらがな(romaji),...(${GROUP_BUFFER[3]}個 ※目標${GROUP_TARGETS[3]}個)
-===4文字===
-ワード/ひらがな(romaji),...(${GROUP_BUFFER[4]}個 ※目標${GROUP_TARGETS[4]}個)
-
-【例】
-===2文字===
-クズ/くず(kuzu),カス/かす(kasu),ブタ/ぶた(buta)...
-===3文字===
-ダサい/ださい(dasai),無能/むのう(munou),ヘタレ/へたれ(hetare)...
-===4文字===
-嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu)...`;
-
-      const promptB = `以下のターゲットに特化した悪口・ディスりワードを生成せよ。
-
-【ターゲット】
-${target}
-${researchSection}
-${severityInstruction}
-${ngSection}
-${commonRules}
-
-===5文字===
-ワード/ひらがな(romaji),...(${GROUP_BUFFER[5]}個 ※目標${GROUP_TARGETS[5]}個)
-===6文字===
-ワード/ひらがな(romaji),...(${GROUP_BUFFER[6]}個 ※目標${GROUP_TARGETS[6]}個)
-===7文字===
-ワード/ひらがな(romaji),...(${GROUP_BUFFER[7]}個 ※目標${GROUP_TARGETS[7]}個)
-
-【例】
-===5文字===
-できそこない/できそこない(dekisokonai),はらぐろい/はらぐろい(haraguroi)...
-===6文字===
-おちぶれやろう/おちぶれやろう(ochibureyarou)...
-===7文字===
-のうたりんやろう/のうたりんやろう(noutarinyarou)...`;
-
-      sendProgress("generate", "AI並列生成中... (2つの生成を同時実行)", 15, "約15秒");
-      const genStart = Date.now();
-
-      const [resultA, resultB] = await Promise.allSettled([
-        ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: promptA,
-          config: { maxOutputTokens: 8192, safetySettings, thinkingConfig: { thinkingBudget: 0 } },
-        }),
-        ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: promptB,
-          config: { maxOutputTokens: 8192, safetySettings, thinkingConfig: { thinkingBudget: 0 } },
-        }),
+      const [rA, rB] = await Promise.allSettled([
+        ai.models.generateContent({ model: "gemini-2.5-flash", contents: makePrompt(shortGroups, "===2文字===\nクズ/くず(kuzu),カス/かす(kasu)...\n===3文字===\nダサい/ださい(dasai),無能/むのう(munou)...\n===4文字===\n嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu)..."), config: geminiConfig }),
+        ai.models.generateContent({ model: "gemini-2.5-flash", contents: makePrompt(longGroups, "===5文字===\nできそこない/できそこない(dekisokonai)...\n===6文字===\nおちぶれやろう/おちぶれやろう(ochibureyarou)...\n===7文字===\nのうたりんやろう/のうたりんやろう(noutarinyarou)..."), config: geminiConfig }),
       ]);
 
-      if (resultA.status === "fulfilled") addEntriesToGroups(parseWordEntries(resultA.value.text || ""));
-      else sendProgress("generate", "短文字グループの生成が失敗。リトライで補填します。");
-      if (resultB.status === "fulfilled") addEntriesToGroups(parseWordEntries(resultB.value.text || ""));
-      else sendProgress("generate", "長文字グループの生成が失敗。リトライで補填します。");
-      const genElapsed = Date.now() - genStart;
-      stepTimings["generate"] = genElapsed;
-      sendProgress("generate", `並列生成完了: ${getTotal()}/100個 (${formatElapsed(genElapsed)})`, 65);
+      if (rA.status === "fulfilled") addEntries(parseWordEntries(rA.value.text || ""));
+      else send("generate", "短文字グループ生成失敗。リトライで補填。");
+      if (rB.status === "fulfilled") addEntries(parseWordEntries(rB.value.text || ""));
+      else send("generate", "長文字グループ生成失敗。リトライで補填。");
+      send("generate", `並列生成完了: ${total()}/100個 (${formatElapsed(Date.now() - startTime)})`);
 
-      const MAX_RETRIES = 5;
-      for (let retry = 0; retry < MAX_RETRIES; retry++) {
-        const shortfalls: { charCount: number; need: number }[] = [];
-        for (const [cc, tgt] of Object.entries(GROUP_TARGETS)) {
-          const charCount = Number(cc);
-          const key = charCountToKey[charCount];
-          if (groups[key].length < tgt) shortfalls.push({ charCount, need: tgt - groups[key].length });
-        }
-        const totalShort = shortfalls.reduce((s, x) => s + x.need, 0);
-        if (totalShort === 0) break;
+      for (let retry = 0; retry < 5; retry++) {
+        const shortfalls = Object.entries(GROUP_TARGETS)
+          .map(([cc, tgt]) => ({ charCount: Number(cc), need: tgt - groups[CHAR_TO_KEY[Number(cc)]].length }))
+          .filter(s => s.need > 0);
+        if (shortfalls.reduce((s, x) => s + x.need, 0) === 0) break;
 
-        const retryPct = 65 + Math.min((retry + 1) * 7, 30);
-        const estRemain = formatElapsed(Math.max(0, (MAX_RETRIES - retry) * 4000));
-        sendProgress("retry", `不足${totalShort}個を追加生成中... (リトライ${retry + 1})`, retryPct, `約${estRemain}`);
+        send("retry", `不足${shortfalls.reduce((s, x) => s + x.need, 0)}個を追加生成中 (リトライ${retry + 1})`);
 
-        const alreadyUsed = Object.values(groups).flat().map(e => e.word);
-        const retryGroupLines = shortfalls.map(s => {
-          const buf = Math.max(s.need * 4, s.need + 20);
-          return `===${s.charCount}文字===\nワード/ひらがな(romaji),...(${buf}個)`;
-        }).join("\n");
+        const used = Object.values(groups).flat().map(e => e.word);
+        const retryGroups = shortfalls.map(s => `===${s.charCount}文字===\nワード/ひらがな(romaji),...(${Math.max(s.need * 4, s.need + 20)}個)`).join("\n");
 
-        const retryPrompt = `以下のターゲットに特化した悪口・ディスりワードを追加生成せよ。
-
-【ターゲット】
-${target}
-${researchSection}
-${severityInstruction}
-${ngSection}
-【厳守】全て異なるワード。重複禁止。意味の通じる悪口のみ。造語不可。一般形容詞は不可。
-【既出リスト】: ${[...recentHistory, ...alreadyUsed].join(",")}
-
-【文字数ルール】ひらがな変換後の文字数でカウント。拗音・促音・撥音も各1文字。
-【出力フォーマット】各ワード「ワード/ひらがな読み(romaji)」形式。前置き不要。即座に出力開始。
-
-${retryGroupLines}
-
-【例】
-===4文字===
-嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu),ヘタクソ/へたくそ(hetakuso)...`;
-
-        const retryResponse = await ai.models.generateContent({
+        const rr = await ai.models.generateContent({
           model: "gemini-2.5-flash",
-          contents: retryPrompt,
-          config: { maxOutputTokens: 8192, safetySettings, thinkingConfig: { thinkingBudget: 0 } },
+          contents: `悪口・ディスりワードを追加生成せよ。\n\n【ターゲット】\n${target}\n${research}${severity}\n${ngSection}【厳守】全て異なるワード。意味の通じる悪口のみ。造語不可。\n【既出】: ${[...existingWords.slice(-200), ...used].join(",")}\n【文字数ルール】ひらがな変換後の文字数。拗音・促音・撥音も各1文字。\n【フォーマット】「ワード/ひらがな読み(romaji)」形式。前置き不要。\n\n${retryGroups}\n\n===4文字===\n嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu)...`,
+          config: geminiConfig,
         });
-        addEntriesToGroups(parseWordEntries(retryResponse.text || ""));
-        sendProgress("retry", `リトライ${retry + 1}完了: ${getTotal()}/100個`, retryPct + 5);
+        addEntries(parseWordEntries(rr.text || ""));
+        send("retry", `リトライ${retry + 1}完了: ${total()}/100個`);
       }
 
       if (heartbeat) clearInterval(heartbeat);
-      const totalGenerated = getTotal();
-      const totalElapsed = formatElapsed(Date.now() - startTime);
-      sendProgress("done", `完了: ${totalGenerated}/100個 (所要時間: ${totalElapsed})`, 100);
+      send("done", `完了: ${total()}/100個 (所要時間: ${formatElapsed(Date.now() - startTime)})`);
 
-      if (!clientDisconnected) {
-        res.write(`data: ${JSON.stringify({ type: "result", groups, total: totalGenerated })}\n\n`);
+      if (!disconnected) {
+        res.write(`data: ${JSON.stringify({ type: "result", groups, total: total() })}\n\n`);
         res.end();
       }
     } catch (error) {
       if (heartbeat) clearInterval(heartbeat);
       console.error("Diss generation error:", error);
-      if (!clientDisconnected) {
+      if (!disconnected) {
         try {
           res.write(`data: ${JSON.stringify({ type: "error", error: "ワード生成に失敗しました" })}\n\n`);
           res.end();
-        } catch {
-          try { res.status(500).json({ error: "ワード生成に失敗しました" }); } catch {}
-        }
+        } catch { try { res.status(500).json({ error: "ワード生成に失敗しました" }); } catch {} }
       }
     }
   });
@@ -567,84 +244,38 @@ ${retryGroupLines}
   app.get("/api/favorites", async (_req, res) => {
     try {
       const allWords = await getAllWords();
-
-      type WordItem = {
-        id: number;
-        word: string;
-        reading: string;
-        romaji: string;
-        vowels: string;
-        charCount: number;
-      };
-
-      const items: WordItem[] = allWords.map((w) => ({
-        id: w.id,
-        word: w.word,
-        reading: w.reading,
-        romaji: w.romaji,
-        vowels: w.vowels,
-        charCount: w.charCount,
-      }));
-
-      function getSuffixVowels(vowels: string, len: number): string {
-        return vowels.slice(-len);
-      }
-
-      const grouped: Record<string, WordItem[]> = {};
+      const items = allWords.map(w => ({ id: w.id, word: w.word, reading: w.reading, romaji: w.romaji, vowels: w.vowels, charCount: w.charCount }));
+      const grouped: Record<string, typeof items> = {};
       const assigned = new Set<number>();
 
-      function getReadingSuffix(reading: string, len: number): string {
-        return reading.slice(-len);
-      }
-
-      function filterSameReadingSuffix(words: WordItem[]): WordItem[] {
-        if (words.length < 2) return words;
-        const readingSuffixCounts: Record<string, number> = {};
-        const result: WordItem[] = [];
-        for (const w of words) {
-          const minSuffix = Math.min(2, w.reading.length);
-          const rSuffix = w.reading.slice(-minSuffix);
-          const count = readingSuffixCounts[rSuffix] || 0;
-          if (count < 2) {
-            readingSuffixCounts[rSuffix] = count + 1;
-            result.push(w);
-          }
-        }
-        return result;
-      }
-
       for (let suffixLen = 5; suffixLen >= 2; suffixLen--) {
-        const buckets: Record<string, WordItem[]> = {};
+        const buckets: Record<string, typeof items> = {};
         for (const item of items) {
-          if (assigned.has(item.id)) continue;
-          if (item.vowels.length < suffixLen) continue;
-          const suffix = getSuffixVowels(item.vowels, suffixLen);
-          if (!buckets[suffix]) buckets[suffix] = [];
-          buckets[suffix].push(item);
+          if (assigned.has(item.id) || item.vowels.length < suffixLen) continue;
+          const suffix = item.vowels.slice(-suffixLen);
+          (buckets[suffix] ??= []).push(item);
         }
         for (const [suffix, words] of Object.entries(buckets)) {
-          const filtered = filterSameReadingSuffix(words);
+          const counts: Record<string, number> = {};
+          const filtered = words.filter(w => {
+            const rs = w.reading.slice(-Math.min(2, w.reading.length));
+            return (counts[rs] = (counts[rs] || 0) + 1) <= 2;
+          });
           if (filtered.length >= 2) {
-            const key = `*${suffix}`;
-            if (!grouped[key]) grouped[key] = [];
-            grouped[key].push(...filtered);
-            for (const w of filtered) assigned.add(w.id);
+            (grouped[`*${suffix}`] ??= []).push(...filtered);
+            filtered.forEach(w => assigned.add(w.id));
           }
         }
       }
 
       for (const item of items) {
         if (assigned.has(item.id)) continue;
-        const suffix = item.vowels.length >= 1 ? `*${item.vowels.slice(-1)}` : "*";
-        if (!grouped[suffix]) grouped[suffix] = [];
-        grouped[suffix].push(item);
+        const key = `*${item.vowels.slice(-1) || ""}`;
+        (grouped[key] ??= []).push(item);
         assigned.add(item.id);
       }
 
-      const sortedGroups = Object.entries(grouped)
-        .sort((a, b) => b[1].length - a[1].length)
-        .map(([vowels, words]) => ({ vowels, words }));
-
+      const sortedGroups = Object.entries(grouped).sort((a, b) => b[1].length - a[1].length).map(([vowels, words]) => ({ vowels, words }));
       res.json({ groups: sortedGroups, total: allWords.length });
     } catch (error) {
       console.error("Favorites fetch error:", error);
@@ -654,29 +285,11 @@ ${retryGroupLines}
 
   app.post("/api/favorites", async (req, res) => {
     try {
-      const schema = z.object({
-        words: z.array(z.object({
-          word: z.string().min(1),
-          reading: z.string().min(1),
-          romaji: z.string().min(1),
-        })),
-      });
-      const parsed = schema.safeParse(req.body);
-      if (!parsed.success) {
-        return res.status(400).json({ error: "不正なデータです" });
-      }
-
-      const entries = parsed.data.words.map((w) => ({
-        word: w.word,
-        reading: w.reading,
-        romaji: w.romaji,
-        vowels: extractVowels(w.romaji),
-        charCount: w.reading.length,
-      }));
-
+      const parsed = wordArraySchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: "不正なデータです" });
+      const entries = parsed.data.words.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji, vowels: extractVowels(w.romaji), charCount: w.reading.length }));
       const added = await addWords(entries);
-      const total = await getWordCount();
-      res.json({ added, total });
+      res.json({ added, total: await getWordCount() });
     } catch (error) {
       console.error("Favorites add error:", error);
       res.status(500).json({ error: "お気に入りの追加に失敗しました" });
@@ -688,97 +301,51 @@ ${retryGroupLines}
       const id = parseInt(req.params.id);
       if (isNaN(id)) return res.status(400).json({ error: "不正なIDです" });
       await deleteWord(id);
-      const total = await getWordCount();
-      res.json({ success: true, total });
+      res.json({ success: true, total: await getWordCount() });
     } catch (error) {
-      console.error("Favorites delete error:", error);
       res.status(500).json({ error: "削除に失敗しました" });
     }
   });
 
   app.delete("/api/favorites", async (_req, res) => {
-    try {
-      await clearAllWords();
-      res.json({ success: true, total: 0 });
-    } catch (error) {
-      console.error("Favorites clear error:", error);
-      res.status(500).json({ error: "全削除に失敗しました" });
-    }
+    try { await clearAllWords(); res.json({ success: true, total: 0 }); }
+    catch { res.status(500).json({ error: "全削除に失敗しました" }); }
   });
 
   app.get("/api/favorites/count", async (_req, res) => {
-    try {
-      const total = await getWordCount();
-      res.json({ total });
-    } catch (error) {
-      res.status(500).json({ error: "カウント取得に失敗しました" });
-    }
+    try { res.json({ total: await getWordCount() }); }
+    catch { res.status(500).json({ error: "カウント取得に失敗しました" }); }
   });
 
   app.get("/api/favorites/export", async (_req, res) => {
-    try {
-      const data = await exportWords();
-      res.setHeader("Content-Type", "text/plain; charset=utf-8");
-      res.send(data);
-    } catch (error) {
-      res.status(500).json({ error: "エクスポートに失敗しました" });
-    }
+    try { res.setHeader("Content-Type", "text/plain; charset=utf-8"); res.send(await exportWords()); }
+    catch { res.status(500).json({ error: "エクスポートに失敗しました" }); }
   });
 
   app.post("/api/ng-words", async (req, res) => {
     try {
-      const schema = z.object({
-        words: z.array(z.object({
-          word: z.string().min(1),
-          reading: z.string().min(1),
-          romaji: z.string().min(1),
-        })),
-      });
-      const parsed = schema.safeParse(req.body);
-      if (!parsed.success) {
-        return res.status(400).json({ error: "不正なデータです" });
-      }
-      const entries = parsed.data.words.map((w) => ({
-        word: w.word,
-        reading: w.reading,
-        romaji: w.romaji,
-      }));
-      const added = await addNgWords(entries);
-      const total = await getNgWordCount();
-      res.json({ added, total });
+      const parsed = wordArraySchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: "不正なデータです" });
+      const added = await addNgWords(parsed.data.words.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji })));
+      res.json({ added, total: await getNgWordCount() });
     } catch (error) {
-      console.error("NG words add error:", error);
       res.status(500).json({ error: "NGワードの追加に失敗しました" });
     }
   });
 
   app.get("/api/ng-words", async (_req, res) => {
-    try {
-      const words = await getAllNgWords();
-      const total = words.length;
-      res.json({ words, total });
-    } catch (error) {
-      console.error("NG words fetch error:", error);
-      res.status(500).json({ error: "NGワードの取得に失敗しました" });
-    }
+    try { const words = await getAllNgWords(); res.json({ words, total: words.length }); }
+    catch { res.status(500).json({ error: "NGワードの取得に失敗しました" }); }
   });
 
   app.get("/api/ng-words/count", async (_req, res) => {
-    try {
-      const total = await getNgWordCount();
-      res.json({ total });
-    } catch (error) {
-      res.status(500).json({ error: "NGワード数の取得に失敗しました" });
-    }
+    try { res.json({ total: await getNgWordCount() }); }
+    catch { res.status(500).json({ error: "NGワード数の取得に失敗しました" }); }
   });
 
   app.delete("/api/ng-words", async (_req, res) => {
-    try {
-      await clearNgWords();
-      res.json({ success: true, total: 0 });
-    } catch (error) {
-      res.status(500).json({ error: "NGワードの全削除に失敗しました" });
-    }
+    try { await clearNgWords(); res.json({ success: true, total: 0 }); }
+    catch { res.status(500).json({ error: "NGワードの全削除に失敗しました" }); }
   });
 
   return httpServer;
