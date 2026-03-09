@@ -11,6 +11,7 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words targeting 
 
 ## Data Model
 - Words table: `{ id, word, reading, romaji, vowels, char_count, created_at }`
+- NG Words table: `{ id, word, reading, romaji, created_at }` — user-rejected words excluded from future generation
 - `reading` is the hiragana reading (e.g., "ごみくず")
 - `romaji` is the romanized pronunciation (e.g., "gomikuzu")
 - `vowels` is extracted from romaji (e.g., "oiuu")
@@ -31,8 +32,9 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words targeting 
 - Server-side suffix dedup: max 2 words with same reading suffix (2-4 chars) per batch
 - Quality rules in prompt: meaningful words only, no repeated suffix words (やろう, がき, etc.)
 - **Select All / Deselect All**: Per-group and global toggle
-- Unchecked words are NOT added to favorites
+- Unchecked words are saved as NG words (excluded from future generation)
 - Words already in DB are excluded from generation (passed as history)
+- NG words also excluded from generation and passed to prompt as low-quality examples
 - **Database (favorites)**: Persisted in PostgreSQL, grouped by suffix vowel pattern
   - Suffix matching: words grouped by trailing vowel similarity (longest match first, 5→2)
   - Groups with 2+ words formed; remainders grouped by last vowel
@@ -43,14 +45,17 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words targeting 
 - Adjustable intensity level (1-10) with age confirmation for level 8+
 
 ## API Routes
-- `GET /api/target` - Random target from hardcoded comedian list (no AI)
-- `POST /api/diss` - Generate ~100 diss words in 6 groups (`{ target, level }`)
+- `GET /api/target` - Random target from hardcoded comedian list (no AI, 3 fields: name/appearance/personality)
+- `POST /api/diss` - Generate ~100 diss words via SSE (Server-Sent Events) with progress, quality check, NG word filtering
 - `GET /api/favorites` - Get all words grouped by vowel pattern
 - `POST /api/favorites` - Add words to DB (bulk insert, skip duplicates)
 - `DELETE /api/favorites/:id` - Delete single word
 - `DELETE /api/favorites` - Clear all words
 - `GET /api/favorites/count` - Get total word count
 - `GET /api/favorites/export` - Export all words as text
+- `POST /api/ng-words` - Save rejected words as NG words
+- `GET /api/ng-words/count` - Get NG word count
+- `DELETE /api/ng-words` - Clear all NG words
 
 ## AI Output Format
 - Words: `ワード/ひらがな読み(romaji)` format, split by `===N文字===` headers
@@ -72,3 +77,8 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words targeting 
 - 2026-03-09: Select All/Deselect All per group and globally
 - 2026-03-09: Progress bar towards 10,000 word goal
 - 2026-03-09: Export feature for AI-readable format
+- 2026-03-09: Removed 経歴 from target display (name/appearance/personality only)
+- 2026-03-09: SSE-based progress logging during generation (real-time progress messages)
+- 2026-03-09: Post-generation quality check via AI (validates words are real insults, replaces invalid ones)
+- 2026-03-09: NG words system — unchecked words saved to ng_words table, excluded from future generation
+- 2026-03-09: NG words referenced in generation prompt as low-quality examples to avoid

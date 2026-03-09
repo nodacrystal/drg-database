@@ -10,6 +10,10 @@ import {
   deleteWord,
   clearAllWords,
   exportWords,
+  getNgWordStrings,
+  addNgWords,
+  getNgWordCount,
+  clearNgWords,
 } from "./storage";
 
 const dissRequestSchema = z.object({
@@ -254,9 +258,8 @@ export async function registerRoutes(
     const parts = entry.split(",");
     const name = parts[0];
     const appearance = parts[1] || "";
-    const career = parts[2] || "";
-    const personality = parts[3] || "";
-    const text = `名前：${name}\n見た目：${appearance}\n経歴：${career}\n性格：${personality}`;
+    const personality = parts[3] || parts[2] || "";
+    const text = `名前：${name}\n見た目：${appearance}\n性格：${personality}`;
     res.json({ target: text });
   });
 
@@ -268,9 +271,20 @@ export async function registerRoutes(
       }
       const { target, level } = parsed.data;
 
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+
+      function sendProgress(step: string, detail: string) {
+        res.write(`data: ${JSON.stringify({ type: "progress", step, detail })}\n\n`);
+      }
+
+      sendProgress("init", "データベース確認中...");
       const existingWords = await getWordStrings();
+      const ngWordList = await getNgWordStrings();
       const recentHistory = existingWords.slice(-200);
       const historyList = recentHistory.length > 0 ? recentHistory.join(",") : "なし";
+      const ngList = ngWordList.length > 0 ? ngWordList.slice(-100).join(",") : "";
 
       let severityInstruction = "";
       if (level >= 8) {
@@ -279,13 +293,15 @@ export async function registerRoutes(
         severityInstruction = `レベル${level}/10に応じた直接的で容赦のない辛辣なディスワードにすること。`;
       }
 
+      const ngSection = ngList ? `\n【NGワード - ユーザーが拒否した低品質ワード。これらと似た傾向のワードを避けよ】\n${ngList}\n` : "";
+
       const prompt = `以下のターゲットに特化した悪口・ディスりワードを生成せよ。
 
 【ターゲット】
 ${target}
 
 ${severityInstruction}
-
+${ngSection}
 【厳守ルール】
 1. 以下の6グループに分けて生成。各グループの見出しも出力すること。
 2. 全て異なるワードにすること。同じ言葉は絶対に使わない。
@@ -348,48 +364,29 @@ ${severityInstruction}
 嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu)...`;
 
       const groups: Record<string, WordEntry[]> = {
-        seven: [],
-        six: [],
-        five: [],
-        four: [],
-        three: [],
-        two: [],
+        seven: [], six: [], five: [], four: [], three: [], two: [],
       };
-
       const charCountToKey: Record<number, string> = {
-        7: "seven",
-        6: "six",
-        5: "five",
-        4: "four",
-        3: "three",
-        2: "two",
+        7: "seven", 6: "six", 5: "five", 4: "four", 3: "three", 2: "two",
       };
-
-      const seen = new Set<string>(existingWords);
+      const seen = new Set<string>([...existingWords, ...ngWordList]);
       const suffixCounts: Record<string, number> = {};
 
       function addEntriesToGroups(entries: WordEntry[]) {
         for (const entry of entries) {
           if (seen.has(entry.word)) continue;
           seen.add(entry.word);
-
           const reading = entry.reading;
           let skipDueSuffix = false;
           for (let sLen = 2; sLen <= Math.min(reading.length - 1, 4); sLen++) {
             const readingSuffix = reading.slice(-sLen);
             const key2 = `${sLen}:${readingSuffix}`;
-            const count = suffixCounts[key2] || 0;
-            if (count >= 2) {
-              skipDueSuffix = true;
-              break;
-            }
+            if ((suffixCounts[key2] || 0) >= 2) { skipDueSuffix = true; break; }
           }
           if (skipDueSuffix) continue;
-
           const charCount = entry.reading.length;
           const key = charCountToKey[charCount];
           const groupTarget = GROUP_TARGETS[charCount];
-
           if (key && groupTarget && groups[key].length < groupTarget) {
             groups[key].push(entry);
             for (let sLen = 2; sLen <= Math.min(reading.length - 1, 4); sLen++) {
@@ -401,17 +398,18 @@ ${severityInstruction}
         }
       }
 
+      function getTotal() {
+        return Object.values(groups).reduce((s, g) => s + g.length, 0);
+      }
+
+      sendProgress("generate", "AIがワードを生成中...");
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",
         contents: prompt,
-        config: {
-          maxOutputTokens: 16384,
-          safetySettings,
-        },
+        config: { maxOutputTokens: 16384, safetySettings },
       });
-
-      const text = response.text || "";
-      addEntriesToGroups(parseWordEntries(text));
+      addEntriesToGroups(parseWordEntries(response.text || ""));
+      sendProgress("generate", `初回生成完了: ${getTotal()}/100個`);
 
       const MAX_RETRIES = 5;
       for (let retry = 0; retry < MAX_RETRIES; retry++) {
@@ -419,16 +417,12 @@ ${severityInstruction}
         for (const [cc, tgt] of Object.entries(GROUP_TARGETS)) {
           const charCount = Number(cc);
           const key = charCountToKey[charCount];
-          const have = groups[key].length;
-          if (have < tgt) {
-            shortfalls.push({ charCount, need: tgt - have });
-          }
+          if (groups[key].length < tgt) shortfalls.push({ charCount, need: tgt - groups[key].length });
         }
-
         const totalShort = shortfalls.reduce((s, x) => s + x.need, 0);
         if (totalShort === 0) break;
 
-        console.log(`Retry ${retry + 1}: ${totalShort} words short — ${shortfalls.map(s => `${s.charCount}文字:${s.need}個不足`).join(", ")}`);
+        sendProgress("retry", `不足${totalShort}個を追加生成中... (リトライ${retry + 1})`);
 
         const alreadyUsed = Object.values(groups).flat().map(e => e.word);
         const retryGroupLines = shortfalls.map(s => {
@@ -442,7 +436,7 @@ ${severityInstruction}
 ${target}
 
 ${severityInstruction}
-
+${ngSection}
 【厳守ルール】
 1. 全て異なるワードにすること。
 2. ターゲットの特徴・弱点に基づいた個人攻撃。
@@ -479,26 +473,121 @@ ${retryGroupLines}
         const retryResponse = await ai.models.generateContent({
           model: "gemini-2.5-flash",
           contents: retryPrompt,
-          config: {
-            maxOutputTokens: 8192,
-            safetySettings,
-            thinkingConfig: { thinkingBudget: 0 },
-          },
+          config: { maxOutputTokens: 8192, safetySettings, thinkingConfig: { thinkingBudget: 0 } },
         });
-
-        const retryText = retryResponse.text || "";
-        const retryEntries = parseWordEntries(retryText);
-        console.log(`Retry ${retry + 1}: parsed ${retryEntries.length} entries`);
-        addEntriesToGroups(retryEntries);
+        addEntriesToGroups(parseWordEntries(retryResponse.text || ""));
+        sendProgress("retry", `リトライ${retry + 1}完了: ${getTotal()}/100個`);
       }
 
-      const totalGenerated = Object.values(groups).reduce((s, g) => s + g.length, 0);
-      console.log(`Total generated: ${totalGenerated}/100`);
+      sendProgress("quality", `品質チェック中... (${getTotal()}個を精査)`);
+      const allWords = Object.values(groups).flat();
+      const wordListForCheck = allWords.map(e => `${e.word}/${e.reading}`).join("\n");
 
-      res.json({ groups, total: totalGenerated });
+      const qualityPrompt = `以下のワードリストを完全に初見の状態で精査せよ。各ワードについて以下を判定：
+1. それが「悪口」として成立しているか？（褒め言葉、中立的な形容詞、一般名詞は不合格）
+2. 意味がわかるか？（造語、意味不明な組み合わせは不合格）
+3. 単なる一般的な形容詞（「あつい」「さむい」「おおきい」等）は悪口ではない。不合格。
+
+不合格のワードのみ、1行に1つずつ出力せよ。
+合格ワードは出力しない。
+不合格が0個なら「ALL_PASS」とだけ出力。
+前置き不要。
+
+${wordListForCheck}`;
+
+      const qualityResponse = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: qualityPrompt,
+        config: { maxOutputTokens: 4096, safetySettings, thinkingConfig: { thinkingBudget: 0 } },
+      });
+      const qualityText = qualityResponse.text?.trim() || "";
+
+      if (qualityText !== "ALL_PASS") {
+        const failedWords = new Set(
+          qualityText.split("\n")
+            .map(line => line.replace(/^[\-\*\d\.\s]+/, "").split("/")[0].trim())
+            .filter(w => w.length > 0 && w !== "ALL_PASS")
+        );
+
+        if (failedWords.size > 0) {
+          sendProgress("quality", `${failedWords.size}個の低品質ワードを検出。差し替え中...`);
+
+          for (const key of Object.keys(groups)) {
+            groups[key] = groups[key].filter(e => !failedWords.has(e.word));
+          }
+
+          for (const k of Object.keys(suffixCounts)) delete suffixCounts[k];
+          for (const entry of Object.values(groups).flat()) {
+            const reading = entry.reading;
+            for (let sLen = 2; sLen <= Math.min(reading.length - 1, 4); sLen++) {
+              const readingSuffix = reading.slice(-sLen);
+              const key2 = `${sLen}:${readingSuffix}`;
+              suffixCounts[key2] = (suffixCounts[key2] || 0) + 1;
+            }
+          }
+
+          const MAX_QUALITY_RETRIES = 3;
+          for (let qr = 0; qr < MAX_QUALITY_RETRIES; qr++) {
+            const shortfalls: { charCount: number; need: number }[] = [];
+            for (const [cc, tgt] of Object.entries(GROUP_TARGETS)) {
+              const charCount = Number(cc);
+              const key = charCountToKey[charCount];
+              if (groups[key].length < tgt) shortfalls.push({ charCount, need: tgt - groups[key].length });
+            }
+            const totalShort = shortfalls.reduce((s, x) => s + x.need, 0);
+            if (totalShort === 0) break;
+
+            sendProgress("quality_retry", `品質差し替え中: 残り${totalShort}個 (リトライ${qr + 1})`);
+
+            const alreadyUsed = Object.values(groups).flat().map(e => e.word);
+            const qrGroupLines = shortfalls.map(s => {
+              const buf = Math.max(s.need * 4, s.need + 20);
+              return `===${s.charCount}文字===\nワード/ひらがな(romaji),...(${buf}個)`;
+            }).join("\n");
+
+            const qrPrompt = `以下のターゲットに特化した悪口・ディスりワードを生成せよ。
+必ず「悪口として成立する」ワードのみ生成すること。一般的な形容詞や造語は禁止。
+
+【ターゲット】
+${target}
+
+${severityInstruction}
+${ngSection}
+【厳守】全て異なるワード。重複禁止。意味の通じる悪口のみ。
+【既出リスト】: ${[...recentHistory, ...alreadyUsed].join(",")}
+
+【文字数ルール】ひらがな変換後の文字数でカウント。拗音・促音・撥音も各1文字。
+【出力フォーマット】各ワード「ワード/ひらがな読み(romaji)」形式。前置き不要。
+
+${qrGroupLines}
+
+【例】
+===4文字===
+嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu)...`;
+
+            const qrResponse = await ai.models.generateContent({
+              model: "gemini-2.5-flash",
+              contents: qrPrompt,
+              config: { maxOutputTokens: 8192, safetySettings, thinkingConfig: { thinkingBudget: 0 } },
+            });
+            addEntriesToGroups(parseWordEntries(qrResponse.text || ""));
+          }
+        }
+      }
+
+      const totalGenerated = getTotal();
+      sendProgress("done", `完了: ${totalGenerated}/100個`);
+
+      res.write(`data: ${JSON.stringify({ type: "result", groups, total: totalGenerated })}\n\n`);
+      res.end();
     } catch (error) {
       console.error("Diss generation error:", error);
-      res.status(500).json({ error: "ワード生成に失敗しました" });
+      try {
+        res.write(`data: ${JSON.stringify({ type: "error", error: "ワード生成に失敗しました" })}\n\n`);
+        res.end();
+      } catch {
+        res.status(500).json({ error: "ワード生成に失敗しました" });
+      }
     }
   });
 
@@ -660,6 +749,51 @@ ${retryGroupLines}
       res.send(data);
     } catch (error) {
       res.status(500).json({ error: "エクスポートに失敗しました" });
+    }
+  });
+
+  app.post("/api/ng-words", async (req, res) => {
+    try {
+      const schema = z.object({
+        words: z.array(z.object({
+          word: z.string().min(1),
+          reading: z.string().min(1),
+          romaji: z.string().min(1),
+        })),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "不正なデータです" });
+      }
+      const entries = parsed.data.words.map((w) => ({
+        word: w.word,
+        reading: w.reading,
+        romaji: w.romaji,
+      }));
+      const added = await addNgWords(entries);
+      const total = await getNgWordCount();
+      res.json({ added, total });
+    } catch (error) {
+      console.error("NG words add error:", error);
+      res.status(500).json({ error: "NGワードの追加に失敗しました" });
+    }
+  });
+
+  app.get("/api/ng-words/count", async (_req, res) => {
+    try {
+      const total = await getNgWordCount();
+      res.json({ total });
+    } catch (error) {
+      res.status(500).json({ error: "NGワード数の取得に失敗しました" });
+    }
+  });
+
+  app.delete("/api/ng-words", async (_req, res) => {
+    try {
+      await clearNgWords();
+      res.json({ success: true, total: 0 });
+    } catch (error) {
+      res.status(500).json({ error: "NGワードの全削除に失敗しました" });
     }
   });
 

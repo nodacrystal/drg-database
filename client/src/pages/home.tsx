@@ -96,6 +96,8 @@ export default function Home() {
   const [dissGroups, setDissGroups] = useState<DissGroups | null>(null);
   const [activeTab, setActiveTab] = useState<"gen" | "fav">("gen");
   const [checkedWords, setCheckedWords] = useState<Set<string>>(new Set());
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [progressMessage, setProgressMessage] = useState<string>("");
 
   const favQuery = useQuery<{ groups: FavGroup[]; total: number }>({
     queryKey: ["/api/favorites"],
@@ -153,30 +155,67 @@ export default function Home() {
     },
   });
 
-  const dissMutation = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/diss", { target, level });
-      return res.json();
-    },
-    onSuccess: (data: { groups: DissGroups; total?: number }) => {
-      setDissGroups(data.groups);
-      const all = [
-        ...data.groups.seven,
-        ...data.groups.six,
-        ...data.groups.five,
-        ...data.groups.four,
-        ...data.groups.three,
-        ...data.groups.two,
-      ];
-      setCheckedWords(new Set(all.map((e) => e.word)));
-      if (data.total !== undefined && data.total < 100) {
-        toast({ title: "注意", description: `${data.total}/100個のみ生成できました。再度お試しください。` });
+  const generateDissSSE = useCallback(async () => {
+    setIsGenerating(true);
+    setProgressMessage("準備中...");
+    setDissGroups(null);
+
+    try {
+      const response = await fetch("/api/diss", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target, level }),
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => null);
+        throw new Error(errData?.error || "ワード生成に失敗しました");
       }
-    },
-    onError: () => {
-      toast({ title: "エラー", description: "ワード生成に失敗しました", variant: "destructive" });
-    },
-  });
+
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("No reader");
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data: ")) continue;
+          try {
+            const data = JSON.parse(trimmed.slice(6));
+            if (data.type === "progress") {
+              setProgressMessage(data.detail);
+            } else if (data.type === "result") {
+              setDissGroups(data.groups);
+              const all = [
+                ...data.groups.seven, ...data.groups.six, ...data.groups.five,
+                ...data.groups.four, ...data.groups.three, ...data.groups.two,
+              ];
+              setCheckedWords(new Set(all.map((e: WordEntry) => e.word)));
+              if (data.total < 100) {
+                toast({ title: "注意", description: `${data.total}/100個のみ生成できました。再度お試しください。` });
+              }
+            } else if (data.type === "error") {
+              toast({ title: "エラー", description: data.error, variant: "destructive" });
+            }
+          } catch {}
+        }
+      }
+    } catch (err) {
+      toast({ title: "エラー", description: err instanceof Error ? err.message : "ワード生成に失敗しました", variant: "destructive" });
+    } finally {
+      setIsGenerating(false);
+      setProgressMessage("");
+    }
+  }, [target, level, toast]);
 
   const addFavMutation = useMutation({
     mutationFn: async (words: WordEntry[]) => {
@@ -216,14 +255,26 @@ export default function Home() {
     },
   });
 
-  const addToFavorites = useCallback(() => {
+  const addToFavorites = useCallback(async () => {
     if (checkedWords.size === 0) {
       toast({ title: "未選択", description: "ワードを選択してください" });
       return;
     }
     const allEntries = getAllEntries();
     const selected = allEntries.filter((e) => checkedWords.has(e.word));
+    const unchecked = allEntries.filter((e) => !checkedWords.has(e.word));
+
     addFavMutation.mutate(selected);
+
+    if (unchecked.length > 0) {
+      try {
+        await fetch("/api/ng-words", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ words: unchecked.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji })) }),
+        });
+      } catch {}
+    }
     setCheckedWords(new Set());
   }, [checkedWords, dissGroups, toast]);
 
@@ -247,8 +298,8 @@ export default function Home() {
       toast({ title: "年齢確認", description: "レベル8以上は年齢確認が必要です", variant: "destructive" });
       return;
     }
-    dissMutation.mutate();
-  }, [target, level, ageConfirmed, dissMutation, toast]);
+    generateDissSSE();
+  }, [target, level, ageConfirmed, generateDissSSE, toast]);
 
   const progressPercent = Math.min((totalCount / 10000) * 100, 100);
 
@@ -567,11 +618,11 @@ export default function Home() {
 
             <Button
               onClick={handleGenerateDiss}
-              disabled={dissMutation.isPending || !target}
+              disabled={isGenerating || !target}
               className="w-full"
               data-testid="button-generate-diss"
             >
-              {dissMutation.isPending ? (
+              {isGenerating ? (
                 <Loader2 className="w-4 h-4 animate-spin mr-2" />
               ) : (
                 <Zap className="w-4 h-4 mr-2" />
@@ -582,7 +633,7 @@ export default function Home() {
         </Card>
 
         <AnimatePresence>
-          {(dissGroups || dissMutation.isPending) && (
+          {(dissGroups || isGenerating) && (
             <motion.div
               initial={{ opacity: 0, y: 12 }}
               animate={{ opacity: 1, y: 0 }}
@@ -616,9 +667,13 @@ export default function Home() {
                     )}
                   </div>
 
-                  {dissMutation.isPending ? (
-                    <div className="space-y-2">
-                      {Array.from({ length: 8 }).map((_, i) => (
+                  {isGenerating ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-3 rounded-md bg-muted/50 p-3 border border-border/50">
+                        <Loader2 className="w-5 h-5 animate-spin text-primary shrink-0" />
+                        <span className="text-sm" data-testid="text-progress">{progressMessage}</span>
+                      </div>
+                      {Array.from({ length: 4 }).map((_, i) => (
                         <Skeleton key={i} className="h-10 w-full rounded-md" />
                       ))}
                     </div>
