@@ -92,29 +92,46 @@ export async function registerRoutes(
       const nameQuery = typeof req.query.name === "string" ? req.query.name.trim() : "";
 
       let prompt: string;
+      const formatInstruction = `以下のフォーマットで必ず4行で出力せよ。省略禁止。余計な前置き・後書き不要。
+名前：（実名を少しもじった偽名）
+性格：（性格の特徴・弱点・ダメなところを具体的に。20〜40文字程度）
+見た目：（外見の特徴・コンプレックスになりそうな点を具体的に。20〜40文字程度）
+経歴：（職業・実績・スキャンダル・黒歴史を具体的に。20〜40文字程度）`;
+
       if (nameQuery) {
-        prompt = `実在の有名人「${nameQuery}」を元にした架空キャラクターを生成。名前を少しだけもじった偽名にすること（例：ヒカキン→ピカキン）。以下のフォーマットで出力。余計な説明不要。
-名前：〇〇
-性格：（端的に1行）
-見た目：（端的に1行）
-経歴：（端的に1行）`;
+        prompt = `実在の有名人「${nameQuery}」を元にした架空キャラクターを生成せよ。\n${formatInstruction}`;
       } else {
-        prompt = `実在する有名人（タレント、政治家、YouTuber、歌手、俳優、お笑い芸人など）を一人ランダムに選び、架空キャラクターを生成。名前を少しだけもじった偽名にすること。以下のフォーマットで出力。余計な説明不要。
-名前：〇〇
-性格：（端的に1行）
-見た目：（端的に1行）
-経歴：（端的に1行）`;
+        prompt = `実在する有名人（タレント、政治家、YouTuber、歌手、俳優、お笑い芸人など）を一人ランダムに選び、架空キャラクターを生成せよ。\n${formatInstruction}`;
       }
 
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: prompt,
-        config: {
-          maxOutputTokens: 512,
-          safetySettings,
-        },
-      });
-      const text = response.text?.trim() || "謎の人物";
+      let text = "";
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const response = await ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: prompt,
+          config: {
+            maxOutputTokens: 1024,
+            safetySettings,
+          },
+        });
+        text = response.text?.trim() || "";
+
+        const hasName = /名前[：:]/.test(text);
+        const hasPersonality = /性格[：:]/.test(text);
+        const hasAppearance = /見た目[：:]/.test(text);
+        const hasHistory = /経歴[：:]/.test(text);
+
+        if (hasName && hasPersonality && hasAppearance && hasHistory) {
+          break;
+        }
+        console.log(`Target attempt ${attempt + 1} incomplete, retrying...`, text.substring(0, 100));
+        text = "";
+      }
+
+      if (!text) {
+        return res.status(500).json({ error: "ターゲット生成に失敗しました。再試行してください。" });
+      }
+
       res.json({ target: text });
     } catch (error) {
       console.error("Target generation error:", error);
