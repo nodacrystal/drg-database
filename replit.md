@@ -10,10 +10,10 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - **Gemini**: `gemini-2.5-flash` model, all harm categories OFF, `thinkingBudget: 0`
 
 ## File Structure
-- `server/routes.ts` — API routes, AI generation, 10-level system (~350 lines)
+- `server/routes.ts` — API routes, AI generation, multi-wave system (~460 lines)
 - `server/targets.ts` — Hardcoded ~150 comedian target data
 - `server/storage.ts` — Database CRUD operations via Drizzle ORM
-- `client/src/pages/home.tsx` — Single-page UI (~600 lines)
+- `client/src/pages/home.tsx` — Single-page UI (~575 lines)
 - `shared/schema.ts` — Drizzle schema definitions
 
 ## Level System (1-10)
@@ -38,21 +38,27 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 
 ## Key Features
 - **Target selection**: Random from ~150 hardcoded Japanese comedians
-- **Generation count**: Selectable 10, 50, or 100 words per batch
-- **Character count ratio** (preserved across all counts): 2文字=5%, 3文字=30%, 4文字=30%, 5文字=20%, 6文字=10%, 7文字=5%
-- **Parallel AI generation**: 2 simultaneous Gemini calls for 50+ words (single call for 10)
-- **RAG research**: AI gathers target info in parallel with DB queries (praise-focused for Lv1-3, diss-focused for Lv4-10)
-- **Auto-retry**: Up to 5 retries (2 for 10-word batches)
-- **Live timer**: Running timer from generation start to completion
-- **Timing diagnostics**: Server logs `[TIMING]` for each phase (db+research, generation, retries, total)
-- Server-side suffix dedup: max 2 words with same reading suffix per batch
-- NG words system: unchecked words saved to ng_words table, excluded from future generation
+- **Generation count**: Selectable 10, 50, 100, or 1000 words per batch
+- **Character count ratio**: 2文字=5%, 3文字=30%, 4文字=30%, 5文字=20%, 6文字=10%, 7文字=5%
+- **Multi-wave generation**: Unified wave-based system for all counts
+  - 10 words: 1 call/wave, max 3 waves
+  - 50-100 words: 2 calls/wave, max 7 waves
+  - 1000 words: 5 calls/wave, max 20 waves, 80 words/call cap
+- **NG word analysis**: When 5+ NG words exist, AI analyzes rejection patterns and avoids similar words
+- **Cross-character dedup**: Prevents reading overlap across character groups (e.g., "バカ" + "馬鹿野郎" blocked)
+- **Sentences allowed**: Words, phrases, and short sentences all accepted if natural
+- **RAG research**: AI gathers target info (praise for Lv1-3, diss for Lv4-10)
+- **Live timer**: Running timer with green=success, red=error states
+- **Timing diagnostics**: Server logs `[TIMING]` for each wave
+- Server-side suffix dedup: max 2 words with same reading suffix
+- NG words system: unchecked words saved to ng_words table
 - Progress bar: shows count / 10,000 target
 - Age confirmation for level 8+
+- SSE streaming with `res.flushHeaders()` + `X-Accel-Buffering: no` for proxy compatibility
 
 ## API Routes
 - `GET /api/target` - Random target from hardcoded comedian list
-- `POST /api/diss` - Generate words via SSE. Body: `{ target, level, count }`
+- `POST /api/diss` - Generate words via SSE. Body: `{ target, level, count }` (count: 10|50|100|1000)
 - `GET /api/favorites` - Get all words grouped by vowel pattern
 - `POST /api/favorites` - Add words to DB (bulk insert, skip duplicates)
 - `DELETE /api/favorites/:id` - Delete single word
@@ -65,8 +71,10 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - `DELETE /api/ng-words` - Clear all NG words
 
 ## Recent Changes
-- 2026-03-09: 10-level system (Lv1 リスペクト → Lv10 放禁) with distinct prompts per level
-- 2026-03-09: Generation count selector (10/50/100) with proportional character count scaling
-- 2026-03-09: Server-side timing diagnostics (`[TIMING]` logs) to identify bottlenecks
-- 2026-03-09: Level-aware RAG research (praise for Lv1-3, diss for Lv4-10)
-- 2026-03-09: Single Gemini call for 10-word batches (faster), parallel for 50+
+- 2026-03-09: 1000-word generation with multi-wave parallel system (5 parallel calls/wave)
+- 2026-03-09: NG word pattern analysis (AI analyzes rejection trends, feeds into prompts)
+- 2026-03-09: Cross-character reading overlap dedup (prefix/suffix matching)
+- 2026-03-09: Sentences/phrases allowed in prompts alongside single words
+- 2026-03-09: SSE fix: `req.on("close")` → `res.on("close")` + `flushHeaders()` for reliable streaming
+- 2026-03-09: 10-level system with distinct prompts per level
+- 2026-03-09: Generation count selector (10/50/100/1000)

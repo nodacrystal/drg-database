@@ -12,7 +12,7 @@ import { TARGETS } from "./targets";
 const dissRequestSchema = z.object({
   target: z.string().min(1),
   level: z.number().int().min(1).max(10),
-  count: z.number().int().refine(v => [10, 50, 100].includes(v)),
+  count: z.number().int().refine(v => [10, 50, 100, 1000].includes(v)),
 });
 
 const wordArraySchema = z.object({
@@ -229,19 +229,50 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       logTiming("db+research");
       send("init", `準備完了 (DB: ${existingWords.length}語, NG: ${ngWordList.length}語, ${formatElapsed(Date.now() - dbStart)})`);
 
-      const historyList = existingWords.length > 0 ? existingWords.slice(-200).join(",") : "なし";
-      const ngList = ngWordList.slice(-100).join(",");
-      const ngSection = ngList ? `\n【NGワード - 避けよ】\n${ngList}\n` : "";
+      let ngAnalysis = "";
+      if (ngWordList.length >= 5) {
+        send("init", "NGワード傾向分析中...");
+        try {
+          const r = await ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: `以下はユーザーが拒否した日本語ワード一覧。どのような種類・傾向のワードが拒否されているか分析し、今後の生成で避けるべきパターンを箇条書き3-5行で簡潔に述べよ:\n${ngWordList.slice(-300).join("、")}`,
+            config: geminiConfig,
+          });
+          ngAnalysis = r.text || "";
+        } catch {}
+        logTiming("ng-analysis");
+      }
+
+      const maxNgInPrompt = count >= 1000 ? 300 : 100;
+      const ngList = ngWordList.slice(-maxNgInPrompt).join(",");
+      const ngSection = ngList ? `\n【NGワード - 生成禁止】\n${ngList}\n` : "";
+      const ngAnalysisSection = ngAnalysis ? `\n【NG傾向分析 - このような傾向のワードも避けよ】\n${ngAnalysis}\n` : "";
       const research = researchResult ? `\n【リサーチ情報 - この情報を元にワードを考案せよ】\n${researchResult}\n` : "";
 
       const groups: Record<string, WordEntry[]> = { seven: [], six: [], five: [], four: [], three: [], two: [] };
       const seen = new Set<string>([...existingWords, ...ngWordList]);
       const suffixCounts: Record<string, number> = {};
 
+      const acceptedReadings: string[] = [];
+
+      function hasReadingOverlap(reading: string, charCount: number): boolean {
+        if (reading.length < 3) return false;
+        const minOverlap = 3;
+        for (const existing of acceptedReadings) {
+          const existingLen = existing.length;
+          if (existingLen < 3) continue;
+          if (existingLen === charCount) continue;
+          const [shorter, longer] = reading.length <= existingLen
+            ? [reading, existing] : [existing, reading];
+          if (shorter.length >= minOverlap && (longer.startsWith(shorter) || longer.endsWith(shorter))) return true;
+        }
+        return false;
+      }
+
       function addEntries(entries: WordEntry[]) {
         for (const e of entries) {
           if (seen.has(e.word)) continue;
-          seen.add(e.word);
+          if (hasReadingOverlap(e.reading, e.reading.length)) continue;
           let skip = false;
           for (let s = 2; s <= Math.min(e.reading.length - 1, 4); s++) {
             if ((suffixCounts[`${s}:${e.reading.slice(-s)}`] || 0) >= 2) { skip = true; break; }
@@ -251,6 +282,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           const tgt = groupTargets[e.reading.length];
           if (key && tgt && groups[key].length < tgt) {
             groups[key].push(e);
+            seen.add(e.word);
+            acceptedReadings.push(e.reading);
             for (let s = 2; s <= Math.min(e.reading.length - 1, 4); s++) {
               const k = `${s}:${e.reading.slice(-s)}`;
               suffixCounts[k] = (suffixCounts[k] || 0) + 1;
@@ -263,76 +296,73 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       const contentType = level <= 2 ? "褒め言葉・称賛" : level <= 4 ? "イジり・軽口" : "悪口・ディスりワード";
       const qualityRule = level <= 3
-        ? `全て異なるワード。ターゲット特化。意味の通じる${contentType}のみ。造語不可。一般形容詞不可。`
-        : `全て異なるワード。ターゲット特化の個人攻撃。意味の通じる${contentType}のみ。造語不可。一般形容詞不可。`;
+        ? `全て異なるワード。ターゲット特化。意味の通じる自然な${contentType}のみ。単語・フレーズ・短い文いずれも可。造語不可。一般形容詞不可。`
+        : `全て異なるワード。ターゲット特化の個人攻撃。意味の通じる自然な${contentType}のみ。単語・フレーズ・短い文いずれも可。造語不可。一般形容詞不可。`;
 
-      const rules = `【厳守ルール】
-${qualityRule}
-漢字は小学生レベル。語尾2文字以上同じ読みは最大2個まで。多様な語尾パターンを使え。
-【レベル${level}/10: ${levelConfig.label}】${levelConfig.instruction}
-【既出リスト】: ${historyList}
-【文字数ルール】ひらがな変換後の文字数。拗音・促音・撥音も各1文字。出力前に指折り確認！
-【フォーマット】各ワード「ワード/ひらがな読み(romaji)」形式。前置き不要。即座に出力。`;
+      const examples = level <= 3
+        ? `===2文字===\n神/かみ(kami),王/おう(ou)...\n===3文字===\n天才/てんさい(tensai),凄い/すごい(sugoi)...\n===4文字===\n実力派/じつりょくは(jitsuryokuha),努力家/どりょくか(doryokuka)...\n===5文字===\nすばらしい/すばらしい(subarashii)...\n===6文字===\nカリスマてき/かりすまてき(karisumateki)...\n===7文字===\nだいせんぱいです/だいせんぱいです(daisenpaidesuu)...`
+        : `===2文字===\nクズ/くず(kuzu),カス/かす(kasu)...\n===3文字===\nダサい/ださい(dasai),無能/むのう(munou)...\n===4文字===\n嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu)...\n===5文字===\nできそこない/できそこない(dekisokonai)...\n===6文字===\nおちぶれやろう/おちぶれやろう(ochibureyarou)...\n===7文字===\nのうたりんやろう/のうたりんやろう(noutarinyarou)...`;
 
-      const makePrompt = (groupDefs: string, examples: string) =>
-        `${contentType}を生成せよ。\n\n【ターゲット】\n${target}\n${research}${ngSection}${rules}\n\n${groupDefs}\n\n【例】\n${examples}`;
-
-      const activeGroups = Object.entries(groupTargets).filter(([, tgt]) => tgt > 0).map(([cc]) => Number(cc));
-      const shortChars = activeGroups.filter(c => c <= 4);
-      const longChars = activeGroups.filter(c => c >= 5);
-
-      const makeGroupDefs = (chars: number[]) =>
-        chars.map(n => `===${n}文字===\nワード/ひらがな(romaji),...(${groupBuffers[n]}個 ※目標${groupTargets[n]}個)`).join("\n");
-
-      const shortExamples = level <= 3
-        ? `===2文字===\n神/かみ(kami),王/おう(ou)...\n===3文字===\n天才/てんさい(tensai),凄い/すごい(sugoi)...\n===4文字===\n実力派/じつりょくは(jitsuryokuha),努力家/どりょくか(doryokuka)...`
-        : `===2文字===\nクズ/くず(kuzu),カス/かす(kasu)...\n===3文字===\nダサい/ださい(dasai),無能/むのう(munou)...\n===4文字===\n嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu)...`;
-      const longExamples = level <= 3
-        ? `===5文字===\nすばらしい/すばらしい(subarashii)...\n===6文字===\nカリスマてき/かりすまてき(karisumateki)...\n===7文字===\nだいせんぱいです/だいせんぱいです(daisenpaidesuu)...`
-        : `===5文字===\nできそこない/できそこない(dekisokonai)...\n===6文字===\nおちぶれやろう/おちぶれやろう(ochibureyarou)...\n===7文字===\nのうたりんやろう/のうたりんやろう(noutarinyarou)...`;
+      const callsPerWave = count <= 10 ? 1 : count <= 100 ? 2 : 5;
+      const maxWaves = count <= 10 ? 3 : count <= 100 ? 7 : 20;
+      const perCallCap = count > 100 ? 80 : 200;
+      const genConfig = count > 100
+        ? { ...geminiConfig, maxOutputTokens: 16384 }
+        : geminiConfig;
 
       send("generate", "AI生成中...");
       const genStart = Date.now();
 
-      if (count <= 10 || longChars.length === 0) {
-        const allDefs = makeGroupDefs(activeGroups);
-        const r = await ai.models.generateContent({ model: "gemini-2.5-flash", contents: makePrompt(allDefs, shortExamples), config: geminiConfig });
-        addEntries(parseWordEntries(r.text || ""));
-      } else {
-        const [rA, rB] = await Promise.allSettled([
-          ai.models.generateContent({ model: "gemini-2.5-flash", contents: makePrompt(makeGroupDefs(shortChars), shortExamples), config: geminiConfig }),
-          ai.models.generateContent({ model: "gemini-2.5-flash", contents: makePrompt(makeGroupDefs(longChars), longExamples), config: geminiConfig }),
-        ]);
-        if (rA.status === "fulfilled") addEntries(parseWordEntries(rA.value.text || ""));
-        else send("generate", "短文字グループ生成失敗。リトライで補填。");
-        if (rB.status === "fulfilled") addEntries(parseWordEntries(rB.value.text || ""));
-        else send("generate", "長文字グループ生成失敗。リトライで補填。");
-      }
+      for (let wave = 0; wave < maxWaves && total() < count; wave++) {
+        if (disconnected) break;
 
-      logTiming("generation");
-      send("generate", `生成完了: ${total()}/${count}個 (生成${formatElapsed(Date.now() - genStart)})`);
+        const needs = Object.entries(groupTargets)
+          .map(([cc, tgt]) => ({ cc: Number(cc), need: tgt - groups[CHAR_TO_KEY[Number(cc)]].length }))
+          .filter(n => n.need > 0);
+        const totalNeed = needs.reduce((s, n) => s + n.need, 0);
+        if (totalNeed <= 0) break;
 
-      const maxRetries = count <= 10 ? 2 : 5;
-      for (let retry = 0; retry < maxRetries; retry++) {
-        const shortfalls = Object.entries(groupTargets)
-          .map(([cc, tgt]) => ({ charCount: Number(cc), need: tgt - groups[CHAR_TO_KEY[Number(cc)]].length }))
-          .filter(s => s.need > 0);
-        if (shortfalls.reduce((s, x) => s + x.need, 0) === 0) break;
-
-        send("retry", `不足${shortfalls.reduce((s, x) => s + x.need, 0)}個を追加生成中 (リトライ${retry + 1})`);
-        const retryStart = Date.now();
-
+        const numCalls = Math.min(callsPerWave, Math.max(1, Math.ceil(totalNeed / perCallCap)));
         const used = Object.values(groups).flat().map(e => e.word);
-        const retryGroups = shortfalls.map(s => `===${s.charCount}文字===\nワード/ひらがな(romaji),...(${Math.max(s.need * 4, s.need + 10)}個)`).join("\n");
+        const historyList = [...existingWords.slice(-200), ...used.slice(-500)].join(",") || "なし";
 
-        const rr = await ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: `${contentType}を追加生成せよ。\n\n【ターゲット】\n${target}\n${research}【レベル${level}/10: ${levelConfig.label}】${levelConfig.instruction}\n${ngSection}【厳守】全て異なるワード。意味の通じる${contentType}のみ。造語不可。\n【既出】: ${[...existingWords.slice(-200), ...used].join(",")}\n【文字数ルール】ひらがな変換後の文字数。\n【フォーマット】「ワード/ひらがな読み(romaji)」形式。前置き不要。\n\n${retryGroups}`,
-          config: geminiConfig,
+        const waveRules = `【厳守ルール】
+${qualityRule}
+漢字は小学生レベル。語尾2文字以上同じ読みは最大2個まで。多様な語尾パターンを使え。
+異なる文字数グループで同じ言葉やその読みの一部を使い回すな（例：「バカ」を使ったら「馬鹿野郎」は不可。「やろう」を使ったら「クソ野郎」も不可）。
+【レベル${level}/10: ${levelConfig.label}】${levelConfig.instruction}
+【既出リスト - 絶対に重複するな】: ${historyList}
+【文字数ルール】ひらがな変換後の文字数。拗音・促音・撥音も各1文字。出力前に指折り確認！
+【フォーマット】各ワード「ワード/ひらがな読み(romaji)」形式。前置き不要。即座に出力。`;
+
+        const promises = Array.from({ length: numCalls }, () => {
+          const groupDefs = needs.map(n => {
+            const perCall = Math.min(Math.ceil(n.need / numCalls), perCallCap);
+            const buf = Math.max(perCall + 5, Math.ceil(perCall * 1.3));
+            return `===${n.cc}文字===\nワード/ひらがな(romaji),...(${buf}個 ※目標${perCall}個)`;
+          }).join("\n");
+
+          return ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: `${contentType}を生成せよ。\n\n【ターゲット】\n${target}\n${research}${ngSection}${ngAnalysisSection}${waveRules}\n\n${groupDefs}\n\n【例】\n${examples}`,
+            config: genConfig,
+          });
         });
-        addEntries(parseWordEntries(rr.text || ""));
-        logTiming(`retry${retry + 1}`);
-        send("retry", `リトライ${retry + 1}完了: ${total()}/${count}個 (${formatElapsed(Date.now() - retryStart)})`);
+
+        const prevTotal = total();
+        const results = await Promise.allSettled(promises);
+        for (const r of results) {
+          if (r.status === "fulfilled") addEntries(parseWordEntries(r.value.text || ""));
+        }
+        const waveAdded = total() - prevTotal;
+
+        logTiming(`wave${wave + 1}`);
+        send("generate", `Wave ${wave + 1}: +${waveAdded}個 (計${total()}/${count}個, ${formatElapsed(Date.now() - genStart)})`);
+
+        if (waveAdded === 0 && wave >= 2) {
+          send("generate", "追加生成が困難なため終了");
+          break;
+        }
       }
 
       if (heartbeat) clearInterval(heartbeat);

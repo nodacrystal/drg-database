@@ -50,7 +50,7 @@ const GROUP_KEYS: Array<{ key: keyof DissGroups; label: string }> = [
   { key: "three", label: "3文字" }, { key: "two", label: "2文字" },
 ];
 
-const COUNT_OPTIONS = [10, 50, 100] as const;
+const COUNT_OPTIONS = [10, 50, 100, 1000] as const;
 
 function formatTimer(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -64,7 +64,7 @@ export default function Home() {
 
   const [target, setTarget] = useState("");
   const [level, setLevel] = useState(5);
-  const [genCount, setGenCount] = useState<10 | 50 | 100>(100);
+  const [genCount, setGenCount] = useState<10 | 50 | 100 | 1000>(100);
   const [ageConfirmed, setAgeConfirmed] = useState(false);
   const [dissGroups, setDissGroups] = useState<DissGroups | null>(null);
   const [activeTab, setActiveTab] = useState<"gen" | "fav" | "ng">("gen");
