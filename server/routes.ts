@@ -2,16 +2,17 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from "@google/genai";
 import { z } from "zod";
+import {
+  getAllWords,
+  getWordCount,
+  getWordStrings,
+  addWords,
+  deleteWord,
+  clearAllWords,
+  exportWords,
+} from "./storage";
 
 const dissRequestSchema = z.object({
-  target: z.string().min(1),
-  level: z.number().int().min(1).max(10),
-  history: z.array(z.string()).optional().default([]),
-});
-
-const rhymeRequestSchema = z.object({
-  word: z.string().min(1),
-  romaji: z.string().min(1),
   target: z.string().min(1),
   level: z.number().int().min(1).max(10),
 });
@@ -37,9 +38,8 @@ interface WordEntry {
   romaji: string;
 }
 
-function isHiragana(ch: string): boolean {
-  const code = ch.charCodeAt(0);
-  return code >= 0x3040 && code <= 0x309F;
+function extractVowels(romaji: string): string {
+  return romaji.replace(/[^aeiou]/gi, "").toLowerCase();
 }
 
 function parseWordEntries(section: string): WordEntry[] {
@@ -58,20 +58,29 @@ function parseWordEntries(section: string): WordEntry[] {
           reading: match[2].trim(),
           romaji: match[3].trim().toLowerCase(),
         });
-      } else {
-        const fallback = item.match(/^(.+?)\s*[\(（]([a-zA-Z\s\-']+)[\)）]$/);
-        if (fallback) {
-          entries.push({
-            word: fallback[1].trim(),
-            reading: "",
-            romaji: fallback[2].trim().toLowerCase(),
-          });
-        }
       }
     }
   }
   return entries;
 }
+
+const GROUP_TARGETS: Record<number, number> = {
+  2: 10,
+  3: 20,
+  4: 30,
+  5: 20,
+  6: 10,
+  7: 5,
+};
+
+const GROUP_BUFFER: Record<number, number> = {
+  2: 15,
+  3: 30,
+  4: 45,
+  5: 30,
+  6: 15,
+  7: 10,
+};
 
 export async function registerRoutes(
   httpServer: Server,
@@ -84,57 +93,20 @@ export async function registerRoutes(
 
       let prompt: string;
       if (nameQuery) {
-        prompt = `あなたは架空のキャラクター生成AIです。
-ユーザーが「${nameQuery}」という名前を入力しました。
-この名前に該当する実在の有名人・著名人を特定し、その人物を元にした架空キャラクターを生成してください。
-
-【ルール】
-1. 名前：「${nameQuery}」の名前を少しだけもじった偽名にすること（例：松本人志→松元仁志、ヒカキン→ピカキンなど）
-2. 元ネタ：「${nameQuery}」の実際の情報をできるだけ正確に反映すること
-3. プロフィール：以下の情報を含めること。知っている情報はできるだけ正確に、わからない情報は架空で補完すること。
-   - 職業・肩書き
-   - 見た目の特徴（体型、顔立ち、服装など）
-   - 性格の特徴（長所と短所）
-   - 世間からの評判やイメージ
-   - 過去のスキャンダルや問題行動（実際の話をベースに脚色。見つからなければ架空で作成）
-4. 出力フォーマット：
-   名前：〇〇〇〇
-   職業：〇〇
-   見た目：〇〇
-   性格：〇〇
-   評判：〇〇
-   黒歴史：〇〇
-
-必ず上記フォーマットで出力してください。余計な前置きや説明は不要です。`;
+        prompt = `実在の有名人「${nameQuery}」を元にした架空キャラクターを生成。名前を少しだけもじった偽名にすること（例：ヒカキン→ピカキン）。以下のフォーマットで出力。余計な説明不要。
+名前：〇〇
+特徴：（職業・見た目・性格・弱点・スキャンダルを1〜2行で簡潔に）`;
       } else {
-        prompt = `あなたは架空のキャラクター生成AIです。
-以下のルールに従って、実在する有名人（タレント、政治家、インフルエンサー、YouTuber、歌手、俳優、お笑い芸人など）を一人ランダムに選び、その人物を元にした架空キャラクターを生成してください。
-
-【ルール】
-1. 名前：元の有名人の名前を少しだけもじった偽名にすること（例：松本人志→松元仁志、ヒカキン→ピカキンなど）
-2. 元ネタ：誰がモデルかわかる程度に特徴を残すこと
-3. プロフィール：以下の情報を含めること
-   - 職業・肩書き
-   - 見た目の特徴（体型、顔立ち、服装など）
-   - 性格の特徴（長所と短所）
-   - 世間からの評判やイメージ
-   - 過去のスキャンダルや問題行動（元ネタの人物の実際の話をベースに脚色）
-4. 出力フォーマット：
-   名前：〇〇〇〇
-   職業：〇〇
-   見た目：〇〇
-   性格：〇〇
-   評判：〇〇
-   黒歴史：〇〇
-
-必ず上記フォーマットで出力してください。余計な前置きや説明は不要です。`;
+        prompt = `実在する有名人（タレント、政治家、YouTuber、歌手、俳優、お笑い芸人など）を一人ランダムに選び、架空キャラクターを生成。名前を少しだけもじった偽名にすること。以下のフォーマットで出力。余計な説明不要。
+名前：〇〇
+特徴：（職業・見た目・性格・弱点・スキャンダルを1〜2行で簡潔に）`;
       }
 
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",
         contents: prompt,
         config: {
-          maxOutputTokens: 8192,
+          maxOutputTokens: 512,
           safetySettings,
         },
       });
@@ -152,94 +124,112 @@ export async function registerRoutes(
       if (!parsed.success) {
         return res.status(400).json({ error: "ターゲットとレベル(1-10)が必要です" });
       }
-      const { target, level, history } = parsed.data;
+      const { target, level } = parsed.data;
+
+      const existingWords = await getWordStrings();
+      const recentHistory = existingWords.slice(-200);
+      const historyList = recentHistory.length > 0 ? recentHistory.join(",") : "なし";
 
       let severityInstruction = "";
       if (level >= 8) {
-        severityInstruction = "【警告：極限まで過激に】18歳以上向けの、放送禁止用語に近い直接的で汚い罵倒語を使用してください。上品さは一切不要です。人間の尊厳を徹底的に踏みにじる、最も下劣で攻撃的な言葉を選んでください。このキャラの弱点・欠点・スキャンダルを最大限えぐる言葉にすること。";
+        severityInstruction = "【警告：極限まで過激に】放送禁止用語に近い直接的で汚い罵倒語を使用。人間の尊厳を踏みにじる最も下劣で攻撃的な言葉を選べ。";
       } else {
-        severityInstruction = `レベル${level}/10に応じた、非常に直接的で容赦のない辛辣なダメ出しにしてください。このキャラの弱点・欠点をピンポイントで突く言葉にすること。`;
+        severityInstruction = `レベル${level}/10に応じた直接的で容赦のない辛辣なディスワードにすること。`;
       }
 
-      const historyList = history.length > 0 ? history.join(",") : "なし";
+      const prompt = `以下のターゲットに特化した悪口・ディスりワードを生成せよ。
 
-      const prompt = `以下のターゲットのプロフィールを読み、この人物に特化した悪口・ディスりワードを生成してください。
-
-【ターゲット情報】
+【ターゲット】
 ${target}
 
 ${severityInstruction}
 
-【厳守ルール - 必ず守ること】
-1. 以下の3グループに分けて生成すること。各グループ15個ずつ、合計45個生成すること。各グループの見出しも出力すること。
-2. 45個すべて異なるワードにすること。同じ言葉は絶対に使わない。
-3. 内容：このターゲットの見た目・性格・評判・黒歴史に基づいた、相手が最も傷つく個人攻撃にすること。
-4. 表現：曖昧な表現は避け、直接的で汚い表現を積極的に使うこと。
+【厳守ルール】
+1. 以下の6グループに分けて生成。各グループの見出しも出力すること。
+2. 全て異なるワードにすること。同じ言葉は絶対に使わない。
+3. ターゲットの特徴・弱点に基づいた個人攻撃にすること。
+4. 直接的で汚い表現を積極的に使うこと。
 5. 漢字：小学生が理解できる範囲。難しい漢字は禁止。
-6. 重複禁止：以下の【既出リスト】にあるワードは絶対に出力しないこと。
+6. 重複禁止：以下のワードは絶対に出力しないこと。
 【既出リスト】: ${historyList}
 
 【文字数ルール - 超重要・厳守】
 - 文字数は「全てひらがなに変換したときの文字数」でカウントする。
-- 拗音（しゃ、きょ等の小さい文字）も1文字としてカウントする。促音（っ）も1文字。撥音（ん）も1文字。
+- 拗音（しゃ、きょ等の小さい文字）も1文字。促音（っ）も1文字。撥音（ん）も1文字。
 - 具体例：
-  - 2文字：クズ→くず(2文字)、カス→かす(2文字)、ブタ→ぶた(2文字)、ゴミ→ごみ(2文字)
-  - 3文字：ダサい→ださい(3文字)、無能→むのう(3文字)、ヘタレ→へたれ(3文字)、チキン→ちきん(3文字)
-  - 4文字：うそつき→うそつき(4文字)、ゴミクズ→ごみくず(4文字)、バカたれ→ばかたれ(4文字)
+  2文字：クズ→くず、カス→かす、ゴミ→ごみ
+  3文字：ダサい→ださい、無能→むのう、ヘタレ→へたれ
+  4文字：うそつき→うそつき、ゴミクズ→ごみくず
+  5文字：できそこない→できそこない、はらぐろい→はらぐろい
+  6文字：おちぶれやろう→おちぶれやろう
+  7文字：のうたりんやろう→のうたりんやろう
 - 必ず出力前にひらがなに変換して文字数を指折り確認すること！
 
 【出力フォーマット - 厳守】
-各ワードは「ワード/ひらがな読み(romaji)」の形式で出力すること。スラッシュの後にひらがな読み、括弧内にローマ字。
-===4文字===
-ワード1/ひらがな(romaji),ワード2/ひらがな(romaji),...(15個)
-===3文字===
-ワード1/ひらがな(romaji),ワード2/ひらがな(romaji),...(15個)
+各ワードは「ワード/ひらがな読み(romaji)」形式。スラッシュの後にひらがな読み、括弧内にローマ字（全ての文字に母音を含めた読み）。
 ===2文字===
-ワード1/ひらがな(romaji),ワード2/ひらがな(romaji),...(15個)
+ワード/ひらがな(romaji),...(${GROUP_BUFFER[2]}個)
+===3文字===
+ワード/ひらがな(romaji),...(${GROUP_BUFFER[3]}個)
+===4文字===
+ワード/ひらがな(romaji),...(${GROUP_BUFFER[4]}個)
+===5文字===
+ワード/ひらがな(romaji),...(${GROUP_BUFFER[5]}個)
+===6文字===
+ワード/ひらがな(romaji),...(${GROUP_BUFFER[6]}個)
+===7文字===
+ワード/ひらがな(romaji),...(${GROUP_BUFFER[7]}個)
 
 【例】
-===4文字===
-嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu),バカたれ/ばかたれ(bakatare)...
+===2文字===
+クズ/くず(kuzu),カス/かす(kasu),ブタ/ぶた(buta)...
 ===3文字===
 ダサい/ださい(dasai),無能/むのう(munou),ヘタレ/へたれ(hetare)...
-===2文字===
-クズ/くず(kuzu),カス/かす(kasu),ブタ/ぶた(buta)...`;
+===4文字===
+嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu)...`;
 
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",
         contents: prompt,
         config: {
-          maxOutputTokens: 8192,
+          maxOutputTokens: 16384,
           safetySettings,
         },
       });
 
       const text = response.text || "";
 
-      const groups: { four: WordEntry[]; three: WordEntry[]; two: WordEntry[] } = {
+      const groups: Record<string, WordEntry[]> = {
+        seven: [],
+        six: [],
+        five: [],
         four: [],
         three: [],
         two: [],
       };
 
-      const seen = new Set<string>();
-      const dedupeEntries = (entries: WordEntry[]): WordEntry[] => {
-        return entries.filter((e) => {
-          if (seen.has(e.word)) return false;
-          seen.add(e.word);
-          return true;
-        });
+      const charCountToKey: Record<number, string> = {
+        7: "seven",
+        6: "six",
+        5: "five",
+        4: "four",
+        3: "three",
+        2: "two",
       };
 
-      const allEntries = dedupeEntries(parseWordEntries(text));
+      const seen = new Set<string>(existingWords);
+      const allEntries = parseWordEntries(text);
+
       for (const entry of allEntries) {
+        if (seen.has(entry.word)) continue;
+        seen.add(entry.word);
+
         const charCount = entry.reading.length;
-        if (charCount === 4 && groups.four.length < 10) {
-          groups.four.push(entry);
-        } else if (charCount === 3 && groups.three.length < 10) {
-          groups.three.push(entry);
-        } else if (charCount === 2 && groups.two.length < 10) {
-          groups.two.push(entry);
+        const key = charCountToKey[charCount];
+        const target = GROUP_TARGETS[charCount];
+
+        if (key && target && groups[key].length < target) {
+          groups[key].push(entry);
         }
       }
 
@@ -250,75 +240,113 @@ ${severityInstruction}
     }
   });
 
-  app.post("/api/rhyme", async (req, res) => {
+  app.get("/api/favorites", async (_req, res) => {
     try {
-      const parsed = rhymeRequestSchema.safeParse(req.body);
-      if (!parsed.success) {
-        return res.status(400).json({ error: "ワード、ローマ字、ターゲット、レベルが必要です" });
+      const allWords = await getAllWords();
+
+      const vowelGroups: Record<string, Array<{
+        id: number;
+        word: string;
+        reading: string;
+        romaji: string;
+        vowels: string;
+        charCount: number;
+      }>> = {};
+
+      for (const w of allWords) {
+        const key = w.vowels;
+        if (!vowelGroups[key]) vowelGroups[key] = [];
+        vowelGroups[key].push({
+          id: w.id,
+          word: w.word,
+          reading: w.reading,
+          romaji: w.romaji,
+          vowels: w.vowels,
+          charCount: w.charCount,
+        });
       }
-      const { word, romaji, target, level } = parsed.data;
 
-      const vowels = romaji.replace(/[^aeiou]/gi, "").toLowerCase();
+      const sortedGroups = Object.entries(vowelGroups)
+        .sort((a, b) => b[1].length - a[1].length)
+        .map(([vowels, words]) => ({ vowels, words }));
 
-      let severityInstruction = "";
-      if (level >= 8) {
-        severityInstruction = "放送禁止用語に近い、最も下劣で攻撃的な悪口にすること。";
-      } else {
-        severityInstruction = `レベル${level}/10に応じた辛辣な悪口にすること。`;
-      }
-
-      const prompt = `あなたは日本語ラップの韻（ライム）の専門家です。
-以下のワードと「韻を踏んだ」悪口を10個生成してください。
-
-【元ワード】${word}
-【ローマ字読み】${romaji}
-【母音パターン】${vowels}
-
-【ターゲット情報】
-${target}
-
-${severityInstruction}
-
-【韻の定義 - 最重要ルール】
-・「韻を踏む」とは、ローマ字にした時の母音の並びが一致することです。
-・元ワードの母音パターンは「${vowels}」です。
-・生成するワードのローマ字の母音パターンが「${vowels}」に最大限一致するようにしてください。
-・母音の一致率が高いワードを優先的に採用すること。完全一致が理想。
-・その上で、悪口・汚い言葉・攻撃的な表現を選ぶこと。
-
-【絶対禁止 - 同一語の排除】
-・元ワード「${word}」と同じ言葉、同じ意味の言葉は韻を踏んだことにならない。
-・表記違い（ひらがな/カタカナ/漢字の変換）も同一語とみなし排除する。
-・例：「ヤロウ」と「野郎」は同じ言葉なので禁止。「バカ」と「馬鹿」も禁止。
-
-【出力 - 厳守】
-各ワードは「ワード/ひらがな読み(romaji)」の形式。カンマ区切りで10個だけ1行で出力せよ。説明、注釈、前置きは一切書くな。
-例：死にかけ/しにかけ(shinikake),腐りかけ/くさりかけ(kusarikake),...`;
-
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: prompt,
-        config: {
-          maxOutputTokens: 8192,
-          safetySettings,
-        },
-      });
-
-      const text = response.text || "";
-      const entries = parseWordEntries(text);
-
-      const rhymeSeen = new Set<string>();
-      rhymeSeen.add(word);
-      const filtered = entries.filter((e) => {
-        if (rhymeSeen.has(e.word)) return false;
-        rhymeSeen.add(e.word);
-        return true;
-      }).slice(0, 10);
-
-      res.json({ words: filtered });
+      res.json({ groups: sortedGroups, total: allWords.length });
     } catch (error) {
-      console.error("Rhyme generation error:", error);
-      res.status(500).json({ error: "韻生成に失敗しました" });
+      console.error("Favorites fetch error:", error);
+      res.status(500).json({ error: "お気に入りの取得に失敗しました" });
+    }
+  });
+
+  app.post("/api/favorites", async (req, res) => {
+    try {
+      const schema = z.object({
+        words: z.array(z.object({
+          word: z.string().min(1),
+          reading: z.string().min(1),
+          romaji: z.string().min(1),
+        })),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "不正なデータです" });
+      }
+
+      const entries = parsed.data.words.map((w) => ({
+        word: w.word,
+        reading: w.reading,
+        romaji: w.romaji,
+        vowels: extractVowels(w.romaji),
+        charCount: w.reading.length,
+      }));
+
+      const added = await addWords(entries);
+      const total = await getWordCount();
+      res.json({ added, total });
+    } catch (error) {
+      console.error("Favorites add error:", error);
+      res.status(500).json({ error: "お気に入りの追加に失敗しました" });
+    }
+  });
+
+  app.delete("/api/favorites/:id", async (req, res) => {
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ error: "不正なIDです" });
+      await deleteWord(id);
+      const total = await getWordCount();
+      res.json({ success: true, total });
+    } catch (error) {
+      console.error("Favorites delete error:", error);
+      res.status(500).json({ error: "削除に失敗しました" });
+    }
+  });
+
+  app.delete("/api/favorites", async (_req, res) => {
+    try {
+      await clearAllWords();
+      res.json({ success: true, total: 0 });
+    } catch (error) {
+      console.error("Favorites clear error:", error);
+      res.status(500).json({ error: "全削除に失敗しました" });
+    }
+  });
+
+  app.get("/api/favorites/count", async (_req, res) => {
+    try {
+      const total = await getWordCount();
+      res.json({ total });
+    } catch (error) {
+      res.status(500).json({ error: "カウント取得に失敗しました" });
+    }
+  });
+
+  app.get("/api/favorites/export", async (_req, res) => {
+    try {
+      const data = await exportWords();
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.send(data);
+    } catch (error) {
+      res.status(500).json({ error: "エクスポートに失敗しました" });
     }
   });
 
