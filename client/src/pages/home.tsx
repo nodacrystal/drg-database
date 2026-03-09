@@ -10,7 +10,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import {
   Flame, Mic2, Sparkles, Zap, AlertTriangle, Loader2, Star,
-  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText,
+  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -25,30 +25,32 @@ function extractVowels(romaji: string): string {
   return romaji.replace(/[^aeiou]/gi, "").toLowerCase();
 }
 
-function getLevelLabel(level: number): string {
-  if (level <= 2) return "マイルド";
-  if (level <= 4) return "ピリ辛";
-  if (level <= 6) return "スパイシー";
-  if (level <= 8) return "デンジャラス";
-  return "EXTREME";
-}
+const LEVEL_INFO: Record<number, { label: string; color: string; icon: string }> = {
+  1:  { label: "リスペクト", color: "text-blue-400", icon: "respect" },
+  2:  { label: "称賛", color: "text-cyan-400", icon: "praise" },
+  3:  { label: "親しみ", color: "text-green-400", icon: "friendly" },
+  4:  { label: "軽口", color: "text-lime-400", icon: "light" },
+  5:  { label: "毒舌", color: "text-yellow-400", icon: "poison" },
+  6:  { label: "辛辣", color: "text-amber-400", icon: "sharp" },
+  7:  { label: "攻撃", color: "text-orange-400", icon: "attack" },
+  8:  { label: "過激", color: "text-red-400", icon: "extreme" },
+  9:  { label: "暴言", color: "text-red-500", icon: "violent" },
+  10: { label: "放禁", color: "text-red-600", icon: "banned" },
+};
 
-function getLevelColor(level: number): string {
-  if (level <= 2) return "text-green-400";
-  if (level <= 4) return "text-yellow-400";
-  if (level <= 6) return "text-orange-400";
-  if (level <= 8) return "text-red-400";
-  return "text-red-500";
-}
+const LEVEL_BAR_COLORS: Record<number, string> = {
+  1: "bg-blue-500", 2: "bg-cyan-500", 3: "bg-green-500", 4: "bg-lime-500",
+  5: "bg-yellow-500", 6: "bg-amber-500", 7: "bg-orange-500", 8: "bg-red-400",
+  9: "bg-red-500", 10: "bg-red-600",
+};
 
 const GROUP_KEYS: Array<{ key: keyof DissGroups; label: string }> = [
-  { key: "seven", label: "7文字" },
-  { key: "six", label: "6文字" },
-  { key: "five", label: "5文字" },
-  { key: "four", label: "4文字" },
-  { key: "three", label: "3文字" },
-  { key: "two", label: "2文字" },
+  { key: "seven", label: "7文字" }, { key: "six", label: "6文字" },
+  { key: "five", label: "5文字" }, { key: "four", label: "4文字" },
+  { key: "three", label: "3文字" }, { key: "two", label: "2文字" },
 ];
+
+const COUNT_OPTIONS = [10, 50, 100] as const;
 
 function formatTimer(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -62,6 +64,7 @@ export default function Home() {
 
   const [target, setTarget] = useState("");
   const [level, setLevel] = useState(5);
+  const [genCount, setGenCount] = useState<10 | 50 | 100>(100);
   const [ageConfirmed, setAgeConfirmed] = useState(false);
   const [dissGroups, setDissGroups] = useState<DissGroups | null>(null);
   const [activeTab, setActiveTab] = useState<"gen" | "fav" | "ng">("gen");
@@ -73,13 +76,8 @@ export default function Home() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: "smooth" });
-  }, [progressLogs]);
-
-  useEffect(() => {
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, []);
+  useEffect(() => { if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: "smooth" }); }, [progressLogs]);
+  useEffect(() => { return () => { if (timerRef.current) clearInterval(timerRef.current); }; }, []);
 
   const favQuery = useQuery<{ groups: FavGroup[]; total: number }>({ queryKey: ["/api/favorites"] });
   const favCountQuery = useQuery<{ total: number }>({ queryKey: ["/api/favorites/count"] });
@@ -97,13 +95,8 @@ export default function Home() {
   const toggleChecked = useCallback((word: string) => {
     setCheckedWords(prev => { const next = new Set(prev); next.has(word) ? next.delete(word) : next.add(word); return next; });
   }, []);
-
-  const selectAll = useCallback(() => {
-    setCheckedWords(new Set(getAllEntries().map(e => e.word)));
-  }, [dissGroups]);
-
+  const selectAll = useCallback(() => { setCheckedWords(new Set(getAllEntries().map(e => e.word))); }, [dissGroups]);
   const deselectAll = useCallback(() => setCheckedWords(new Set()), []);
-
   const isAllSelected = dissGroups ? checkedWords.size === getAllEntries().length && getAllEntries().length > 0 : false;
 
   const targetMutation = useMutation({
@@ -121,9 +114,7 @@ export default function Home() {
 
     if (timerRef.current) clearInterval(timerRef.current);
     const genStartTime = Date.now();
-    timerRef.current = setInterval(() => {
-      setTimerSeconds(Math.floor((Date.now() - genStartTime) / 1000));
-    }, 1000);
+    timerRef.current = setInterval(() => { setTimerSeconds(Math.floor((Date.now() - genStartTime) / 1000)); }, 1000);
 
     const addLog = (detail: string, elapsed: string) => {
       const now = new Date();
@@ -131,13 +122,13 @@ export default function Home() {
       setProgressLogs(prev => [...prev, { time, detail, elapsed }]);
     };
 
-    addLog("生成開始...", "0秒");
+    addLog(`生成開始... (Lv.${level} ${LEVEL_INFO[level].label}, ${genCount}個)`, "0秒");
 
     try {
       const response = await fetch("/api/diss", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target, level }),
+        body: JSON.stringify({ target, level, count: genCount }),
       });
 
       if (!response.ok) {
@@ -170,8 +161,8 @@ export default function Home() {
               setDissGroups(data.groups);
               const all = [...data.groups.seven, ...data.groups.six, ...data.groups.five, ...data.groups.four, ...data.groups.three, ...data.groups.two];
               setCheckedWords(new Set(all.map((e: WordEntry) => e.word)));
-              if (data.total < 100) {
-                toast({ title: "注意", description: `${data.total}/100個のみ生成できました。再度お試しください。` });
+              if (data.total < genCount) {
+                toast({ title: "注意", description: `${data.total}/${genCount}個のみ生成できました。` });
               }
             } else if (data.type === "error") {
               setGenStatus("error");
@@ -189,7 +180,7 @@ export default function Home() {
       setTimerSeconds(Math.floor((Date.now() - genStartTime) / 1000));
       setIsGenerating(false);
     }
-  }, [target, level, toast]);
+  }, [target, level, genCount, toast]);
 
   const addFavMutation = useMutation({
     mutationFn: async (words: WordEntry[]) => { const res = await apiRequest("POST", "/api/favorites", { words }); return res.json(); },
@@ -227,9 +218,8 @@ export default function Home() {
   const addToFavorites = useCallback(async () => {
     if (checkedWords.size === 0) { toast({ title: "未選択", description: "ワードを選択してください" }); return; }
     const allEntries = getAllEntries();
-    const selected = allEntries.filter(e => checkedWords.has(e.word));
+    addFavMutation.mutate(allEntries.filter(e => checkedWords.has(e.word)));
     const unchecked = allEntries.filter(e => !checkedWords.has(e.word));
-    addFavMutation.mutate(selected);
     if (unchecked.length > 0) {
       try {
         await fetch("/api/ng-words", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ words: unchecked.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji })) }) });
@@ -255,6 +245,7 @@ export default function Home() {
   }, [target, level, ageConfirmed, generateDissSSE, toast]);
 
   const progressPercent = Math.min((totalCount / 10000) * 100, 100);
+  const levelInfo = LEVEL_INFO[level];
 
   const renderWordGroup = (label: string, entries: WordEntry[], startIndex: number) => {
     if (entries.length === 0) return null;
@@ -267,7 +258,6 @@ export default function Home() {
         return next;
       });
     };
-
     return (
       <div className="space-y-2" key={label}>
         <div className="flex items-center gap-2">
@@ -281,8 +271,7 @@ export default function Home() {
           {entries.map((entry, i) => (
             <motion.div
               key={`${entry.word}-${startIndex + i}`}
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
+              initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
               transition={{ delay: Math.min((startIndex + i) * 0.01, 0.5) }}
               className="flex items-center gap-2 px-2.5 py-2 rounded-md border border-border/60 bg-card transition-colors"
               data-testid={`word-row-${startIndex + i}`}
@@ -319,7 +308,7 @@ export default function Home() {
             <h1 className="text-2xl font-bold tracking-tight" data-testid="text-title">悪口データベース</h1>
             <Database className="w-6 h-6 text-primary" />
           </div>
-          <p className="text-muted-foreground text-xs mb-3">目標1万ワード！AIでディスワードを量産してデータベースに蓄積</p>
+          <p className="text-muted-foreground text-xs mb-3">目標1万ワード！AIでワードを量産してデータベースに蓄積</p>
           <div className="max-w-xs mx-auto">
             <div className="flex items-center justify-between text-xs mb-1">
               <span className="text-muted-foreground">{totalCount.toLocaleString()} / 10,000</span>
@@ -364,7 +353,7 @@ export default function Home() {
               {ngWordsQuery.isLoading ? (
                 <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-8 w-full rounded-md" />)}</div>
               ) : !ngWordsQuery.data || ngWordsQuery.data.words.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground text-sm" data-testid="text-empty-ng">NGワードはまだありません。生成後にチェックを外したワードがここに蓄積されます。</div>
+                <div className="text-center py-8 text-muted-foreground text-sm" data-testid="text-empty-ng">NGワードはまだありません。</div>
               ) : (
                 <div className="flex flex-wrap gap-1.5 max-h-96 overflow-y-auto" data-testid="ng-words-container">
                   {ngWordsQuery.data.words.map(w => (
@@ -408,9 +397,7 @@ export default function Home() {
                           <div key={w.id} className="inline-flex items-center gap-1 text-xs bg-card border border-border/50 rounded px-2 py-1" data-testid={`fav-word-${w.id}`}>
                             <span className="font-medium">{w.word}</span>
                             <span className="text-muted-foreground">({w.reading})</span>
-                            <button onClick={() => deleteFavMutation.mutate(w.id)} className="text-muted-foreground hover:text-destructive ml-0.5" data-testid={`button-delete-fav-${w.id}`}>
-                              <X className="w-3 h-3" />
-                            </button>
+                            <button onClick={() => deleteFavMutation.mutate(w.id)} className="text-muted-foreground hover:text-destructive ml-0.5" data-testid={`button-delete-fav-${w.id}`}><X className="w-3 h-3" /></button>
                           </div>
                         ))}
                       </div>
@@ -448,21 +435,29 @@ export default function Home() {
           <CardContent className="p-4 space-y-4">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <Flame className="w-5 h-5 text-primary" />
+                {level <= 3 ? <Heart className="w-5 h-5 text-blue-400" /> : <Flame className="w-5 h-5 text-primary" />}
                 <h2 className="text-base font-semibold">レベル</h2>
               </div>
-              <div className="flex items-center gap-1">
-                <span className={`text-xl font-bold font-mono ${getLevelColor(level)}`} data-testid="text-level-number">{level}</span>
+              <div className="flex items-center gap-2">
+                <span className={`text-xl font-bold font-mono ${levelInfo.color}`} data-testid="text-level-number">{level}</span>
                 <span className="text-xs text-muted-foreground">/10</span>
+                <Badge variant="secondary" className={`text-xs ${levelInfo.color}`} data-testid="text-level-label">{levelInfo.label}</Badge>
               </div>
             </div>
             <Slider value={[level]} min={1} max={10} step={1} onValueChange={val => setLevel(val[0])} data-testid="slider-level" />
             <div className="flex items-center justify-between">
-              <Badge variant="secondary" className="text-xs">{getLevelLabel(level)}</Badge>
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <Heart className="w-3 h-3 text-blue-400" />
+                <span>リスペクト</span>
+              </div>
               <div className="flex gap-0.5">
                 {Array.from({ length: 10 }).map((_, i) => (
-                  <div key={i} className={`w-2 h-3 rounded-sm transition-colors ${i < level ? (i < 3 ? "bg-green-500" : i < 6 ? "bg-yellow-500" : i < 8 ? "bg-orange-500" : "bg-red-500") : "bg-muted"}`} />
+                  <div key={i} className={`w-2 h-3 rounded-sm transition-colors ${i < level ? (LEVEL_BAR_COLORS[i + 1] || "bg-muted") : "bg-muted"}`} />
                 ))}
+              </div>
+              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <span>ディスり</span>
+                <Flame className="w-3 h-3 text-red-500" />
               </div>
             </div>
             <AnimatePresence>
@@ -478,9 +473,26 @@ export default function Home() {
                 </motion.div>
               )}
             </AnimatePresence>
+
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-muted-foreground">生成数:</span>
+              <div className="flex gap-1.5">
+                {COUNT_OPTIONS.map(c => (
+                  <button
+                    key={c}
+                    onClick={() => setGenCount(c)}
+                    className={`px-3 py-1.5 rounded-md text-sm font-mono font-medium transition-colors ${genCount === c ? "bg-primary text-primary-foreground" : "bg-muted/60 text-muted-foreground hover:bg-muted"}`}
+                    data-testid={`button-count-${c}`}
+                  >
+                    {c}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <Button onClick={handleGenerateDiss} disabled={isGenerating || !target} className="w-full" data-testid="button-generate-diss">
               {isGenerating ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Zap className="w-4 h-4 mr-2" />}
-              100個生成（7文字×5 / 6文字×10 / 5文字×20 / 4文字×30 / 3文字×30 / 2文字×5）
+              {genCount}個生成 (Lv.{level} {levelInfo.label})
             </Button>
           </CardContent>
         </Card>
