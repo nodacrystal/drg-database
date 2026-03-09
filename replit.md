@@ -82,3 +82,6 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words targeting 
 - 2026-03-09: Post-generation quality check via AI (validates words are real insults, replaces invalid ones)
 - 2026-03-09: NG words system — unchecked words saved to ng_words table, excluded from future generation
 - 2026-03-09: NG words referenced in generation prompt as low-quality examples to avoid
+- 2026-03-09: Progress log area with scrolling history, timestamps, elapsed time, 5-second heartbeat updates
+- 2026-03-09: NG words tab (3rd tab) showing accumulated rejected words with count badge and clear button
+- 2026-03-09: GET /api/ng-words endpoint for listing all NG words

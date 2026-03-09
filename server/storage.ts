@@ -49,6 +49,12 @@ export async function exportWords(): Promise<string> {
   return lines.join("\n");
 }
 
+import type { NgWord } from "@shared/schema";
+
+export async function getAllNgWords(): Promise<NgWord[]> {
+  return db.select().from(ngWords).orderBy(ngWords.createdAt);
+}
+
 export async function getNgWordStrings(): Promise<string[]> {
   const result = await db.select({ word: ngWords.word }).from(ngWords);
   return result.map((r) => r.word);

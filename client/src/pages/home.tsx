@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Card, CardContent } from "@/components/ui/card";
@@ -9,7 +9,6 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import {
-  Crosshair,
   Flame,
   Mic2,
   Sparkles,
@@ -19,12 +18,13 @@ import {
   Star,
   Copy,
   Trash2,
-  Download,
   CheckSquare,
   Square,
   Database,
   Target,
   X,
+  Ban,
+  ScrollText,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -55,6 +55,19 @@ interface FavWord {
 interface FavGroup {
   vowels: string;
   words: FavWord[];
+}
+
+interface NgWord {
+  id: number;
+  word: string;
+  reading: string;
+  romaji: string;
+}
+
+interface ProgressLog {
+  time: string;
+  detail: string;
+  elapsed: string;
 }
 
 function extractVowels(romaji: string): string {
@@ -89,15 +102,22 @@ const GROUP_KEYS: Array<{ key: keyof DissGroups; label: string; count: number }>
 export default function Home() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  
+
   const [target, setTarget] = useState<string>("");
   const [level, setLevel] = useState<number>(5);
   const [ageConfirmed, setAgeConfirmed] = useState(false);
   const [dissGroups, setDissGroups] = useState<DissGroups | null>(null);
-  const [activeTab, setActiveTab] = useState<"gen" | "fav">("gen");
+  const [activeTab, setActiveTab] = useState<"gen" | "fav" | "ng">("gen");
   const [checkedWords, setCheckedWords] = useState<Set<string>>(new Set());
   const [isGenerating, setIsGenerating] = useState(false);
-  const [progressMessage, setProgressMessage] = useState<string>("");
+  const [progressLogs, setProgressLogs] = useState<ProgressLog[]>([]);
+  const logEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (logEndRef.current) {
+      logEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [progressLogs]);
 
   const favQuery = useQuery<{ groups: FavGroup[]; total: number }>({
     queryKey: ["/api/favorites"],
@@ -107,7 +127,16 @@ export default function Home() {
     queryKey: ["/api/favorites/count"],
   });
 
+  const ngWordsQuery = useQuery<{ words: NgWord[]; total: number }>({
+    queryKey: ["/api/ng-words"],
+  });
+
+  const ngCountQuery = useQuery<{ total: number }>({
+    queryKey: ["/api/ng-words/count"],
+  });
+
   const totalCount = favCountQuery.data?.total ?? favQuery.data?.total ?? 0;
+  const ngCount = ngCountQuery.data?.total ?? ngWordsQuery.data?.total ?? 0;
 
   const getAllEntries = (): WordEntry[] => {
     if (!dissGroups) return [];
@@ -157,8 +186,16 @@ export default function Home() {
 
   const generateDissSSE = useCallback(async () => {
     setIsGenerating(true);
-    setProgressMessage("準備中...");
+    setProgressLogs([]);
     setDissGroups(null);
+
+    const addLog = (detail: string, elapsed: string) => {
+      const now = new Date();
+      const time = `${now.getHours().toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
+      setProgressLogs((prev) => [...prev, { time, detail, elapsed }]);
+    };
+
+    addLog("生成開始...", "0秒");
 
     try {
       const response = await fetch("/api/diss", {
@@ -192,7 +229,7 @@ export default function Home() {
           try {
             const data = JSON.parse(trimmed.slice(6));
             if (data.type === "progress") {
-              setProgressMessage(data.detail);
+              addLog(data.detail, data.elapsed || "");
             } else if (data.type === "result") {
               setDissGroups(data.groups);
               const all = [
@@ -213,7 +250,6 @@ export default function Home() {
       toast({ title: "エラー", description: err instanceof Error ? err.message : "ワード生成に失敗しました", variant: "destructive" });
     } finally {
       setIsGenerating(false);
-      setProgressMessage("");
     }
   }, [target, level, toast]);
 
@@ -255,6 +291,18 @@ export default function Home() {
     },
   });
 
+  const clearNgMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("DELETE", "/api/ng-words");
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({ title: "削除完了", description: "NGワードをすべて削除しました" });
+      queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
+    },
+  });
+
   const addToFavorites = useCallback(async () => {
     if (checkedWords.size === 0) {
       toast({ title: "未選択", description: "ワードを選択してください" });
@@ -273,6 +321,8 @@ export default function Home() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ words: unchecked.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji })) }),
         });
+        queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
+        queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
       } catch {}
     }
     setCheckedWords(new Set());
@@ -429,16 +479,88 @@ export default function Home() {
             data-testid="tab-fav"
           >
             <Star className="w-4 h-4" />
-            データベース
+            DB
             {totalCount > 0 && (
               <Badge variant="secondary" className="ml-1 text-xs px-1.5 py-0">
                 {totalCount.toLocaleString()}
               </Badge>
             )}
           </button>
+          <button
+            onClick={() => {
+              setActiveTab("ng");
+              queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
+            }}
+            className={`flex-1 py-2.5 text-sm font-medium transition-colors flex items-center justify-center gap-1.5 ${
+              activeTab === "ng"
+                ? "bg-primary text-primary-foreground"
+                : "bg-muted/40 text-muted-foreground hover:bg-muted/60"
+            }`}
+            data-testid="tab-ng"
+          >
+            <Ban className="w-4 h-4" />
+            NG
+            {ngCount > 0 && (
+              <Badge variant="secondary" className="ml-1 text-xs px-1.5 py-0">
+                {ngCount.toLocaleString()}
+              </Badge>
+            )}
+          </button>
         </div>
 
-        {activeTab === "fav" ? (
+        {activeTab === "ng" ? (
+          <div className="space-y-4">
+            <Card>
+              <CardContent className="p-4 space-y-3">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-2">
+                    <Ban className="w-5 h-5 text-destructive" />
+                    <h2 className="text-base font-semibold">NGワード</h2>
+                    <Badge variant="secondary">{ngCount.toLocaleString()}件</Badge>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => clearNgMutation.mutate()}
+                    disabled={clearNgMutation.isPending || ngCount === 0}
+                    data-testid="button-clear-ng"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 mr-1" />
+                    全削除
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  お気に入りに選ばれなかったワードが蓄積されます。次回の生成時にこれらのワードは除外されます。
+                </p>
+
+                {ngWordsQuery.isLoading ? (
+                  <div className="space-y-2">
+                    {Array.from({ length: 3 }).map((_, i) => (
+                      <Skeleton key={i} className="h-8 w-full rounded-md" />
+                    ))}
+                  </div>
+                ) : !ngWordsQuery.data || ngWordsQuery.data.words.length === 0 ? (
+                  <div className="text-center py-8 text-muted-foreground text-sm" data-testid="text-empty-ng">
+                    NGワードはまだありません。生成後にチェックを外したワードがここに蓄積されます。
+                  </div>
+                ) : (
+                  <div className="flex flex-wrap gap-1.5 max-h-96 overflow-y-auto" data-testid="ng-words-container">
+                    {ngWordsQuery.data.words.map((w) => (
+                      <div
+                        key={w.id}
+                        className="inline-flex items-center gap-1 text-xs bg-destructive/10 border border-destructive/20 rounded px-2 py-1"
+                        data-testid={`ng-word-${w.id}`}
+                      >
+                        <span className="font-medium">{w.word}</span>
+                        <span className="text-muted-foreground">({w.reading})</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        ) : activeTab === "fav" ? (
           <div className="space-y-4">
             <Card>
               <CardContent className="p-4 space-y-3">
@@ -633,7 +755,40 @@ export default function Home() {
         </Card>
 
         <AnimatePresence>
-          {(dissGroups || isGenerating) && (
+          {(isGenerating || progressLogs.length > 0) && (
+            <motion.div
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -12 }}
+            >
+              <Card>
+                <CardContent className="p-4">
+                  <div className="flex items-center gap-2 mb-3">
+                    <ScrollText className="w-5 h-5 text-primary" />
+                    <h2 className="text-base font-semibold">進捗ログ</h2>
+                    {isGenerating && <Loader2 className="w-4 h-4 animate-spin text-primary" />}
+                  </div>
+                  <div
+                    className="bg-black/80 rounded-md border border-border/50 p-3 font-mono text-xs max-h-48 overflow-y-auto"
+                    data-testid="progress-log-area"
+                  >
+                    {progressLogs.map((log, i) => (
+                      <div key={i} className="flex gap-2 py-0.5">
+                        <span className="text-muted-foreground shrink-0">[{log.time}]</span>
+                        <span className="text-green-400 shrink-0">{log.elapsed && `(${log.elapsed})`}</span>
+                        <span className="text-foreground">{log.detail}</span>
+                      </div>
+                    ))}
+                    <div ref={logEndRef} />
+                  </div>
+                </CardContent>
+              </Card>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <AnimatePresence>
+          {dissGroups && (
             <motion.div
               initial={{ opacity: 0, y: 12 }}
               animate={{ opacity: 1, y: 0 }}
@@ -645,13 +800,11 @@ export default function Home() {
                     <div className="flex items-center gap-2">
                       <Zap className="w-5 h-5 text-primary" />
                       <h2 className="text-base font-semibold">生成結果</h2>
-                      {dissGroups && (
-                        <Badge variant="secondary" className="text-xs">
-                          {getAllEntries().length}個
-                        </Badge>
-                      )}
+                      <Badge variant="secondary" className="text-xs">
+                        {getAllEntries().length}個
+                      </Badge>
                     </div>
-                    {dissGroups && getAllEntries().length > 0 && (
+                    {getAllEntries().length > 0 && (
                       <Button
                         variant="ghost"
                         size="sm"
@@ -667,42 +820,28 @@ export default function Home() {
                     )}
                   </div>
 
-                  {isGenerating ? (
-                    <div className="space-y-3">
-                      <div className="flex items-center gap-3 rounded-md bg-muted/50 p-3 border border-border/50">
-                        <Loader2 className="w-5 h-5 animate-spin text-primary shrink-0" />
-                        <span className="text-sm" data-testid="text-progress">{progressMessage}</span>
-                      </div>
-                      {Array.from({ length: 4 }).map((_, i) => (
-                        <Skeleton key={i} className="h-10 w-full rounded-md" />
-                      ))}
-                    </div>
-                  ) : dissGroups ? (
-                    <>
-                    <div className="space-y-4">
-                      {GROUP_KEYS.map((g) => {
-                        const entries = dissGroups[g.key];
-                        return renderWordGroup(g.label, entries, runningIndices[g.key] || 0);
-                      })}
-                    </div>
-                    <div className="mt-4">
-                      <Button
-                        onClick={addToFavorites}
-                        disabled={checkedWords.size === 0 || addFavMutation.isPending}
-                        variant="destructive"
-                        className="w-full"
-                        data-testid="button-add-favorites"
-                      >
-                        {addFavMutation.isPending ? (
-                          <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                        ) : (
-                          <Star className="w-4 h-4 mr-2" />
-                        )}
-                        選択ワードをデータベースに追加 {checkedWords.size > 0 && `(${checkedWords.size}個)`}
-                      </Button>
-                    </div>
-                    </>
-                  ) : null}
+                  <div className="space-y-4">
+                    {GROUP_KEYS.map((g) => {
+                      const entries = dissGroups[g.key];
+                      return renderWordGroup(g.label, entries, runningIndices[g.key] || 0);
+                    })}
+                  </div>
+                  <div className="mt-4">
+                    <Button
+                      onClick={addToFavorites}
+                      disabled={checkedWords.size === 0 || addFavMutation.isPending}
+                      variant="destructive"
+                      className="w-full"
+                      data-testid="button-add-favorites"
+                    >
+                      {addFavMutation.isPending ? (
+                        <Loader2 className="w-4 h-4 animate-spin mr-2" />
+                      ) : (
+                        <Star className="w-4 h-4 mr-2" />
+                      )}
+                      選択ワードをデータベースに追加 {checkedWords.size > 0 && `(${checkedWords.size}個)`}
+                    </Button>
+                  </div>
                 </CardContent>
               </Card>
             </motion.div>

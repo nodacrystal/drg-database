@@ -10,6 +10,7 @@ import {
   deleteWord,
   clearAllWords,
   exportWords,
+  getAllNgWords,
   getNgWordStrings,
   addNgWords,
   getNgWordCount,
@@ -264,6 +265,14 @@ export async function registerRoutes(
   });
 
   app.post("/api/diss", async (req, res) => {
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    let clientDisconnected = false;
+
+    req.on("close", () => {
+      clientDisconnected = true;
+      if (heartbeat) clearInterval(heartbeat);
+    });
+
     try {
       const parsed = dissRequestSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -275,9 +284,28 @@ export async function registerRoutes(
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
 
-      function sendProgress(step: string, detail: string) {
-        res.write(`data: ${JSON.stringify({ type: "progress", step, detail })}\n\n`);
+      const startTime = Date.now();
+      let currentStep = "";
+
+      function formatElapsed(ms: number): string {
+        const s = Math.floor(ms / 1000);
+        const m = Math.floor(s / 60);
+        const sec = s % 60;
+        return m > 0 ? `${m}分${sec}秒` : `${sec}秒`;
       }
+
+      function sendProgress(step: string, detail: string) {
+        if (clientDisconnected) return;
+        currentStep = step;
+        const elapsed = formatElapsed(Date.now() - startTime);
+        res.write(`data: ${JSON.stringify({ type: "progress", step, detail, elapsed })}\n\n`);
+      }
+
+      heartbeat = setInterval(() => {
+        if (clientDisconnected) { if (heartbeat) clearInterval(heartbeat); return; }
+        const elapsed = formatElapsed(Date.now() - startTime);
+        res.write(`data: ${JSON.stringify({ type: "progress", step: currentStep, detail: `処理継続中... (経過: ${elapsed})`, elapsed })}\n\n`);
+      }, 5000);
 
       sendProgress("init", "データベース確認中...");
       const existingWords = await getWordStrings();
@@ -575,18 +603,25 @@ ${qrGroupLines}
         }
       }
 
+      if (heartbeat) clearInterval(heartbeat);
       const totalGenerated = getTotal();
-      sendProgress("done", `完了: ${totalGenerated}/100個`);
+      const totalElapsed = formatElapsed(Date.now() - startTime);
+      sendProgress("done", `完了: ${totalGenerated}/100個 (所要時間: ${totalElapsed})`);
 
-      res.write(`data: ${JSON.stringify({ type: "result", groups, total: totalGenerated })}\n\n`);
-      res.end();
-    } catch (error) {
-      console.error("Diss generation error:", error);
-      try {
-        res.write(`data: ${JSON.stringify({ type: "error", error: "ワード生成に失敗しました" })}\n\n`);
+      if (!clientDisconnected) {
+        res.write(`data: ${JSON.stringify({ type: "result", groups, total: totalGenerated })}\n\n`);
         res.end();
-      } catch {
-        res.status(500).json({ error: "ワード生成に失敗しました" });
+      }
+    } catch (error) {
+      if (heartbeat) clearInterval(heartbeat);
+      console.error("Diss generation error:", error);
+      if (!clientDisconnected) {
+        try {
+          res.write(`data: ${JSON.stringify({ type: "error", error: "ワード生成に失敗しました" })}\n\n`);
+          res.end();
+        } catch {
+          try { res.status(500).json({ error: "ワード生成に失敗しました" }); } catch {}
+        }
       }
     }
   });
@@ -776,6 +811,17 @@ ${qrGroupLines}
     } catch (error) {
       console.error("NG words add error:", error);
       res.status(500).json({ error: "NGワードの追加に失敗しました" });
+    }
+  });
+
+  app.get("/api/ng-words", async (_req, res) => {
+    try {
+      const words = await getAllNgWords();
+      const total = words.length;
+      res.json({ words, total });
+    } catch (error) {
+      console.error("NG words fetch error:", error);
+      res.status(500).json({ error: "NGワードの取得に失敗しました" });
     }
   });
 
