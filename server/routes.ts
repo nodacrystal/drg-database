@@ -286,6 +286,7 @@ export async function registerRoutes(
 
       const startTime = Date.now();
       let currentStep = "";
+      const stepTimings: Record<string, number> = {};
 
       function formatElapsed(ms: number): string {
         const s = Math.floor(ms / 1000);
@@ -294,11 +295,14 @@ export async function registerRoutes(
         return m > 0 ? `${m}分${sec}秒` : `${sec}秒`;
       }
 
-      function sendProgress(step: string, detail: string) {
+      function sendProgress(step: string, detail: string, pct?: number, eta?: string) {
         if (clientDisconnected) return;
         currentStep = step;
         const elapsed = formatElapsed(Date.now() - startTime);
-        res.write(`data: ${JSON.stringify({ type: "progress", step, detail, elapsed })}\n\n`);
+        const payload: Record<string, unknown> = { type: "progress", step, detail, elapsed };
+        if (pct !== undefined) payload.pct = pct;
+        if (eta) payload.eta = eta;
+        res.write(`data: ${JSON.stringify(payload)}\n\n`);
       }
 
       heartbeat = setInterval(() => {
@@ -307,9 +311,39 @@ export async function registerRoutes(
         res.write(`data: ${JSON.stringify({ type: "progress", step: currentStep, detail: `処理継続中... (経過: ${elapsed})`, elapsed })}\n\n`);
       }, 5000);
 
-      sendProgress("init", "データベース確認中...");
-      const existingWords = await getWordStrings();
-      const ngWordList = await getNgWordStrings();
+      sendProgress("init", "データベース・リサーチ準備中...", 0, "約25秒");
+
+      const targetName = target.split("\n")[0]?.replace("名前：", "").trim() || "";
+
+      const [existingWords, ngWordList, researchResult] = await Promise.all([
+        getWordStrings(),
+        getNgWordStrings(),
+        (async () => {
+          try {
+            const r = await ai.models.generateContent({
+              model: "gemini-2.5-flash",
+              contents: `「${targetName}」（日本のお笑い芸人）について、以下の情報を簡潔に箇条書きで出力せよ。前置き不要。
+1. 代表的なギャグ・フレーズ・決めゼリフ
+2. よく弄られるポイント・コンプレックス
+3. 有名なエピソード・スキャンダル・失敗談
+4. 身体的特徴・見た目の特徴
+5. 性格的な弱点・欠点
+6. ネット上でよく言われる悪口・あだ名
+7. 他の芸人からのイジり方
+各項目3-5個ずつ。`,
+              config: {
+                maxOutputTokens: 2048,
+                safetySettings,
+                thinkingConfig: { thinkingBudget: 0 },
+              },
+            });
+            return r.text || "";
+          } catch {
+            return "";
+          }
+        })(),
+      ]);
+
       const recentHistory = existingWords.slice(-200);
       const historyList = recentHistory.length > 0 ? recentHistory.join(",") : "なし";
       const ngList = ngWordList.length > 0 ? ngWordList.slice(-100).join(",") : "";
@@ -322,74 +356,11 @@ export async function registerRoutes(
       }
 
       const ngSection = ngList ? `\n【NGワード - ユーザーが拒否した低品質ワード。これらと似た傾向のワードを避けよ】\n${ngList}\n` : "";
+      const researchSection = researchResult ? `\n【リサーチ情報 - この情報を元にワードを考案せよ】\n${researchResult}\n` : "";
 
-      const prompt = `以下のターゲットに特化した悪口・ディスりワードを生成せよ。
-
-【ターゲット】
-${target}
-
-${severityInstruction}
-${ngSection}
-【厳守ルール】
-1. 以下の6グループに分けて生成。各グループの見出しも出力すること。
-2. 全て異なるワードにすること。同じ言葉は絶対に使わない。
-3. ターゲットの特徴・弱点に基づいた個人攻撃にすること。
-4. 直接的で汚い表現を積極的に使うこと。
-5. 漢字：小学生が理解できる範囲。難しい漢字は禁止。
-6. 重複禁止：以下のワードは絶対に出力しないこと。
-【既出リスト】: ${historyList}
-
-【語尾の重複禁止 - 超重要】
-- 同じ語尾の言葉を複数生成してはいけない。
-- NG例：「馬鹿野郎」と「アホヤロウ」→どちらも「やろう」で終わっており、語尾が同じ意味の同じ言葉。これは別の悪口ではない。
-- NG例：「クソガキ」と「バカガキ」→どちらも「ガキ」で終わっており同じ。
-- NG例：「ゴミ人間」と「クズ人間」→どちらも「人間」で終わっており同じ。
-- OK例：「馬鹿野郎」と「寝ぼけ顔」→語尾の言葉が異なるのでOK。
-- 語尾2文字以上が同じ読みの言葉は、全体の中で最大2個までにすること。
-- できるだけ多様な語尾パターンを使い、バリエーション豊かにすること。
-
-【品質チェック - 全ワード必須】
-出力前に全てのワードが以下を満たすか確認せよ：
-1. その言葉だけで意味が通じるか？意味不明な造語は不可。
-2. その言葉は悪口、または相手への痛烈な批判・指摘になっているか？
-3. 既出リストに存在しないか？
-4. 他のワードと語尾が被っていないか？
-→ 1つでも不合格なら、そのワードを別のワードに差し替えること。
-
-【文字数ルール - 超重要・厳守】
-- 文字数は「全てひらがなに変換したときの文字数」でカウントする。
-- 拗音（しゃ、きょ等の小さい文字）も1文字。促音（っ）も1文字。撥音（ん）も1文字。
-- 具体例：
-  2文字：クズ→くず、カス→かす、ゴミ→ごみ
-  3文字：ダサい→ださい、無能→むのう、ヘタレ→へたれ
-  4文字：うそつき→うそつき、ゴミクズ→ごみくず
-  5文字：できそこない→できそこない、はらぐろい→はらぐろい
-  6文字：おちぶれやろう→おちぶれやろう
-  7文字：のうたりんやろう→のうたりんやろう
-- 必ず出力前にひらがなに変換して文字数を指折り確認すること！
-
-【出力フォーマット - 厳守】
-各ワードは「ワード/ひらがな読み(romaji)」形式。スラッシュの後にひらがな読み、括弧内にローマ字（全ての文字に母音を含めた読み）。
-===2文字===
-ワード/ひらがな(romaji),...(${GROUP_BUFFER[2]}個 ※目標${GROUP_TARGETS[2]}個)
-===3文字===
-ワード/ひらがな(romaji),...(${GROUP_BUFFER[3]}個 ※目標${GROUP_TARGETS[3]}個)
-===4文字===
-ワード/ひらがな(romaji),...(${GROUP_BUFFER[4]}個 ※目標${GROUP_TARGETS[4]}個)
-===5文字===
-ワード/ひらがな(romaji),...(${GROUP_BUFFER[5]}個 ※目標${GROUP_TARGETS[5]}個)
-===6文字===
-ワード/ひらがな(romaji),...(${GROUP_BUFFER[6]}個 ※目標${GROUP_TARGETS[6]}個)
-===7文字===
-ワード/ひらがな(romaji),...(${GROUP_BUFFER[7]}個 ※目標${GROUP_TARGETS[7]}個)
-
-【例】
-===2文字===
-クズ/くず(kuzu),カス/かす(kasu),ブタ/ぶた(buta)...
-===3文字===
-ダサい/ださい(dasai),無能/むのう(munou),ヘタレ/へたれ(hetare)...
-===4文字===
-嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu)...`;
+      const initElapsed = Date.now() - startTime;
+      stepTimings["init"] = initElapsed;
+      sendProgress("init", `準備完了 (${formatElapsed(initElapsed)})`, 10, "約20秒");
 
       const groups: Record<string, WordEntry[]> = {
         seven: [], six: [], five: [], four: [], three: [], two: [],
@@ -430,14 +401,96 @@ ${ngSection}
         return Object.values(groups).reduce((s, g) => s + g.length, 0);
       }
 
-      sendProgress("generate", "AIがワードを生成中...");
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: prompt,
-        config: { maxOutputTokens: 16384, safetySettings },
-      });
-      addEntriesToGroups(parseWordEntries(response.text || ""));
-      sendProgress("generate", `初回生成完了: ${getTotal()}/100個`);
+      const commonRules = `【厳守ルール】
+1. 全て異なるワードにすること。同じ言葉は絶対に使わない。
+2. ターゲットの特徴・弱点に基づいた個人攻撃にすること。
+3. 直接的で汚い表現を積極的に使うこと。
+4. 漢字：小学生が理解できる範囲。難しい漢字は禁止。
+5. 重複禁止：以下のワードは絶対に出力しないこと。
+6. 意味の通じる悪口のみ。造語不可。一般形容詞は不可。
+【既出リスト】: ${historyList}
+
+【語尾の重複禁止 - 超重要】
+- 語尾2文字以上が同じ読みの言葉は最大2個まで。多様な語尾パターンを使え。
+
+【文字数ルール - 超重要・厳守】
+- 文字数は「全てひらがなに変換したときの文字数」でカウント。拗音・促音・撥音も各1文字。
+- 必ず出力前にひらがなに変換して文字数を指折り確認すること！
+
+【出力フォーマット - 厳守】
+各ワードは「ワード/ひらがな読み(romaji)」形式。前置き不要。即座に出力開始。`;
+
+      const promptA = `以下のターゲットに特化した悪口・ディスりワードを生成せよ。
+
+【ターゲット】
+${target}
+${researchSection}
+${severityInstruction}
+${ngSection}
+${commonRules}
+
+===2文字===
+ワード/ひらがな(romaji),...(${GROUP_BUFFER[2]}個 ※目標${GROUP_TARGETS[2]}個)
+===3文字===
+ワード/ひらがな(romaji),...(${GROUP_BUFFER[3]}個 ※目標${GROUP_TARGETS[3]}個)
+===4文字===
+ワード/ひらがな(romaji),...(${GROUP_BUFFER[4]}個 ※目標${GROUP_TARGETS[4]}個)
+
+【例】
+===2文字===
+クズ/くず(kuzu),カス/かす(kasu),ブタ/ぶた(buta)...
+===3文字===
+ダサい/ださい(dasai),無能/むのう(munou),ヘタレ/へたれ(hetare)...
+===4文字===
+嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu)...`;
+
+      const promptB = `以下のターゲットに特化した悪口・ディスりワードを生成せよ。
+
+【ターゲット】
+${target}
+${researchSection}
+${severityInstruction}
+${ngSection}
+${commonRules}
+
+===5文字===
+ワード/ひらがな(romaji),...(${GROUP_BUFFER[5]}個 ※目標${GROUP_TARGETS[5]}個)
+===6文字===
+ワード/ひらがな(romaji),...(${GROUP_BUFFER[6]}個 ※目標${GROUP_TARGETS[6]}個)
+===7文字===
+ワード/ひらがな(romaji),...(${GROUP_BUFFER[7]}個 ※目標${GROUP_TARGETS[7]}個)
+
+【例】
+===5文字===
+できそこない/できそこない(dekisokonai),はらぐろい/はらぐろい(haraguroi)...
+===6文字===
+おちぶれやろう/おちぶれやろう(ochibureyarou)...
+===7文字===
+のうたりんやろう/のうたりんやろう(noutarinyarou)...`;
+
+      sendProgress("generate", "AI並列生成中... (2つの生成を同時実行)", 15, "約15秒");
+      const genStart = Date.now();
+
+      const [resultA, resultB] = await Promise.allSettled([
+        ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: promptA,
+          config: { maxOutputTokens: 8192, safetySettings, thinkingConfig: { thinkingBudget: 0 } },
+        }),
+        ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: promptB,
+          config: { maxOutputTokens: 8192, safetySettings, thinkingConfig: { thinkingBudget: 0 } },
+        }),
+      ]);
+
+      if (resultA.status === "fulfilled") addEntriesToGroups(parseWordEntries(resultA.value.text || ""));
+      else sendProgress("generate", "短文字グループの生成が失敗。リトライで補填します。");
+      if (resultB.status === "fulfilled") addEntriesToGroups(parseWordEntries(resultB.value.text || ""));
+      else sendProgress("generate", "長文字グループの生成が失敗。リトライで補填します。");
+      const genElapsed = Date.now() - genStart;
+      stepTimings["generate"] = genElapsed;
+      sendProgress("generate", `並列生成完了: ${getTotal()}/100個 (${formatElapsed(genElapsed)})`, 65);
 
       const MAX_RETRIES = 5;
       for (let retry = 0; retry < MAX_RETRIES; retry++) {
@@ -450,7 +503,9 @@ ${ngSection}
         const totalShort = shortfalls.reduce((s, x) => s + x.need, 0);
         if (totalShort === 0) break;
 
-        sendProgress("retry", `不足${totalShort}個を追加生成中... (リトライ${retry + 1})`);
+        const retryPct = 65 + Math.min((retry + 1) * 7, 30);
+        const estRemain = formatElapsed(Math.max(0, (MAX_RETRIES - retry) * 4000));
+        sendProgress("retry", `不足${totalShort}個を追加生成中... (リトライ${retry + 1})`, retryPct, `約${estRemain}`);
 
         const alreadyUsed = Object.values(groups).flat().map(e => e.word);
         const retryGroupLines = shortfalls.map(s => {
@@ -462,41 +517,20 @@ ${ngSection}
 
 【ターゲット】
 ${target}
-
+${researchSection}
 ${severityInstruction}
 ${ngSection}
-【厳守ルール】
-1. 全て異なるワードにすること。
-2. ターゲットの特徴・弱点に基づいた個人攻撃。
-3. 漢字は小学生レベル。
-4. 語尾2文字以上が同じ読みの言葉は最大2個まで。
-5. 意味の通じる悪口のみ。造語不可。
-6. 重複禁止：以下は出力しないこと。
+【厳守】全て異なるワード。重複禁止。意味の通じる悪口のみ。造語不可。一般形容詞は不可。
 【既出リスト】: ${[...recentHistory, ...alreadyUsed].join(",")}
 
-【文字数ルール - 超重要・厳守】
-- 文字数は「全てひらがなに変換したときの文字数」でカウントする。
-- 拗音（しゃ、きょ等の小さい文字）も1文字。促音（っ）も1文字。撥音（ん）も1文字。
-- 具体例：
-  2文字：クズ→くず、カス→かす、ゴミ→ごみ
-  3文字：ダサい→ださい、無能→むのう、ヘタレ→へたれ
-  4文字：うそつき→うそつき、ゴミクズ→ごみくず
-  5文字：できそこない→できそこない
-  6文字：おちぶれやろう→おちぶれやろう
-  7文字：のうたりんやろう→のうたりんやろう
-- 必ず出力前にひらがなに変換して文字数を指折り確認すること！
-
-【出力フォーマット - 厳守】
-各ワードは「ワード/ひらがな読み(romaji)」形式。スラッシュの後にひらがな読み、括弧内にローマ字。
-前置き不要。即座に出力開始。
+【文字数ルール】ひらがな変換後の文字数でカウント。拗音・促音・撥音も各1文字。
+【出力フォーマット】各ワード「ワード/ひらがな読み(romaji)」形式。前置き不要。即座に出力開始。
 
 ${retryGroupLines}
 
 【例】
 ===4文字===
-嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu),ヘタクソ/へたくそ(hetakuso)...
-===5文字===
-できそこない/できそこない(dekisokonai),はらぐろい/はらぐろい(haraguroi)...`;
+嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu),ヘタクソ/へたくそ(hetakuso)...`;
 
         const retryResponse = await ai.models.generateContent({
           model: "gemini-2.5-flash",
@@ -504,109 +538,13 @@ ${retryGroupLines}
           config: { maxOutputTokens: 8192, safetySettings, thinkingConfig: { thinkingBudget: 0 } },
         });
         addEntriesToGroups(parseWordEntries(retryResponse.text || ""));
-        sendProgress("retry", `リトライ${retry + 1}完了: ${getTotal()}/100個`);
-      }
-
-      sendProgress("quality", `品質チェック中... (${getTotal()}個を精査)`);
-      const allWords = Object.values(groups).flat();
-      const wordListForCheck = allWords.map(e => `${e.word}/${e.reading}`).join("\n");
-
-      const qualityPrompt = `以下のワードリストを完全に初見の状態で精査せよ。各ワードについて以下を判定：
-1. それが「悪口」として成立しているか？（褒め言葉、中立的な形容詞、一般名詞は不合格）
-2. 意味がわかるか？（造語、意味不明な組み合わせは不合格）
-3. 単なる一般的な形容詞（「あつい」「さむい」「おおきい」等）は悪口ではない。不合格。
-
-不合格のワードのみ、1行に1つずつ出力せよ。
-合格ワードは出力しない。
-不合格が0個なら「ALL_PASS」とだけ出力。
-前置き不要。
-
-${wordListForCheck}`;
-
-      const qualityResponse = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: qualityPrompt,
-        config: { maxOutputTokens: 4096, safetySettings, thinkingConfig: { thinkingBudget: 0 } },
-      });
-      const qualityText = qualityResponse.text?.trim() || "";
-
-      if (qualityText !== "ALL_PASS") {
-        const failedWords = new Set(
-          qualityText.split("\n")
-            .map(line => line.replace(/^[\-\*\d\.\s]+/, "").split("/")[0].trim())
-            .filter(w => w.length > 0 && w !== "ALL_PASS")
-        );
-
-        if (failedWords.size > 0) {
-          sendProgress("quality", `${failedWords.size}個の低品質ワードを検出。差し替え中...`);
-
-          for (const key of Object.keys(groups)) {
-            groups[key] = groups[key].filter(e => !failedWords.has(e.word));
-          }
-
-          for (const k of Object.keys(suffixCounts)) delete suffixCounts[k];
-          for (const entry of Object.values(groups).flat()) {
-            const reading = entry.reading;
-            for (let sLen = 2; sLen <= Math.min(reading.length - 1, 4); sLen++) {
-              const readingSuffix = reading.slice(-sLen);
-              const key2 = `${sLen}:${readingSuffix}`;
-              suffixCounts[key2] = (suffixCounts[key2] || 0) + 1;
-            }
-          }
-
-          const MAX_QUALITY_RETRIES = 3;
-          for (let qr = 0; qr < MAX_QUALITY_RETRIES; qr++) {
-            const shortfalls: { charCount: number; need: number }[] = [];
-            for (const [cc, tgt] of Object.entries(GROUP_TARGETS)) {
-              const charCount = Number(cc);
-              const key = charCountToKey[charCount];
-              if (groups[key].length < tgt) shortfalls.push({ charCount, need: tgt - groups[key].length });
-            }
-            const totalShort = shortfalls.reduce((s, x) => s + x.need, 0);
-            if (totalShort === 0) break;
-
-            sendProgress("quality_retry", `品質差し替え中: 残り${totalShort}個 (リトライ${qr + 1})`);
-
-            const alreadyUsed = Object.values(groups).flat().map(e => e.word);
-            const qrGroupLines = shortfalls.map(s => {
-              const buf = Math.max(s.need * 4, s.need + 20);
-              return `===${s.charCount}文字===\nワード/ひらがな(romaji),...(${buf}個)`;
-            }).join("\n");
-
-            const qrPrompt = `以下のターゲットに特化した悪口・ディスりワードを生成せよ。
-必ず「悪口として成立する」ワードのみ生成すること。一般的な形容詞や造語は禁止。
-
-【ターゲット】
-${target}
-
-${severityInstruction}
-${ngSection}
-【厳守】全て異なるワード。重複禁止。意味の通じる悪口のみ。
-【既出リスト】: ${[...recentHistory, ...alreadyUsed].join(",")}
-
-【文字数ルール】ひらがな変換後の文字数でカウント。拗音・促音・撥音も各1文字。
-【出力フォーマット】各ワード「ワード/ひらがな読み(romaji)」形式。前置き不要。
-
-${qrGroupLines}
-
-【例】
-===4文字===
-嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu)...`;
-
-            const qrResponse = await ai.models.generateContent({
-              model: "gemini-2.5-flash",
-              contents: qrPrompt,
-              config: { maxOutputTokens: 8192, safetySettings, thinkingConfig: { thinkingBudget: 0 } },
-            });
-            addEntriesToGroups(parseWordEntries(qrResponse.text || ""));
-          }
-        }
+        sendProgress("retry", `リトライ${retry + 1}完了: ${getTotal()}/100個`, retryPct + 5);
       }
 
       if (heartbeat) clearInterval(heartbeat);
       const totalGenerated = getTotal();
       const totalElapsed = formatElapsed(Date.now() - startTime);
-      sendProgress("done", `完了: ${totalGenerated}/100個 (所要時間: ${totalElapsed})`);
+      sendProgress("done", `完了: ${totalGenerated}/100個 (所要時間: ${totalElapsed})`, 100);
 
       if (!clientDisconnected) {
         res.write(`data: ${JSON.stringify({ type: "result", groups, total: totalGenerated })}\n\n`);

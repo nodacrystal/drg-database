@@ -68,6 +68,8 @@ interface ProgressLog {
   time: string;
   detail: string;
   elapsed: string;
+  pct?: number;
+  eta?: string;
 }
 
 function extractVowels(romaji: string): string {
@@ -189,10 +191,10 @@ export default function Home() {
     setProgressLogs([]);
     setDissGroups(null);
 
-    const addLog = (detail: string, elapsed: string) => {
+    const addLog = (detail: string, elapsed: string, pct?: number, eta?: string) => {
       const now = new Date();
       const time = `${now.getHours().toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
-      setProgressLogs((prev) => [...prev, { time, detail, elapsed }]);
+      setProgressLogs((prev) => [...prev, { time, detail, elapsed, pct, eta }]);
     };
 
     addLog("生成開始...", "0秒");
@@ -229,7 +231,7 @@ export default function Home() {
           try {
             const data = JSON.parse(trimmed.slice(6));
             if (data.type === "progress") {
-              addLog(data.detail, data.elapsed || "");
+              addLog(data.detail, data.elapsed || "", data.pct, data.eta);
             } else if (data.type === "result") {
               setDissGroups(data.groups);
               const all = [
@@ -767,7 +769,39 @@ export default function Home() {
                     <ScrollText className="w-5 h-5 text-primary" />
                     <h2 className="text-base font-semibold">進捗ログ</h2>
                     {isGenerating && <Loader2 className="w-4 h-4 animate-spin text-primary" />}
+                    {(() => {
+                      const lastWithEta = [...progressLogs].reverse().find(l => l.eta);
+                      const lastPct = [...progressLogs].reverse().find(l => l.pct !== undefined);
+                      return (
+                        <>
+                          {lastWithEta?.eta && isGenerating && (
+                            <span className="text-xs text-yellow-400 ml-auto font-mono" data-testid="text-eta">
+                              残り {lastWithEta.eta}
+                            </span>
+                          )}
+                          {lastPct?.pct !== undefined && (
+                            <span className="text-xs text-primary font-mono">
+                              {lastPct.pct}%
+                            </span>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
+                  {(() => {
+                    const lastPct = [...progressLogs].reverse().find(l => l.pct !== undefined);
+                    if (lastPct?.pct !== undefined) {
+                      return (
+                        <div className="h-2 bg-muted rounded-full overflow-hidden mb-3" data-testid="generation-progress-bar">
+                          <div
+                            className="h-full bg-primary rounded-full transition-all duration-700 ease-out"
+                            style={{ width: `${lastPct.pct}%` }}
+                          />
+                        </div>
+                      );
+                    }
+                    return null;
+                  })()}
                   <div
                     className="bg-black/80 rounded-md border border-border/50 p-3 font-mono text-xs max-h-48 overflow-y-auto"
                     data-testid="progress-log-area"
@@ -776,7 +810,10 @@ export default function Home() {
                       <div key={i} className="flex gap-2 py-0.5">
                         <span className="text-muted-foreground shrink-0">[{log.time}]</span>
                         <span className="text-green-400 shrink-0">{log.elapsed && `(${log.elapsed})`}</span>
-                        <span className="text-foreground">{log.detail}</span>
+                        <span className="text-foreground flex-1">{log.detail}</span>
+                        {log.eta && (
+                          <span className="text-yellow-400 shrink-0">ETA:{log.eta}</span>
+                        )}
                       </div>
                     ))}
                     <div ref={logEndRef} />

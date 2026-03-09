@@ -85,3 +85,8 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words targeting 
 - 2026-03-09: Progress log area with scrolling history, timestamps, elapsed time, 5-second heartbeat updates
 - 2026-03-09: NG words tab (3rd tab) showing accumulated rejected words with count badge and clear button
 - 2026-03-09: GET /api/ng-words endpoint for listing all NG words
+- 2026-03-09: Speed optimization — parallel generation (2 simultaneous Gemini calls for short/long word groups)
+- 2026-03-09: RAG research — AI gathers target comedian info (catchphrases, weaknesses, scandals) before word generation
+- 2026-03-09: Quality check removed (integrated into prompt rules) to save ~10-15s per batch
+- 2026-03-09: thinkingBudget:0 for all Gemini calls (faster generation)
+- 2026-03-09: ETA display and generation progress bar in streaming UI
