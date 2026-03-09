@@ -18,10 +18,10 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words targeting 
 - Favorites grouped by vowel pattern for rhyme organization
 
 ## Key Features
-- **Simplified target generation**: Name + brief traits (1-2 lines), fast
-- **Batch generation** (95 words per batch):
-  - 2文字 × 10個
-  - 3文字 × 20個
+- **Target generation**: Name + 性格 + 見た目 + 経歴 (each 1 line)
+- **Batch generation** (100 words per batch):
+  - 2文字 × 5個
+  - 3文字 × 30個
   - 4文字 × 30個
   - 5文字 × 20個
   - 6文字 × 10個
@@ -30,9 +30,10 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words targeting 
 - **Select All / Deselect All**: Per-group and global toggle
 - Unchecked words are NOT added to favorites
 - Words already in DB are excluded from generation (passed as history)
-- **Database (favorites)**: Persisted in PostgreSQL, grouped by vowel pattern
-  - Vowel groups sorted by frequency (most common pattern first)
-  - Each group shows `[vowels]` header badge
+- **Database (favorites)**: Persisted in PostgreSQL, grouped by suffix vowel pattern
+  - Suffix matching: words grouped by trailing vowel similarity (longest match first, 5→2)
+  - Groups with 2+ words formed; remainders grouped by last vowel
+  - Each group shows `[*vowels]` header badge (e.g., `*ai`, `*oiu`)
   - Individual word deletion, bulk clear
   - Export to text format for AI consumption
 - Progress bar: shows count / 10,000 target
@@ -40,7 +41,7 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words targeting 
 
 ## API Routes
 - `GET /api/target?name=` - Generate simplified target profile
-- `POST /api/diss` - Generate ~95 diss words in 6 groups (`{ target, level }`)
+- `POST /api/diss` - Generate ~100 diss words in 6 groups (`{ target, level }`)
 - `GET /api/favorites` - Get all words grouped by vowel pattern
 - `POST /api/favorites` - Add words to DB (bulk insert, skip duplicates)
 - `DELETE /api/favorites/:id` - Delete single word
@@ -61,9 +62,9 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words targeting 
 
 ## Recent Changes
 - 2026-03-09: Major rebuild - database-backed 10,000 word goal
-- 2026-03-09: 6 word groups (2-7文字), 95 words per batch
-- 2026-03-09: Simplified target generation for speed
-- 2026-03-09: Favorites stored in PostgreSQL, grouped by vowel pattern
+- 2026-03-09: 6 word groups (2-7文字), 100 words per batch (2×5, 3×30, 4×30, 5×20, 6×10, 7×5)
+- 2026-03-09: Target generation with 性格/見た目/経歴 fields
+- 2026-03-09: Favorites grouped by suffix vowel pattern (trailing vowel match)
 - 2026-03-09: Select All/Deselect All per group and globally
 - 2026-03-09: Progress bar towards 10,000 word goal
 - 2026-03-09: Export feature for AI-readable format

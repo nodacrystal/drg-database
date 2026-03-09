@@ -83,8 +83,8 @@ const GROUP_KEYS: Array<{ key: keyof DissGroups; label: string; count: number }>
   { key: "six", label: "6文字", count: 10 },
   { key: "five", label: "5文字", count: 20 },
   { key: "four", label: "4文字", count: 30 },
-  { key: "three", label: "3文字", count: 20 },
-  { key: "two", label: "2文字", count: 10 },
+  { key: "three", label: "3文字", count: 30 },
+  { key: "two", label: "2文字", count: 5 },
 ];
 
 export default function Home() {
@@ -588,7 +588,7 @@ export default function Home() {
               ) : (
                 <Zap className="w-4 h-4 mr-2" />
               )}
-              95個生成（7文字×5 / 6文字×10 / 5文字×20 / 4文字×30 / 3文字×20 / 2文字×10）
+              100個生成（7文字×5 / 6文字×10 / 5文字×20 / 4文字×30 / 3文字×30 / 2文字×5）
             </Button>
           </CardContent>
         </Card>

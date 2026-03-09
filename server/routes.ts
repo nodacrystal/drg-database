@@ -65,8 +65,8 @@ function parseWordEntries(section: string): WordEntry[] {
 }
 
 const GROUP_TARGETS: Record<number, number> = {
-  2: 10,
-  3: 20,
+  2: 5,
+  3: 30,
   4: 30,
   5: 20,
   6: 10,
@@ -74,8 +74,8 @@ const GROUP_TARGETS: Record<number, number> = {
 };
 
 const GROUP_BUFFER: Record<number, number> = {
-  2: 15,
-  3: 30,
+  2: 10,
+  3: 45,
   4: 45,
   5: 30,
   6: 15,
@@ -95,11 +95,15 @@ export async function registerRoutes(
       if (nameQuery) {
         prompt = `実在の有名人「${nameQuery}」を元にした架空キャラクターを生成。名前を少しだけもじった偽名にすること（例：ヒカキン→ピカキン）。以下のフォーマットで出力。余計な説明不要。
 名前：〇〇
-特徴：（職業・見た目・性格・弱点・スキャンダルを1〜2行で簡潔に）`;
+性格：（端的に1行）
+見た目：（端的に1行）
+経歴：（端的に1行）`;
       } else {
         prompt = `実在する有名人（タレント、政治家、YouTuber、歌手、俳優、お笑い芸人など）を一人ランダムに選び、架空キャラクターを生成。名前を少しだけもじった偽名にすること。以下のフォーマットで出力。余計な説明不要。
 名前：〇〇
-特徴：（職業・見た目・性格・弱点・スキャンダルを1〜2行で簡潔に）`;
+性格：（端的に1行）
+見た目：（端的に1行）
+経歴：（端的に1行）`;
       }
 
       const response = await ai.models.generateContent({
@@ -168,17 +172,17 @@ ${severityInstruction}
 【出力フォーマット - 厳守】
 各ワードは「ワード/ひらがな読み(romaji)」形式。スラッシュの後にひらがな読み、括弧内にローマ字（全ての文字に母音を含めた読み）。
 ===2文字===
-ワード/ひらがな(romaji),...(${GROUP_BUFFER[2]}個)
+ワード/ひらがな(romaji),...(${GROUP_BUFFER[2]}個 ※目標${GROUP_TARGETS[2]}個)
 ===3文字===
-ワード/ひらがな(romaji),...(${GROUP_BUFFER[3]}個)
+ワード/ひらがな(romaji),...(${GROUP_BUFFER[3]}個 ※目標${GROUP_TARGETS[3]}個)
 ===4文字===
-ワード/ひらがな(romaji),...(${GROUP_BUFFER[4]}個)
+ワード/ひらがな(romaji),...(${GROUP_BUFFER[4]}個 ※目標${GROUP_TARGETS[4]}個)
 ===5文字===
-ワード/ひらがな(romaji),...(${GROUP_BUFFER[5]}個)
+ワード/ひらがな(romaji),...(${GROUP_BUFFER[5]}個 ※目標${GROUP_TARGETS[5]}個)
 ===6文字===
-ワード/ひらがな(romaji),...(${GROUP_BUFFER[6]}個)
+ワード/ひらがな(romaji),...(${GROUP_BUFFER[6]}個 ※目標${GROUP_TARGETS[6]}個)
 ===7文字===
-ワード/ひらがな(romaji),...(${GROUP_BUFFER[7]}個)
+ワード/ひらがな(romaji),...(${GROUP_BUFFER[7]}個 ※目標${GROUP_TARGETS[7]}個)
 
 【例】
 ===2文字===
@@ -244,29 +248,59 @@ ${severityInstruction}
     try {
       const allWords = await getAllWords();
 
-      const vowelGroups: Record<string, Array<{
+      type WordItem = {
         id: number;
         word: string;
         reading: string;
         romaji: string;
         vowels: string;
         charCount: number;
-      }>> = {};
+      };
 
-      for (const w of allWords) {
-        const key = w.vowels;
-        if (!vowelGroups[key]) vowelGroups[key] = [];
-        vowelGroups[key].push({
-          id: w.id,
-          word: w.word,
-          reading: w.reading,
-          romaji: w.romaji,
-          vowels: w.vowels,
-          charCount: w.charCount,
-        });
+      const items: WordItem[] = allWords.map((w) => ({
+        id: w.id,
+        word: w.word,
+        reading: w.reading,
+        romaji: w.romaji,
+        vowels: w.vowels,
+        charCount: w.charCount,
+      }));
+
+      function getSuffixVowels(vowels: string, len: number): string {
+        return vowels.slice(-len);
       }
 
-      const sortedGroups = Object.entries(vowelGroups)
+      const grouped: Record<string, WordItem[]> = {};
+      const assigned = new Set<number>();
+
+      for (let suffixLen = 5; suffixLen >= 2; suffixLen--) {
+        const buckets: Record<string, WordItem[]> = {};
+        for (const item of items) {
+          if (assigned.has(item.id)) continue;
+          if (item.vowels.length < suffixLen) continue;
+          const suffix = getSuffixVowels(item.vowels, suffixLen);
+          if (!buckets[suffix]) buckets[suffix] = [];
+          buckets[suffix].push(item);
+        }
+        for (const [suffix, words] of Object.entries(buckets)) {
+          if (words.length >= 2) {
+            const key = `*${suffix}`;
+            if (!grouped[key]) grouped[key] = [];
+            grouped[key].push(...words);
+            for (const w of words) assigned.add(w.id);
+          }
+        }
+      }
+
+      for (const item of items) {
+        if (assigned.has(item.id)) continue;
+        const suffix = item.vowels.length >= 1 ? `*${item.vowels.slice(-1)}` : "*";
+        if (!grouped[suffix]) grouped[suffix] = [];
+        grouped[suffix].push(item);
+        assigned.add(item.id);
+      }
+
+      const sortedGroups = Object.entries(grouped)
         .sort((a, b) => b[1].length - a[1].length)
         .map(([vowels, words]) => ({ vowels, words }));
 
