@@ -158,7 +158,7 @@ export default function Home() {
       const res = await apiRequest("POST", "/api/diss", { target, level });
       return res.json();
     },
-    onSuccess: (data: { groups: DissGroups }) => {
+    onSuccess: (data: { groups: DissGroups; total?: number }) => {
       setDissGroups(data.groups);
       const all = [
         ...data.groups.seven,
@@ -169,6 +169,9 @@ export default function Home() {
         ...data.groups.two,
       ];
       setCheckedWords(new Set(all.map((e) => e.word)));
+      if (data.total !== undefined && data.total < 100) {
+        toast({ title: "注意", description: `${data.total}/100個のみ生成できました。再度お試しください。` });
+      }
     },
     onError: () => {
       toast({ title: "エラー", description: "ワード生成に失敗しました", variant: "destructive" });

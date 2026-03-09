@@ -347,17 +347,6 @@ ${severityInstruction}
 ===4文字===
 嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu)...`;
 
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: prompt,
-        config: {
-          maxOutputTokens: 16384,
-          safetySettings,
-        },
-      });
-
-      const text = response.text || "";
-
       const groups: Record<string, WordEntry[]> = {
         seven: [],
         six: [],
@@ -377,42 +366,136 @@ ${severityInstruction}
       };
 
       const seen = new Set<string>(existingWords);
-      const allEntries = parseWordEntries(text);
-
       const suffixCounts: Record<string, number> = {};
 
-      for (const entry of allEntries) {
-        if (seen.has(entry.word)) continue;
-        seen.add(entry.word);
+      function addEntriesToGroups(entries: WordEntry[]) {
+        for (const entry of entries) {
+          if (seen.has(entry.word)) continue;
+          seen.add(entry.word);
 
-        const reading = entry.reading;
-        let skipDueSuffix = false;
-        for (let sLen = 2; sLen <= Math.min(reading.length - 1, 4); sLen++) {
-          const readingSuffix = reading.slice(-sLen);
-          const key2 = `${sLen}:${readingSuffix}`;
-          const count = suffixCounts[key2] || 0;
-          if (count >= 2) {
-            skipDueSuffix = true;
-            break;
-          }
-        }
-        if (skipDueSuffix) continue;
-
-        const charCount = entry.reading.length;
-        const key = charCountToKey[charCount];
-        const target = GROUP_TARGETS[charCount];
-
-        if (key && target && groups[key].length < target) {
-          groups[key].push(entry);
+          const reading = entry.reading;
+          let skipDueSuffix = false;
           for (let sLen = 2; sLen <= Math.min(reading.length - 1, 4); sLen++) {
             const readingSuffix = reading.slice(-sLen);
             const key2 = `${sLen}:${readingSuffix}`;
-            suffixCounts[key2] = (suffixCounts[key2] || 0) + 1;
+            const count = suffixCounts[key2] || 0;
+            if (count >= 2) {
+              skipDueSuffix = true;
+              break;
+            }
+          }
+          if (skipDueSuffix) continue;
+
+          const charCount = entry.reading.length;
+          const key = charCountToKey[charCount];
+          const groupTarget = GROUP_TARGETS[charCount];
+
+          if (key && groupTarget && groups[key].length < groupTarget) {
+            groups[key].push(entry);
+            for (let sLen = 2; sLen <= Math.min(reading.length - 1, 4); sLen++) {
+              const readingSuffix = reading.slice(-sLen);
+              const key2 = `${sLen}:${readingSuffix}`;
+              suffixCounts[key2] = (suffixCounts[key2] || 0) + 1;
+            }
           }
         }
       }
 
-      res.json({ groups });
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: prompt,
+        config: {
+          maxOutputTokens: 16384,
+          safetySettings,
+        },
+      });
+
+      const text = response.text || "";
+      addEntriesToGroups(parseWordEntries(text));
+
+      const MAX_RETRIES = 5;
+      for (let retry = 0; retry < MAX_RETRIES; retry++) {
+        const shortfalls: { charCount: number; need: number }[] = [];
+        for (const [cc, tgt] of Object.entries(GROUP_TARGETS)) {
+          const charCount = Number(cc);
+          const key = charCountToKey[charCount];
+          const have = groups[key].length;
+          if (have < tgt) {
+            shortfalls.push({ charCount, need: tgt - have });
+          }
+        }
+
+        const totalShort = shortfalls.reduce((s, x) => s + x.need, 0);
+        if (totalShort === 0) break;
+
+        console.log(`Retry ${retry + 1}: ${totalShort} words short — ${shortfalls.map(s => `${s.charCount}文字:${s.need}個不足`).join(", ")}`);
+
+        const alreadyUsed = Object.values(groups).flat().map(e => e.word);
+        const retryGroupLines = shortfalls.map(s => {
+          const buf = Math.max(s.need * 4, s.need + 20);
+          return `===${s.charCount}文字===\nワード/ひらがな(romaji),...(${buf}個)`;
+        }).join("\n");
+
+        const retryPrompt = `以下のターゲットに特化した悪口・ディスりワードを追加生成せよ。
+
+【ターゲット】
+${target}
+
+${severityInstruction}
+
+【厳守ルール】
+1. 全て異なるワードにすること。
+2. ターゲットの特徴・弱点に基づいた個人攻撃。
+3. 漢字は小学生レベル。
+4. 語尾2文字以上が同じ読みの言葉は最大2個まで。
+5. 意味の通じる悪口のみ。造語不可。
+6. 重複禁止：以下は出力しないこと。
+【既出リスト】: ${[...recentHistory, ...alreadyUsed].join(",")}
+
+【文字数ルール - 超重要・厳守】
+- 文字数は「全てひらがなに変換したときの文字数」でカウントする。
+- 拗音（しゃ、きょ等の小さい文字）も1文字。促音（っ）も1文字。撥音（ん）も1文字。
+- 具体例：
+  2文字：クズ→くず、カス→かす、ゴミ→ごみ
+  3文字：ダサい→ださい、無能→むのう、ヘタレ→へたれ
+  4文字：うそつき→うそつき、ゴミクズ→ごみくず
+  5文字：できそこない→できそこない
+  6文字：おちぶれやろう→おちぶれやろう
+  7文字：のうたりんやろう→のうたりんやろう
+- 必ず出力前にひらがなに変換して文字数を指折り確認すること！
+
+【出力フォーマット - 厳守】
+各ワードは「ワード/ひらがな読み(romaji)」形式。スラッシュの後にひらがな読み、括弧内にローマ字。
+前置き不要。即座に出力開始。
+
+${retryGroupLines}
+
+【例】
+===4文字===
+嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu),ヘタクソ/へたくそ(hetakuso)...
+===5文字===
+できそこない/できそこない(dekisokonai),はらぐろい/はらぐろい(haraguroi)...`;
+
+        const retryResponse = await ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: retryPrompt,
+          config: {
+            maxOutputTokens: 8192,
+            safetySettings,
+            thinkingConfig: { thinkingBudget: 0 },
+          },
+        });
+
+        const retryText = retryResponse.text || "";
+        const retryEntries = parseWordEntries(retryText);
+        console.log(`Retry ${retry + 1}: parsed ${retryEntries.length} entries`);
+        addEntriesToGroups(retryEntries);
+      }
+
+      const totalGenerated = Object.values(groups).reduce((s, g) => s + g.length, 0);
+      console.log(`Total generated: ${totalGenerated}/100`);
+
+      res.json({ groups, total: totalGenerated });
     } catch (error) {
       console.error("Diss generation error:", error);
       res.status(500).json({ error: "ワード生成に失敗しました" });
