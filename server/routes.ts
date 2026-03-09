@@ -91,40 +91,33 @@ export async function registerRoutes(
     try {
       const nameQuery = typeof req.query.name === "string" ? req.query.name.trim() : "";
 
-      let prompt: string;
-      const formatInstruction = `以下のフォーマットで必ず4行で出力せよ。省略禁止。余計な前置き・後書き不要。
-名前：（実名を少しもじった偽名）
-性格：（性格の特徴・弱点・ダメなところを具体的に。20〜40文字程度）
-見た目：（外見の特徴・コンプレックスになりそうな点を具体的に。20〜40文字程度）
-経歴：（職業・実績・スキャンダル・黒歴史を具体的に。20〜40文字程度）`;
+      const base = nameQuery
+        ? `「${nameQuery}」を元にした架空キャラ。偽名にすること。`
+        : `実在の有名人1人をランダムに選び架空キャラ化。偽名にすること。`;
 
-      if (nameQuery) {
-        prompt = `実在の有名人「${nameQuery}」を元にした架空キャラクターを生成せよ。\n${formatInstruction}`;
-      } else {
-        prompt = `実在する有名人（タレント、政治家、YouTuber、歌手、俳優、お笑い芸人など）を一人ランダムに選び、架空キャラクターを生成せよ。\n${formatInstruction}`;
-      }
+      const prompt = `${base}
+必ず以下4行で出力。前置き不要。
+名前：偽名
+性格：特徴・弱点を具体的に（20〜40文字）
+見た目：外見の特徴を具体的に（20〜40文字）
+経歴：職業・スキャンダル等を具体的に（20〜40文字）`;
 
       let text = "";
-      for (let attempt = 0; attempt < 3; attempt++) {
+      for (let attempt = 0; attempt < 2; attempt++) {
         const response = await ai.models.generateContent({
           model: "gemini-2.5-flash",
           contents: prompt,
           config: {
-            maxOutputTokens: 1024,
+            maxOutputTokens: 512,
             safetySettings,
+            thinkingConfig: { thinkingBudget: 0 },
           },
         });
         text = response.text?.trim() || "";
 
-        const hasName = /名前[：:]/.test(text);
-        const hasPersonality = /性格[：:]/.test(text);
-        const hasAppearance = /見た目[：:]/.test(text);
-        const hasHistory = /経歴[：:]/.test(text);
-
-        if (hasName && hasPersonality && hasAppearance && hasHistory) {
+        if (/名前[：:]/.test(text) && /性格[：:]/.test(text) && /見た目[：:]/.test(text) && /経歴[：:]/.test(text)) {
           break;
         }
-        console.log(`Target attempt ${attempt + 1} incomplete, retrying...`, text.substring(0, 100));
         text = "";
       }
 
