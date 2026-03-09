@@ -3,7 +3,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
@@ -90,7 +89,7 @@ const GROUP_KEYS: Array<{ key: keyof DissGroups; label: string; count: number }>
 export default function Home() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [nameInput, setNameInput] = useState<string>("");
+  
   const [target, setTarget] = useState<string>("");
   const [level, setLevel] = useState<number>(5);
   const [ageConfirmed, setAgeConfirmed] = useState(false);
@@ -142,10 +141,7 @@ export default function Home() {
 
   const targetMutation = useMutation({
     mutationFn: async () => {
-      const url = nameInput.trim()
-        ? `/api/target?name=${encodeURIComponent(nameInput.trim())}`
-        : "/api/target";
-      const res = await apiRequest("GET", url);
+      const res = await apiRequest("GET", "/api/target");
       return res.json();
     },
     onSuccess: (data: { target: string }) => {
@@ -471,15 +467,6 @@ export default function Home() {
               <h2 className="text-base font-semibold">ターゲット設定</h2>
             </div>
 
-            <div className="space-y-1">
-              <Input
-                placeholder="名前を入力（空欄ならランダム）"
-                value={nameInput}
-                onChange={(e) => setNameInput(e.target.value)}
-                data-testid="input-name"
-              />
-            </div>
-
             <Button
               onClick={() => targetMutation.mutate()}
               disabled={targetMutation.isPending}
@@ -491,13 +478,11 @@ export default function Home() {
               ) : (
                 <Sparkles className="w-4 h-4 mr-1" />
               )}
-              人物を生成
+              {target ? "やり直し" : "ターゲットを選ぶ"}
             </Button>
 
             <AnimatePresence mode="wait">
-              {targetMutation.isPending ? (
-                <Skeleton className="h-10 w-full rounded-md" />
-              ) : target ? (
+              {target ? (
                 <motion.div
                   key="target"
                   initial={{ opacity: 0, y: 8 }}
@@ -508,7 +493,7 @@ export default function Home() {
                 </motion.div>
               ) : (
                 <p className="text-xs text-muted-foreground italic">
-                  ボタンを押してターゲットを生成
+                  ボタンを押してターゲットを選ぶ
                 </p>
               )}
             </AnimatePresence>

@@ -18,7 +18,7 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words targeting 
 - Favorites grouped by vowel pattern for rhyme organization
 
 ## Key Features
-- **Target generation**: Name + 性格 + 見た目 + 経歴 (each 1 line)
+- **Target selection**: Random from ~150 hardcoded Japanese comedians (no AI call). "やり直し" button re-rolls.
 - **Batch generation** (100 words per batch):
   - 2文字 × 5個
   - 3文字 × 30個
@@ -42,7 +42,7 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words targeting 
 - Adjustable intensity level (1-10) with age confirmation for level 8+
 
 ## API Routes
-- `GET /api/target?name=` - Generate simplified target profile
+- `GET /api/target` - Random target from hardcoded comedian list (no AI)
 - `POST /api/diss` - Generate ~100 diss words in 6 groups (`{ target, level }`)
 - `GET /api/favorites` - Get all words grouped by vowel pattern
 - `POST /api/favorites` - Add words to DB (bulk insert, skip duplicates)
@@ -65,7 +65,8 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words targeting 
 ## Recent Changes
 - 2026-03-09: Major rebuild - database-backed 10,000 word goal
 - 2026-03-09: 6 word groups (2-7文字), 100 words per batch (2×5, 3×30, 4×30, 5×20, 6×10, 7×5)
-- 2026-03-09: Target generation with 性格/見た目/経歴 fields
+- 2026-03-09: Target changed to hardcoded ~150 comedian list (no AI, instant)
+- 2026-03-09: Name input removed, "やり直し" button for re-rolling target
 - 2026-03-09: Favorites grouped by suffix vowel pattern (trailing vowel match)
 - 2026-03-09: Select All/Deselect All per group and globally
 - 2026-03-09: Progress bar towards 10,000 word goal
