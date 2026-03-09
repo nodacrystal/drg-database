@@ -27,6 +27,8 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words targeting 
   - 6文字 × 10個
   - 7文字 × 5個
 - AI generates buffer (extra per group); server-side validation by `reading.length`
+- Server-side suffix dedup: max 2 words with same reading suffix (2-4 chars) per batch
+- Quality rules in prompt: meaningful words only, no repeated suffix words (やろう, がき, etc.)
 - **Select All / Deselect All**: Per-group and global toggle
 - Unchecked words are NOT added to favorites
 - Words already in DB are excluded from generation (passed as history)

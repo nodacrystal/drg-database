@@ -157,6 +157,23 @@ ${severityInstruction}
 6. 重複禁止：以下のワードは絶対に出力しないこと。
 【既出リスト】: ${historyList}
 
+【語尾の重複禁止 - 超重要】
+- 同じ語尾の言葉を複数生成してはいけない。
+- NG例：「馬鹿野郎」と「アホヤロウ」→どちらも「やろう」で終わっており、語尾が同じ意味の同じ言葉。これは別の悪口ではない。
+- NG例：「クソガキ」と「バカガキ」→どちらも「ガキ」で終わっており同じ。
+- NG例：「ゴミ人間」と「クズ人間」→どちらも「人間」で終わっており同じ。
+- OK例：「馬鹿野郎」と「寝ぼけ顔」→語尾の言葉が異なるのでOK。
+- 語尾2文字以上が同じ読みの言葉は、全体の中で最大2個までにすること。
+- できるだけ多様な語尾パターンを使い、バリエーション豊かにすること。
+
+【品質チェック - 全ワード必須】
+出力前に全てのワードが以下を満たすか確認せよ：
+1. その言葉だけで意味が通じるか？意味不明な造語は不可。
+2. その言葉は悪口、または相手への痛烈な批判・指摘になっているか？
+3. 既出リストに存在しないか？
+4. 他のワードと語尾が被っていないか？
+→ 1つでも不合格なら、そのワードを別のワードに差し替えること。
+
 【文字数ルール - 超重要・厳守】
 - 文字数は「全てひらがなに変換したときの文字数」でカウントする。
 - 拗音（しゃ、きょ等の小さい文字）も1文字。促音（っ）も1文字。撥音（ん）も1文字。
@@ -224,9 +241,24 @@ ${severityInstruction}
       const seen = new Set<string>(existingWords);
       const allEntries = parseWordEntries(text);
 
+      const suffixCounts: Record<string, number> = {};
+
       for (const entry of allEntries) {
         if (seen.has(entry.word)) continue;
         seen.add(entry.word);
+
+        const reading = entry.reading;
+        let skipDueSuffix = false;
+        for (let sLen = 2; sLen <= Math.min(reading.length - 1, 4); sLen++) {
+          const readingSuffix = reading.slice(-sLen);
+          const key2 = `${sLen}:${readingSuffix}`;
+          const count = suffixCounts[key2] || 0;
+          if (count >= 2) {
+            skipDueSuffix = true;
+            break;
+          }
+        }
+        if (skipDueSuffix) continue;
 
         const charCount = entry.reading.length;
         const key = charCountToKey[charCount];
@@ -234,6 +266,11 @@ ${severityInstruction}
 
         if (key && target && groups[key].length < target) {
           groups[key].push(entry);
+          for (let sLen = 2; sLen <= Math.min(reading.length - 1, 4); sLen++) {
+            const readingSuffix = reading.slice(-sLen);
+            const key2 = `${sLen}:${readingSuffix}`;
+            suffixCounts[key2] = (suffixCounts[key2] || 0) + 1;
+          }
         }
       }
 
@@ -273,6 +310,26 @@ ${severityInstruction}
       const grouped: Record<string, WordItem[]> = {};
       const assigned = new Set<number>();
 
+      function getReadingSuffix(reading: string, len: number): string {
+        return reading.slice(-len);
+      }
+
+      function filterSameReadingSuffix(words: WordItem[]): WordItem[] {
+        if (words.length < 2) return words;
+        const readingSuffixCounts: Record<string, number> = {};
+        const result: WordItem[] = [];
+        for (const w of words) {
+          const minSuffix = Math.min(2, w.reading.length);
+          const rSuffix = w.reading.slice(-minSuffix);
+          const count = readingSuffixCounts[rSuffix] || 0;
+          if (count < 2) {
+            readingSuffixCounts[rSuffix] = count + 1;
+            result.push(w);
+          }
+        }
+        return result;
+      }
+
       for (let suffixLen = 5; suffixLen >= 2; suffixLen--) {
         const buckets: Record<string, WordItem[]> = {};
         for (const item of items) {
@@ -283,11 +340,12 @@ ${severityInstruction}
           buckets[suffix].push(item);
         }
         for (const [suffix, words] of Object.entries(buckets)) {
-          if (words.length >= 2) {
+          const filtered = filterSameReadingSuffix(words);
+          if (filtered.length >= 2) {
             const key = `*${suffix}`;
             if (!grouped[key]) grouped[key] = [];
-            grouped[key].push(...words);
-            for (const w of words) assigned.add(w.id);
+            grouped[key].push(...filtered);
+            for (const w of filtered) assigned.add(w.id);
           }
         }
       }
