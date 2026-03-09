@@ -163,7 +163,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/diss", async (req, res) => {
     let heartbeat: ReturnType<typeof setInterval> | null = null;
     let disconnected = false;
-    req.on("close", () => { disconnected = true; if (heartbeat) clearInterval(heartbeat); });
+    res.on("close", () => { disconnected = true; if (heartbeat) clearInterval(heartbeat); });
 
     try {
       const parsed = dissRequestSchema.safeParse(req.body);
@@ -173,6 +173,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders();
 
       const startTime = Date.now();
       let currentStep = "";
@@ -182,6 +184,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         if (disconnected) return;
         currentStep = step;
         res.write(`data: ${JSON.stringify({ type: "progress", step, detail, elapsed: formatElapsed(Date.now() - startTime) })}\n\n`);
+        if (typeof (res as any).flush === "function") (res as any).flush();
       }
 
       function logTiming(label: string) {
@@ -192,6 +195,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       heartbeat = setInterval(() => {
         if (disconnected) { if (heartbeat) clearInterval(heartbeat); return; }
         res.write(`data: ${JSON.stringify({ type: "progress", step: currentStep, detail: "処理継続中...", elapsed: formatElapsed(Date.now() - startTime) })}\n\n`);
+        if (typeof (res as any).flush === "function") (res as any).flush();
       }, 5000);
 
       const groupTargets = scaleTargets(count);
@@ -338,6 +342,7 @@ ${qualityRule}
 
       if (!disconnected) {
         res.write(`data: ${JSON.stringify({ type: "result", groups, total: total() })}\n\n`);
+        if (typeof (res as any).flush === "function") (res as any).flush();
         res.end();
       }
     } catch (error) {
