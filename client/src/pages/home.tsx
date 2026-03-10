@@ -313,7 +313,7 @@ export default function Home() {
               data-testid={`word-row-${startIndex + i}`}
             >
               <Checkbox checked={checkedWords.has(entry.word)} onCheckedChange={() => toggleChecked(entry.word)} data-testid={`checkbox-word-${startIndex + i}`} />
-              <div className="flex-1 min-w-0">
+              <div className="flex-1 min-w-0 cursor-pointer select-none" onClick={() => toggleChecked(entry.word)} data-testid={`word-text-${startIndex + i}`}>
                 <span className="text-sm font-medium">{entry.word}</span>
                 {entry.reading && <span className="text-xs text-muted-foreground ml-1.5">({entry.reading})</span>}
                 <span className="text-xs text-primary/70 ml-1">[{extractVowels(entry.romaji)}]</span>

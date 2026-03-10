@@ -11,7 +11,7 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 
 ## File Structure
 - `server/routes.ts` — API routes, AI generation, 5-parallel batch system (~600 lines, suffix dedup)
-- `server/targets.ts` — Hardcoded ~150 comedian target data
+- `server/targets.ts` — Hardcoded ~130 target data (comedians + athletes, 5-field: name/appearance/career/personality/evaluation)
 - `server/storage.ts` — Database CRUD operations via Drizzle ORM
 - `client/src/pages/home.tsx` — Single-page UI (~640 lines)
 - `shared/schema.ts` — Drizzle schema definitions
@@ -53,7 +53,7 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - **Content types**: insults, criticism, provocation, taunting (挑発・煽り・批判) for levels 4+
 
 ## Key Features
-- **Target selection**: Random from ~150 hardcoded Japanese comedians
+- **Target selection**: Random from ~130 hardcoded targets (comedians + athletes) with 5-field data (name/appearance/career/personality/evaluation)
 - **NG word analysis**: When 5+ NG words exist, AI analyzes rejection patterns and avoids similar words
 - **Simple language**: All generated words must be understandable by elementary school students
 - **Sentences allowed**: Words, phrases, and short sentences all accepted if natural
@@ -84,9 +84,12 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - `DELETE /api/ng-words` - Clear all NG words
 
 ## Recent Changes
+- 2026-03-10: Rich target data: 5 fields (name/appearance/career/personality/evaluation) for ~130 targets (comedians + athletes)
+- 2026-03-10: Anti-praise enforcement: Level 4+ explicitly bans positive words; prompt categorizes attacks (appearance/personality/scandal/provocation/existential)
+- 2026-03-10: Word quality: incomplete/cut-off phrases banned; research prompt enhanced for diss-relevant info
+- 2026-03-10: Clickable word rows: tapping word text toggles selection (not just checkbox)
 - 2026-03-10: 5-parallel batch system: 5 AI calls × 40 words each, filtered to 100 via suffix dedup
 - 2026-03-10: Suffix dedup: max 2 words with same 末尾2文字, enforced server-side
-- 2026-03-10: Total target: 100 words per generation (~12-15 seconds)
 - 2026-03-10: Elementary school level vocabulary only (小学生でもわかる言葉)
 - 2026-03-10: Vowel extraction includes 「ん」(n) when not followed by a vowel
 - 2026-03-10: Favorites grouped by last 2 vowels, sorted by 3+ vowel suffix match within groups

@@ -7,7 +7,7 @@ import {
   clearAllWords, exportWords, getAllNgWords, getNgWordStrings,
   addNgWords, getNgWordCount, clearNgWords,
 } from "./storage";
-import { TARGETS } from "./targets";
+import { TARGETS, type TargetData } from "./targets";
 
 const dissRequestSchema = z.object({
   target: z.string().min(1),
@@ -142,9 +142,8 @@ const LEVEL_CONFIGS: Record<number, { label: string; wordType: string; instructi
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
 
   app.get("/api/target", (_req, res) => {
-    const entry = TARGETS[Math.floor(Math.random() * TARGETS.length)];
-    const parts = entry.split(",");
-    res.json({ target: `名前：${parts[0]}\n見た目：${parts[1] || ""}\n性格：${parts[3] || parts[2] || ""}` });
+    const t = TARGETS[Math.floor(Math.random() * TARGETS.length)];
+    res.json({ target: `名前：${t.name}\n見た目：${t.appearance}\n経歴：${t.career}\n性格：${t.personality}\n周りからの評価：${t.evaluation}` });
   });
 
   app.post("/api/diss", async (req, res) => {
@@ -192,12 +191,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const targetName = target.split("\n")[0]?.replace("名前：", "").trim() || "";
 
       const researchPrompt = level <= 3
-        ? `「${targetName}」（日本のお笑い芸人）の良い面を箇条書き。前置き不要。
+        ? `「${targetName}」の良い面を箇条書き。前置き不要。
 1. 代表的な功績・受賞歴 2. 尊敬される理由 3. 才能・スキル 4. 人柄の良さ 5. ファンに愛される理由
 各3-5個。`
-        : `「${targetName}」（日本のお笑い芸人）について箇条書き。前置き不要。
-1. 代表的ギャグ・決めゼリフ 2. よく弄られるポイント 3. スキャンダル・失敗談
-4. 身体的特徴 5. 性格的弱点 6. ネット上の悪口・あだ名 7. 他芸人からのイジり方
+        : `「${targetName}」について、悪口・ディスに使えるネタを箇条書き。前置き不要。
+1. 代表的ギャグ・決めゼリフ（パロって馬鹿にできるもの）
+2. よく弄られるポイント・コンプレックス
+3. スキャンダル・失敗談・黒歴史
+4. 身体的特徴で馬鹿にされやすいもの
+5. 性格の悪い面・嫌われるポイント
+6. ネット上の悪口・蔑称・あだ名
+7. 弱点・痛い所・触れられたくない話題
 各3-5個。`;
 
       const dbStart = Date.now();
@@ -235,19 +239,32 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const seen = new Set<string>([...existingWords, ...ngWordList]);
       const historyList = existingWords.slice(-200).join(",") || "なし";
 
-      const contentType = level <= 2 ? "褒め言葉・称賛" : level <= 4 ? "イジり・軽口・煽り" : "悪口・批判・煽り・挑発ワード";
+      const contentType = level <= 2 ? "褒め言葉・称賛" : level === 3 ? "親しみ・愛あるイジり" : level === 4 ? "軽口・テレビ的イジり" : "悪口・批判・煽り・挑発ワード";
       const contentInstr = level <= 3
         ? `ターゲット特化。意味の通じる自然な${contentType}のみ。単語・フレーズ・短い文いずれも可。`
-        : `ターゲット特化の個人攻撃・痛烈な批判・煽り・挑発。汚い言葉だけでなく、知的な皮肉や痛烈な批判も含めよ。単語・フレーズ・短い文いずれも可。`;
+        : level === 4
+        ? `ターゲット特化のテレビ的イジり・軽口。笑いを取る目的のツッコミ。悪意はないが的確に弱点を突く。
+褒め言葉・ポジティブ表現は禁止。イジり・ツッコミ・軽い毒舌のみ。
+単語・フレーズ・短い文いずれも可。途中で途切れた不完全な文は禁止。意味の通じる完結した表現のみ。`
+        : `ターゲット特化の個人攻撃・痛烈な批判・煽り・挑発。相手を怒らせる言葉、落ち込ませる言葉、傷つける言葉を生成せよ。
+褒め言葉・リスペクト・ポジティブな表現は絶対に禁止。「すごい」「天才」「男前」「かっこいい」等のポジティブワードは一切使うな。
+以下のカテゴリを均等に混ぜること:
+・見た目をバカにする（容姿・体型・顔の特徴をイジる）
+・性格の悪い面を攻撃（弱点・コンプレックスを突く）
+・過去の失敗・スキャンダルをネタにする
+・挑発・煽り（相手を怒らせる言い方）
+・存在否定・無価値（お前なんか要らない系）
+単語・フレーズ・短い文いずれも可。途中で途切れた不完全な文は禁止。意味の通じる完結した表現のみ。`;
 
       const baseRules = `【厳守ルール】
-全て異なるワード。${contentInstr}造語不可。小学生でもわかる簡単な言葉のみ使用すること。難しい漢字・専門用語・文語体は禁止。
+全て異なるワード。${contentInstr}造語OK（意味がわかること）。小学生でもわかる簡単な言葉のみ使用すること。難しい漢字・専門用語・文語体は禁止。
 【レベル${level}/10: ${levelConfig.label}】${levelConfig.instruction}
 【既出リスト - 絶対に重複するな】: ${historyList}
 【文字数ルール】ひらがな変換後の文字数。拗音・促音・撥音も各1文字。出力前に指折り確認！
 【フォーマット】各ワード「ワード/ひらがな読み(romaji)」形式。前置き不要。即座に出力。`;
 
-      send("generate", "生成中 (5〜8文字の悪口・指摘・挑発 ×5並列)...");
+      const genTypeLabel = level <= 3 ? "褒め言葉・称賛" : "悪口・挑発・煽り";
+      send("generate", `生成中 (5〜8文字の${genTypeLabel} ×5並列)...`);
 
       const dissExamples = level <= 3
         ? `===5文字の例===
@@ -267,22 +284,28 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 ===8文字の例===
 おまえにはむりだろ/おまえにはむりだろ(omaenihamuridaro), いいかげんにしろよ/いいかげんにしろよ(iikagennishiroyo)`;
 
+      const antiPraise = level >= 4 ? `
+【絶対禁止 - 褒め言葉・ポジティブ表現】
+以下のような表現は一切使うな: すごい、天才、男前、かっこいい、イケメン、素敵、尊敬、最高、面白い、上手い、さすが、センスいい
+全てのワードが「攻撃・批判・挑発・煽り・馬鹿にする」内容であること。1つでも褒め言葉が混じったら失格。` : "";
+
       const genPrompt = (batchNum: number) =>
-        `ターゲットに向けた${contentType}を生成せよ。バッチ${batchNum}/4。
+        `ターゲットに向けた${contentType}を生成せよ。バッチ${batchNum}/5。
 
 【ターゲット情報】
 ${target}
 ${research}
 【レベル ${level}/10: ${levelConfig.label}】
 ${levelConfig.instruction}
-
+${antiPraise}
 【生成ルール - 全て厳守】
-1. 5文字・6文字・7文字・8文字の悪口・指摘・挑発・批判・煽りを混ぜて合計40個生成
+1. 5文字・6文字・7文字・8文字の${level <= 3 ? "褒め言葉" : "悪口・挑発・批判・煽り"}を混ぜて合計40個生成
 2. 「文字数」＝ひらがなに変換した後の文字数。拗音(ゃゅょ)・促音(っ)・撥音(ん)・長音(ー)も各1文字
 3. 小学生でもわかる簡単な日本語のみ。難しい漢字・専門用語・文語体は禁止
 4. 造語OK（意味がわかること）
 5. 完全に同じワードの生成禁止
-6. 文末表現（ひらがな末尾2文字）が同じワードを複数作るな
+6. 途中で切れた不完全な文は禁止。全て意味の通じる完結した言葉にすること
+7. 文末表現（ひらがな末尾2文字）が同じワードを複数作るな
    悪い例: 「バカだろ」「クズだろ」→両方「だろ」で終わり→禁止
    良い例: 「バカだろ」「クズかよ」→末尾が異なる→OK
 ${ngSection}${ngAnalysisSection}
@@ -349,13 +372,15 @@ ${dissExamples}
         const usedSuffixList = Object.entries(suffixCounts).filter(([,v]) => v >= MAX_SAME_SUFFIX).map(([k]) => k).join(",");
         const alreadyList = allWords.slice(-100).map(w => w.word).join(",");
 
+        const supplementAntiPraise = level >= 4 ? `\n褒め言葉・ポジティブ表現は絶対禁止。全て攻撃・批判・挑発・煽りの内容にすること。` : "";
         const supplementResults = await Promise.allSettled(
           [1, 2, 3].map(batch =>
             ai.models.generateContent({
               model: "gemini-2.5-flash",
               contents: `ターゲット「${targetName}」への${contentType}を5〜8文字（ひらがな換算）で${Math.max(20, shortage * 3)}個生成。バッチ${batch}。
 小学生でもわかる簡単な言葉。造語OK（意味がわかること）。
-悪口・指摘・挑発・批判・煽りなど種類を散らせ。5文字・6文字・7文字・8文字を混ぜること。
+${level <= 3 ? "褒め言葉・称賛" : "悪口・指摘・挑発・批判・煽り"}など種類を散らせ。5文字・6文字・7文字・8文字を混ぜること。
+途中で切れた不完全な文は禁止。意味の通じる完結した表現のみ。${supplementAntiPraise}
 以下のひらがな末尾2文字で終わるワードは作るな: ${usedSuffixList}
 以下のワードと同じもの禁止: ${alreadyList}
 ${ngSection}
