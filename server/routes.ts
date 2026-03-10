@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from "@google/genai";
 import { z } from "zod";
 import {
-  getAllWords, getWordCount, getWordStrings, addWords, deleteWord, deleteWords, updateWord,
+  getAllWords, getWordCount, getWordStrings, addWords, deleteWord, deleteWords,
   clearAllWords, exportWords, getAllNgWords, getNgWordStrings,
   addNgWords, getNgWordCount, clearNgWords,
 } from "./storage";
@@ -66,10 +66,54 @@ function parseWordEntries(section: string): WordEntry[] {
   return entries;
 }
 
-const TOTAL_TARGET = 60;
-const MAX_SAME_SUFFIX = 2;
 const ALLOWED_VOWEL_SUFFIXES = ["ae", "oe", "ua", "an", "ao", "iu"];
-const CHAR_TARGETS: Record<number, number> = { 5: 30, 6: 30, 7: 25, 8: 25 };
+
+const PATTERN_DATA: Record<string, { endings: string; examples: string }> = {
+  ae: {
+    endings: "おまえ, だめ, だぜ, ため, かげ, 負け(make), はげ, さらせ, だらけ",
+    examples: `・ダメなおまえ/だめなおまえ(damenaomae) ← 語尾「おまえ」
+・しわだらけ/しわだらけ(shiwadarake) ← 語尾「だらけ」
+・おまえはだめ/おまえはだめ(omaewadame) ← 語尾「だめ」`,
+  },
+  oe: {
+    endings: "声(koe), とけ, ぼけ, それ, どけ, ころせ, おそれ, もどれ",
+    examples: `・ガラガラごえ/がらがらごえ(garagaragoe) ← 語尾「ごえ」
+・いいかげんぼけ/いいかげんぼけ(iikagenboke) ← 語尾「ぼけ」
+・そこをどけ/そこをどけ(sokowodoke) ← 語尾「どけ」`,
+  },
+  ua: {
+    endings: "くさ, するな, づら, ぶた, くだ, つら, うざ, やるか",
+    examples: `・でしゃばるな/でしゃばるな(deshabaruna) ← 語尾「るな」
+・おまえはぶた/おまえはぶた(omaewabuta) ← 語尾「ぶた」
+・まぬけづら/まぬけづら(manukezura) ← 語尾「づら」`,
+  },
+  an: {
+    endings: "じゃん, さん, かん, だん, ばん, おっさん, はん, やん",
+    examples: `・うそつきじゃん/うそつきじゃん(usotsukijan) ← 語尾「じゃん」
+・ただのおっさん/ただのおっさん(tadanoossan) ← 語尾「おっさん」
+・へんなおじさん/へんなおじさん(hennaojisan) ← 語尾「おじさん」`,
+  },
+  ao: {
+    endings: "かよ, だろ, なよ, がお(顔), あほ, ざこ, たろ",
+    examples: `・もういいだろ/もういいだろ(mouiidaro) ← 語尾「だろ」
+・やめろかよ/やめろかよ(yamerokayo) ← 語尾「かよ」
+・ぶさいくがお/ぶさいくがお(busaikugao) ← 語尾「がお」`,
+  },
+  iu: {
+    endings: "きる, いく, すぎる, にく, おちる, つきる",
+    examples: `・でぶすぎる/でぶすぎる(debusugiru) ← 語尾「すぎる」
+・もうおちる/もうおちる(mouochiru) ← 語尾「おちる」
+・おまえきえていく/おまえきえていく(omaekieteiku) ← 語尾「いく」`,
+  },
+};
+
+const PUNCHLINE_REFERENCE = `【パンチライン参考 - このレベルのインパクトを目指せ】
+・「クリティカルな言葉、デジタルな音の上」韻: クリティカル/デジタル
+・「過去の傷跡、明日への足跡」韻: 傷跡(kizuato)/足跡(ashiato)
+・「冷徹なロジック、情熱的なマジック」韻: ロジック/マジック
+・「言葉の弾丸、心の眼差し」韻: 弾丸(dangan)/眼差し(manazashi)
+・「韻の弾み、人生の深み」韻: 弾み(hazumi)/深み(fukami)
+・「勘違いすんなパンチライン」韻: 勘違い/パンチライン`;
 
 function formatElapsed(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -235,259 +279,99 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const ngList = ngWordList.slice(-100).join(",");
       const ngSection = ngList ? `\n【NGワード - 生成禁止】\n${ngList}\n` : "";
       const ngAnalysisSection = ngAnalysis ? `\n【NG傾向分析 - このような傾向のワードも避けよ】\n${ngAnalysis}\n` : "";
-      const research = researchResult ? `\n【リサーチ情報 - この情報を元にワードを考案せよ】\n${researchResult}\n` : "";
+      const research = researchResult ? `\n【リサーチ情報】\n${researchResult}\n` : "";
 
       const seen = new Set<string>([...existingWords, ...ngWordList]);
       const historyList = existingWords.slice(-200).join(",") || "なし";
 
-      const contentType = level <= 2 ? "褒め言葉・称賛" : level === 3 ? "親しみ・愛あるイジり" : level === 4 ? "軽口・テレビ的イジり" : "悪口・批判・煽り・挑発ワード";
-      const contentInstr = level <= 3
-        ? `ターゲット特化。意味の通じる自然な${contentType}のみ。単語・フレーズ・短い文いずれも可。`
-        : level === 4
-        ? `ターゲット特化のテレビ的イジり・軽口。笑いを取る目的のツッコミ。悪意はないが的確に弱点を突く。
-褒め言葉・ポジティブ表現は禁止。イジり・ツッコミ・軽い毒舌のみ。
-単語・フレーズ・短い文いずれも可。途中で途切れた不完全な文は禁止。意味の通じる完結した表現のみ。`
-        : `ターゲット特化の個人攻撃・痛烈な批判・煽り・挑発。相手を怒らせる言葉、落ち込ませる言葉、傷つける言葉を生成せよ。
-褒め言葉・リスペクト・ポジティブな表現は絶対に禁止。「すごい」「天才」「男前」「かっこいい」等のポジティブワードは一切使うな。
-以下のカテゴリを均等に混ぜること:
-・見た目をバカにする（容姿・体型・顔の特徴をイジる）
-・性格の悪い面を攻撃（弱点・コンプレックスを突く）
-・過去の失敗・スキャンダルをネタにする
-・挑発・煽り（相手を怒らせる言い方）
-・存在否定・無価値（お前なんか要らない系）
-単語・フレーズ・短い文いずれも可。途中で途切れた不完全な文は禁止。意味の通じる完結した表現のみ。`;
+      const contentType = level <= 2 ? "リスペクト・称賛" : level === 3 ? "親しみ・愛あるイジり" : level === 4 ? "軽口・テレビ的イジり" : "ディスり・攻撃・挑発";
+      const antiPraise = level >= 4 ? `\n【禁止】褒め言葉・ポジティブ表現は一切使うな。全てが攻撃・批判・挑発・煽りであること。` : "";
 
-      const baseRules = `【厳守ルール】
-全て異なるワード。${contentInstr}造語OK（意味がわかること）。小学生でもわかる簡単な言葉のみ使用すること。難しい漢字・専門用語・文語体は禁止。
-【レベル${level}/10: ${levelConfig.label}】${levelConfig.instruction}
-【既出リスト - 絶対に重複するな】: ${historyList}
-【文字数ルール】ひらがな変換後の文字数。拗音・促音・撥音も各1文字。出力前に指折り確認！
-【フォーマット】各ワード「ワード/ひらがな読み(romaji)」形式。前置き不要。即座に出力。`;
+      send("generate", `6パターンでリリック生成中... (×6並列)`);
 
-      const genTypeLabel = level <= 3 ? "褒め言葉・称賛" : "悪口・挑発・煽り";
-      send("generate", `生成中 (5〜8文字の${genTypeLabel} ×5並列)...`);
+      const lyricPrompt = (pattern: string) => {
+        const pd = PATTERN_DATA[pattern];
+        return `ターゲットへの${contentType}リリックを生成せよ。
 
-      const dissExamples = level <= 3
-        ? `===5文字の例===
-すごいね/すごいね(sugoine), まじかよ/まじかよ(majikayo), やるじゃん/やるじゃん(yarujan)
-===6文字の例===
-がんばってね/がんばってね(ganbattene), すごいよまじ/すごいよまじ(sugoiyomaji)
-===7文字の例===
-いちばんすごい/いちばんすごい(ichibansugoi), みんなだいすき/みんなだいすき(minnadaisuki)
-===8文字の例===
-ほんとにすごいよね/ほんとにすごいよね(hontonisugoine), もっとみせてくれよ/もっとみせてくれよ(mottomisetekureyo)`
-        : `===5文字の例===
-ださいな/ださいな(dasaina), うざいよ/うざいよ(uzaiyo), ばかだな/ばかだな(bakadana), きもいぞ/きもいぞ(kimoizo)
-===6文字の例===
-まるがおだな/まるがおだな(marugaodana), くちだけだろ/くちだけだろ(kuchidakedaro), だめにんげん/だめにんげん(dameningen)
-===7文字の例===
-ちょうしのるなよ/ちょうしのるなよ(choushinorunayo), おまえがいうなよ/おまえがいうなよ(omaegaiunayo)
-===8文字の例===
-おまえにはむりだろ/おまえにはむりだろ(omaenihamuridaro), いいかげんにしろよ/いいかげんにしろよ(iikagennishiroyo)`;
-
-      const antiPraise = level >= 4 ? `
-【絶対禁止 - 褒め言葉・ポジティブ表現】
-以下のような表現は一切使うな: すごい、天才、男前、かっこいい、イケメン、素敵、尊敬、最高、面白い、上手い、さすが、センスいい
-全てのワードが「攻撃・批判・挑発・煽り・馬鹿にする」内容であること。1つでも褒め言葉が混じったら失格。` : "";
-
-      const vowelSuffixRule = `【母音末尾ルール - 最重要】
-生成するワードのローマ字から母音(a,i,u,e,o)とn(「ん」)を抽出した末尾2文字が、以下の6パターンのいずれかに該当すること。
-許可パターン: ae, oe, ua, an, ao, iu
-例:
-・「おまえ」→ omae → 母音 oae → 末尾2文字「ae」→ OK
-・「ばかだな」→ bakadana → 母音 aana → 末尾2文字「na」→ NG（許可外）
-・「だまれこら」→ damarekora → 母音 aaeoa → 末尾2文字「oa」→ NG（許可外）
-・「ざこすぎる」→ zakosugiru → 母音 aouiu → 末尾2文字「iu」→ OK
-・「まぬけだな」→ manukedana → 母音 aueana → 末尾2文字「na」→ NG
-・「しわだらけ」→ shiwadarake → 母音 iaaae → 末尾2文字「ae」→ OK
-・「へんなおじさん」→ hennaojisan → 母音 enaoian → 末尾2文字「an」→ OK
-・「くたばれよ」→ kutabareyo → 母音 uaaeo → 末尾2文字「eo」→ NG
-
-各パターンの語尾例:
-[ae]: 〜おまえ、〜だめ、〜だぜ、〜かげ、〜ため
-[oe]: 〜ごえ、〜とけ、〜ぐれ、〜もね
-[ua]: 〜くさ、〜するな、〜でぶだ、〜づら
-[an]: 〜じゃん、〜さん、〜だん、〜なん
-[ao]: 〜かよ、〜だろ、〜なよ、〜がお
-[iu]: 〜しつ、〜きる、〜いく、〜りっく`;
-
-      const genPrompt = (batchNum: number) =>
-        `ターゲットに向けた${contentType}を生成せよ。バッチ${batchNum}/5。
-
-【ターゲット情報】
+【ターゲット】
 ${target}
 ${research}
 【レベル ${level}/10: ${levelConfig.label}】
 ${levelConfig.instruction}
 ${antiPraise}
-${vowelSuffixRule}
-【生成ルール - 全て厳守】
-1. 5文字・6文字・7文字・8文字の${level <= 3 ? "褒め言葉" : "悪口・挑発・批判・煽り"}を混ぜて合計60個生成
-2. 「文字数」＝ひらがなに変換した後の文字数。拗音(ゃゅょ)・促音(っ)・撥音(ん)・長音(ー)も各1文字
-3. 小学生でもわかる簡単な日本語のみ。難しい漢字・専門用語・文語体は禁止
-4. 造語OK（意味がわかること）
-5. 完全に同じワードの生成禁止
-6. 途中で切れた不完全な文は禁止。全て意味の通じる完結した言葉にすること
-7. 文末表現（ひらがな末尾2文字）が同じワードを複数作るな
-   悪い例: 「バカだろ」「クズだろ」→両方「だろ」で終わり→禁止
-   良い例: 「バカだろ」「クズかよ」→末尾が異なる→OK
+
+【韻パターン: ${pattern}】
+リリックの語尾が「${pattern}」の韻を踏むこと。
+ローマ字から母音(a,i,u,e,o)とn(「ん」で次が母音でない場合)を抽出した末尾2文字が「${pattern}」になる語尾を使え。
+
+語尾例（韻の核、1〜5文字）: ${pd.endings}
+
+【リリック完成例】
+${pd.examples}
+
+【作り方】
+1. 韻の核（語尾、1〜5文字）を決める
+2. その語尾の前にフリ（導入・前振り）を付けてリリックにする
+3. フリ＋語尾が自然な一つのフレーズとして成立すること
+
+【ルール】
+- リリック全体が6〜10文字（ひらがな換算、拗音・促音・撥音・長音も各1文字）
+- 20個全て異なる語尾を使うこと（同じ語尾の重複禁止）
+- 小学生でもわかる簡単な日本語のみ
+- 途中で切れた不完全な文は禁止
+- ターゲット特化のパーソナルな内容にすること
 ${ngSection}${ngAnalysisSection}
-【既出ワード - 生成禁止】${historyList}
+【既出 - 禁止】${historyList}
 
-${dissExamples}
+${PUNCHLINE_REFERENCE}
 
-【出力】
-===5文字===
-ワード/ひらがな(romaji) を15個
-===6文字===
-ワード/ひらがな(romaji) を15個
-===7文字===
-ワード/ひらがな(romaji) を15個
-===8文字===
-ワード/ひらがな(romaji) を15個
+【出力】20個。1行1個:
+リリック/ひらがな(romaji)
 前置き不要。即座に出力。`;
+      };
 
       const genResults = await Promise.allSettled(
-        [1, 2, 3, 4, 5].map(batch =>
+        ALLOWED_VOWEL_SUFFIXES.map(pattern =>
           ai.models.generateContent({
             model: "gemini-2.5-flash",
-            contents: genPrompt(batch),
-            config: { ...geminiConfig, maxOutputTokens: 8192 },
+            contents: lyricPrompt(pattern),
+            config: { ...geminiConfig, maxOutputTokens: 4096 },
           })
         )
       );
-
-      const suffixCounts: Record<string, number> = {};
-      const allWords: WordEntry[] = [];
-      const byLen: Record<number, number> = { 5: 0, 6: 0, 7: 0, 8: 0 };
-
-      let vowelRejectCount = 0;
-      let totalParsed = 0;
-      function tryAdd(e: WordEntry): boolean {
-        totalParsed++;
-        if (seen.has(e.word)) return false;
-        if (allWords.some(w => w.word === e.word)) return false;
-        const len = e.reading.length;
-        if (len < 5 || len > 8) return false;
-        const vowels = extractVowels(e.romaji);
-        const vowelSuffix = vowels.length >= 2 ? vowels.slice(-2) : vowels;
-        if (!ALLOWED_VOWEL_SUFFIXES.includes(vowelSuffix)) {
-          vowelRejectCount++;
-          return false;
-        }
-        const suffix2 = e.reading.slice(-2);
-        if (suffix2.length === 2 && (suffixCounts[suffix2] || 0) >= MAX_SAME_SUFFIX) return false;
-        allWords.push(e);
-        seen.add(e.word);
-        byLen[len] = (byLen[len] || 0) + 1;
-        if (suffix2.length === 2) suffixCounts[suffix2] = (suffixCounts[suffix2] || 0) + 1;
-        return true;
-      }
-
-      for (const r of genResults) {
-        if (r.status !== "fulfilled") continue;
-        for (const e of parseWordEntries(r.value.text || "")) {
-          if (allWords.length >= TOTAL_TARGET) break;
-          tryAdd(e);
-        }
-      }
-
       logTiming("generate");
-      console.log(`[FILTER] ${totalParsed} parsed, ${vowelRejectCount} rejected by vowel filter, ${allWords.length} accepted`);
-      send("generate", `生成完了: ${allWords.length}個 (母音フィルタ除外: ${vowelRejectCount}個) (5文字:${byLen[5]}, 6文字:${byLen[6]}, 7文字:${byLen[7]}, 8文字:${byLen[8]})`);
 
-      const MIN_FOR_RANKING = 30;
-      let retryCount = 0;
-      while (allWords.length < MIN_FOR_RANKING && retryCount < 3) {
-        retryCount++;
-        const shortage = MIN_FOR_RANKING - allWords.length;
-        send("generate", `追加生成中... (残り${shortage}個, リトライ${retryCount})`);
+      const allWords: WordEntry[] = [];
+      const byPattern: Record<string, number> = {};
+      for (const p of ALLOWED_VOWEL_SUFFIXES) byPattern[p] = 0;
 
-        const usedSuffixList = Object.entries(suffixCounts).filter(([,v]) => v >= MAX_SAME_SUFFIX).map(([k]) => k).join(",");
-        const alreadyList = allWords.slice(-100).map(w => w.word).join(",");
-
-        const supplementAntiPraise = level >= 4 ? `\n褒め言葉・ポジティブ表現は絶対禁止。全て攻撃・批判・挑発・煽りの内容にすること。` : "";
-        const supplementResults = await Promise.allSettled(
-          [1, 2, 3].map(batch =>
-            ai.models.generateContent({
-              model: "gemini-2.5-flash",
-              contents: `ターゲット「${targetName}」への${contentType}を5〜8文字（ひらがな換算）で${Math.max(20, shortage * 3)}個生成。バッチ${batch}。
-小学生でもわかる簡単な言葉。造語OK（意味がわかること）。
-${level <= 3 ? "褒め言葉・称賛" : "悪口・指摘・挑発・批判・煽り"}など種類を散らせ。5文字・6文字・7文字・8文字を混ぜること。
-途中で切れた不完全な文は禁止。意味の通じる完結した表現のみ。${supplementAntiPraise}
-【母音末尾ルール - 最重要】ローマ字の母音(a,i,u,e,o)+n抽出後の末尾2文字が ae,oe,ua,an,ao,iu のいずれかであること。
-語尾例: [ae]〜おまえ/だめ/だぜ [oe]〜ごえ/とけ/もね [ua]〜くさ/するな/づら [an]〜じゃん/さん [ao]〜かよ/だろ/なよ [iu]〜すぎる/いく
-以下のひらがな末尾2文字で終わるワードは作るな: ${usedSuffixList}
-以下のワードと同じもの禁止: ${alreadyList}
-${ngSection}
-フォーマット: ワード/ひらがな(romaji) 1行1個。前置き不要。`,
-              config: { ...geminiConfig, maxOutputTokens: 8192 },
-            })
-          )
-        );
-
-        for (const r of supplementResults) {
-          if (r.status !== "fulfilled") continue;
-          for (const e of parseWordEntries(r.value?.text || "")) {
-            if (allWords.length >= TOTAL_TARGET) break;
-            tryAdd(e);
-          }
+      for (let i = 0; i < ALLOWED_VOWEL_SUFFIXES.length; i++) {
+        const pattern = ALLOWED_VOWEL_SUFFIXES[i];
+        const result = genResults[i];
+        if (result.status !== "fulfilled") {
+          console.log(`[GEN] Pattern ${pattern} failed:`, result.status === "rejected" ? result.reason : "unknown");
+          continue;
         }
-        logTiming(`supplement-${retryCount}`);
-        send("generate", `追加生成${retryCount}回目完了: ${allWords.length}個 (5文字:${byLen[5]}, 6文字:${byLen[6]}, 7文字:${byLen[7]}, 8文字:${byLen[8]})`);
+        let patternCount = 0;
+        for (const e of parseWordEntries(result.value.text || "")) {
+          if (patternCount >= 20) break;
+          if (seen.has(e.word)) continue;
+          if (allWords.some(w => w.word === e.word)) continue;
+          const len = e.reading.length;
+          if (len < 6 || len > 10) continue;
+          const vowels = extractVowels(e.romaji);
+          const vowelSuffix = vowels.length >= 2 ? vowels.slice(-2) : vowels;
+          if (vowelSuffix !== pattern) continue;
+          allWords.push(e);
+          seen.add(e.word);
+          byPattern[pattern] = (byPattern[pattern] || 0) + 1;
+          patternCount++;
+        }
       }
 
-      send("validate", `品質評価中... (${allWords.length}個をランキング)`);
-      try {
-        const rankResult = await ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: `以下の${allWords.length}個のディスりワードを品質評価し、ランキングせよ。
-
-【評価基準】（各10点満点、合計30点）
-1. 自然さ: 日本語として違和感がないか？不完全・意味不明でないか？
-2. 意味伝達: 言いたいことが一発で伝わるか？
-3. ディスり力: 悪口・煽り・批判として刺さるか？インパクトがあるか？
-
-【ワードリスト】
-${allWords.map((w, i) => `${i + 1}. ${w.word}（${w.reading}）`).join("\n")}
-
-【出力】全${allWords.length}個を評価し、評価の高い順に番号を並べよ。
-フォーマット: 1位の番号,2位の番号,3位の番号,...,${allWords.length}位の番号
-カンマ区切りの数字のみ。前置き・説明不要。全${allWords.length}個の番号を必ず出力すること。`,
-          config: { ...geminiConfig, maxOutputTokens: 4096 },
-        });
-
-        const rankText = (rankResult.text || "").trim();
-        const rankedNums = rankText.match(/\d+/g)?.map(n => parseInt(n)) || [];
-        const validRanked = [...new Set(rankedNums)].filter(n => n >= 1 && n <= allWords.length);
-
-        if (validRanked.length >= 30) {
-          const top30Indices = validRanked.slice(0, 30).map(n => n - 1);
-          const rank78Index = validRanked.length >= 78 ? validRanked[77] - 1 : -1;
-
-          const ranked: WordEntry[] = top30Indices.map(i => allWords[i]);
-          const rank78Word = rank78Index >= 0 && rank78Index < allWords.length ? allWords[rank78Index] : null;
-
-          send("validate", `品質評価完了: ${allWords.length}個を評価 → 上位30個を選出`);
-          if (rank78Word) {
-            send("validate", `78位: ${rank78Word.word}（${rank78Word.reading}）`);
-          }
-          console.log(`[RANK] ${allWords.length}個評価 → 上位30: ${ranked.map(w => w.word).join(", ")}`);
-          if (rank78Word) console.log(`[RANK] 78位: ${rank78Word.word}`);
-
-          allWords.length = 0;
-          allWords.push(...ranked);
-          if (rank78Word && !ranked.some(w => w.word === rank78Word.word)) {
-            allWords.push(rank78Word);
-          }
-        } else {
-          send("validate", `品質評価: ランキング解析不能 (${validRanked.length}個のみ取得) → 全${allWords.length}個を出力`);
-        }
-      } catch (e) {
-        send("validate", `品質評価スキップ (${allWords.length}個をそのまま出力)`);
-        console.log(`[RANK] Error:`, e);
-      }
-      logTiming("validate");
+      const patternSummary = ALLOWED_VOWEL_SUFFIXES.map(p => `${p}:${byPattern[p]}`).join(", ");
+      console.log(`[GEN] Total: ${allWords.length} lyrics (${patternSummary})`);
+      send("generate", `生成完了: ${allWords.length}個 (${patternSummary})`);
 
       if (heartbeat) clearInterval(heartbeat);
       logTiming("total");
@@ -503,8 +387,8 @@ ${allWords.map((w, i) => `${i + 1}. ${w.word}（${w.reading}）`).join("\n")}
       if (heartbeat) clearInterval(heartbeat);
       console.error("Generation error:", error);
       if (!disconnected) {
-        try { res.write(`data: ${JSON.stringify({ type: "error", error: "ワード生成に失敗しました" })}\n\n`); res.end(); }
-        catch { try { res.status(500).json({ error: "ワード生成に失敗しました" }); } catch {} }
+        try { res.write(`data: ${JSON.stringify({ type: "error", error: "リリック生成に失敗しました" })}\n\n`); res.end(); }
+        catch { try { res.status(500).json({ error: "リリック生成に失敗しました" }); } catch {} }
       }
     }
   });
@@ -651,14 +535,9 @@ ${allWords.map((w, i) => `${i + 1}. ${w.word}（${w.reading}）`).join("\n")}
         (buckets[key] ??= []).push(item);
       }
 
-      const clusterSizes = Object.entries(buckets).map(([k, v]) => ({ key: k, count: v.length }));
-      clusterSizes.sort((a, b) => b.count - a.count);
-      send("init", `${Object.keys(buckets).length}クラスタ, ${items.length}語を分析`);
+      send("init", `${Object.keys(buckets).length}グループ, ${items.length}語を分析`);
 
-      let totalDeleted = 0;
-      let totalMerged = 0;
-
-      send("dedup", "クラスタ内韻かぶりチェック中...");
+      send("dedup", "グループ内ライム重複チェック中...");
       const toDelete: number[] = [];
       for (const [clusterKey, clusterWords] of Object.entries(buckets)) {
         if (clusterWords.length < 2) continue;
@@ -677,174 +556,20 @@ ${allWords.map((w, i) => `${i + 1}. ${w.word}（${w.reading}）`).join("\n")}
         }
       }
 
+      let totalDeleted = 0;
       if (toDelete.length > 0) {
         totalDeleted = await deleteWords(toDelete);
         send("dedup", `韻かぶり${totalDeleted}個を削除`);
-        for (const id of toDelete) {
-          const idx = items.findIndex(i => i.id === id);
-          if (idx >= 0) items.splice(idx, 1);
-          for (const [k, v] of Object.entries(buckets)) {
-            const bi = v.findIndex(i => i.id === id);
-            if (bi >= 0) v.splice(bi, 1);
-          }
-        }
       } else {
         send("dedup", "韻かぶりなし");
       }
 
-      const TOP_CLUSTER_COUNT = 6;
-      const sortedClusters = Object.entries(buckets)
-        .filter(([, v]) => v.length > 0)
-        .sort((a, b) => b[1].length - a[1].length);
-
-      const topClusters = sortedClusters.slice(0, TOP_CLUSTER_COUNT);
-      const mergeClusters = sortedClusters.slice(TOP_CLUSTER_COUNT);
-      const topKeys = topClusters.map(([k]) => k);
-
-      send("merge", `上位${TOP_CLUSTER_COUNT}クラスタ: [${topKeys.join(", ")}] に統合開始`);
-      send("merge", `統合対象: ${mergeClusters.length}クラスタ, ${mergeClusters.reduce((s, [,v]) => s + v.length, 0)}語`);
-
-      if (mergeClusters.length === 0) {
-        send("merge", "統合不要（全クラスタが上位6に収まっています）");
-      } else {
-        const mergeTargets: { wordId: number; word: string; reading: string; romaji: string; fromCluster: string; toCluster: string; targetVowels: string }[] = [];
-
-        let clusterIdx = 0;
-        for (const [fromKey, fromWords] of mergeClusters) {
-          for (const w of fromWords) {
-            const targetKey = topKeys[clusterIdx % TOP_CLUSTER_COUNT];
-            mergeTargets.push({
-              wordId: w.id, word: w.word, reading: w.reading, romaji: w.romaji,
-              fromCluster: fromKey, toCluster: targetKey, targetVowels: targetKey,
-            });
-            clusterIdx++;
-          }
-        }
-
-        send("merge", `${mergeTargets.length}語のアレンジをAIに依頼中...`);
-
-        const batchSize = 15;
-        for (let i = 0; i < mergeTargets.length; i += batchSize) {
-          if (disconnected) break;
-          const batch = mergeTargets.slice(i, i + batchSize);
-
-          const existingWords = new Set<string>();
-          items.forEach(w => existingWords.add(w.word));
-          const existingReadings = new Set<string>();
-          items.forEach(w => existingReadings.add(w.reading));
-
-          const clusterExamples: Record<string, string[]> = {};
-          for (const mt of batch) {
-            if (!clusterExamples[mt.toCluster]) {
-              const cl = buckets[mt.toCluster] || [];
-              clusterExamples[mt.toCluster] = cl.slice(0, 5).map(w => `${w.word}(${w.reading})`);
-            }
-          }
-
-          const prompt = `以下のワードを、指定されたクラスタの韻に合うよう書き換えよ。
-元の意味・攻撃性をできるだけ維持しつつ、末尾を変えて韻の母音パターンを合わせる。
-
-【ルール】
-・末尾1〜3文字を変えて母音末尾パターンを変える
-・元のワードの意味を活かした自然な日本語にすること
-・不自然な場合は、同じ攻撃性で別の表現に言い換えてもOK（母音末尾が合えば）
-・5〜8文字（ひらがな換算）を維持
-・変換不可能なら「変換不可」と書け
-
-【クラスタの韻の例】
-${Object.entries(clusterExamples).map(([k, ex]) => `[*${k}]: ${ex.join(", ")}`).join("\n")}
-
-${batch.map((mt, j) => `${j + 1}. 「${mt.word}」（${mt.reading}）→ 母音末尾を「${mt.targetVowels}」に合わせる`).join("\n")}
-
-フォーマット: 番号. 新ワード/新ひらがな(romaji) または 番号. 変換不可
-前置き不要。`;
-
-          try {
-            const result = await ai.models.generateContent({
-              model: "gemini-2.5-flash",
-              contents: prompt,
-              config: { ...geminiConfig, maxOutputTokens: 4096 },
-            });
-
-            const lines = (result.text || "").split("\n").map(l => l.trim()).filter(l => l.length > 0);
-            for (const line of lines) {
-              if (line.includes("変換不可")) continue;
-              const numMatch = line.match(/^(\d+)\.\s*/);
-              if (!numMatch) continue;
-              const idx = parseInt(numMatch[1]) - 1;
-              if (idx < 0 || idx >= batch.length) continue;
-
-              const entryMatch = line.match(/^(\d+)\.\s*(.+?)\s*[\/／]\s*([ぁ-ゟー]+)\s*[\(（]([a-zA-Z\s\-']+)[\)）]/);
-              if (!entryMatch) continue;
-
-              const mt = batch[idx];
-              const newWord = entryMatch[2].trim();
-              const newReading = entryMatch[3].trim();
-              const newRomaji = entryMatch[4].trim().toLowerCase();
-              const newVowels = extractVowels(newRomaji);
-
-              if (existingWords.has(newWord) && !items.some(item => item.id === mt.wordId && item.word === newWord)) continue;
-
-              const newVowelSuffix = newVowels.length >= 2 ? newVowels.slice(-2) : newVowels;
-              if (newVowelSuffix !== mt.toCluster) continue;
-
-              try {
-                const updated = await updateWord(mt.wordId, {
-                  word: newWord, reading: newReading, romaji: newRomaji,
-                  vowels: newVowels, charCount: newReading.length,
-                });
-                if (updated) {
-                  totalMerged++;
-                  existingWords.add(newWord);
-                  const itemIdx = items.findIndex(it => it.id === mt.wordId);
-                  if (itemIdx >= 0) {
-                    items[itemIdx].word = newWord;
-                    items[itemIdx].reading = newReading;
-                    items[itemIdx].romaji = newRomaji;
-                    items[itemIdx].vowels = newVowels;
-                  }
-                  console.log(`[MERGE] ${mt.word} → ${newWord} [${mt.fromCluster}→${mt.toCluster}]`);
-                }
-              } catch (updateErr) {
-                console.log(`[CLEANUP] Update failed for word ${mt.wordId}: ${updateErr}`);
-              }
-            }
-          } catch (aiErr) {
-            console.log(`[CLEANUP] AI merge batch failed: ${aiErr}`);
-            send("merge", `統合バッチ処理エラー（継続中）`);
-          }
-
-          send("merge", `統合進捗: ${Math.min(i + batchSize, mergeTargets.length)}/${mergeTargets.length}語処理完了 (${totalMerged}語アレンジ済)`);
-        }
-
-        if (!disconnected) {
-          const failedIds: number[] = [];
-          for (const mt of mergeTargets) {
-            const item = items.find(it => it.id === mt.wordId);
-            if (!item) continue;
-            const currentSuffix = item.vowels.length >= 2 ? item.vowels.slice(-2) : item.vowels;
-            if (!topKeys.includes(currentSuffix)) failedIds.push(mt.wordId);
-          }
-
-          if (failedIds.length > 0) {
-            const failedDeleted = await deleteWords(failedIds);
-            totalDeleted += failedDeleted;
-            send("merge", `変換不可${failedDeleted}語を削除（上位6クラスタに統合不能）`);
-            for (const id of failedIds) {
-              const idx = items.findIndex(i => i.id === id);
-              if (idx >= 0) items.splice(idx, 1);
-            }
-            console.log(`[CLEANUP] Deleted ${failedDeleted} unconvertible words`);
-          }
-        }
-      }
-
       if (heartbeat) clearInterval(heartbeat);
       const finalCount = await getWordCount();
-      send("done", `整理完了: 重複削除${totalDeleted}個, クラスタ統合${totalMerged}個 (残り${finalCount}語, ${formatElapsed(Date.now() - startTime)})`);
+      send("done", `整理完了: 重複削除${totalDeleted}個 (残り${finalCount}語, ${formatElapsed(Date.now() - startTime)})`);
 
       if (!disconnected) {
-        res.write(`data: ${JSON.stringify({ type: "result", deleted: totalDeleted, merged: totalMerged, total: finalCount })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: "result", deleted: totalDeleted, merged: 0, total: finalCount })}\n\n`);
         if (typeof (res as any).flush === "function") (res as any).flush();
         res.end();
       }

@@ -1,19 +1,19 @@
 # 悪口データベース (Diss Database)
 
 ## Overview
-A Japanese rap battle tool that uses Gemini AI to generate words ranging from pure respect/praise (Level 1) to extreme diss (Level 10). Goal: accumulate 10,000 words in a PostgreSQL database. Words are organized by vowel pattern (including 「ん」) for rhyme matching.
+A Japanese rap battle tool that uses Gemini AI to generate lyrics (6-10 chars) ranging from pure respect/praise (Level 1) to extreme diss (Level 10). Goal: accumulate 10,000 lyrics in a PostgreSQL database. Lyrics are organized by vowel pattern (including 「ん」) for rhyme matching.
 
 ## Architecture
 - **Frontend**: React + TypeScript with Tailwind CSS, shadcn/ui components, framer-motion animations
 - **Backend**: Express.js with Gemini AI integration (via Replit AI Integrations)
-- **Database**: PostgreSQL storing all favorited words (up to 10,000)
+- **Database**: PostgreSQL storing all favorited lyrics (up to 10,000)
 - **Gemini**: `gemini-2.5-flash` model, all harm categories OFF, `thinkingBudget: 0`
 
 ## File Structure
-- `server/routes.ts` — API routes, AI generation, 5-parallel batch system (~600 lines, suffix dedup)
+- `server/routes.ts` — API routes, AI generation, 6-parallel lyric system (~600 lines)
 - `server/targets.ts` — Hardcoded ~130 target data (comedians + athletes, 5-field: name/appearance/career/personality/evaluation)
 - `server/storage.ts` — Database CRUD operations via Drizzle ORM
-- `client/src/pages/home.tsx` — Single-page UI (~640 lines)
+- `client/src/pages/home.tsx` — Single-page UI (~700 lines)
 - `shared/schema.ts` — Drizzle schema definitions
 
 ## Level System (1-10)
@@ -34,7 +34,7 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - Words table: `{ id, word UNIQUE, reading, romaji, vowels, char_count, created_at }`
 - NG Words table: `{ id, word UNIQUE, reading, romaji, created_at }` — user-rejected words
 - `reading` = hiragana reading, `romaji` = romanized, `vowels` = extracted vowels (includes 'n' for ん)
-- `char_count` = `reading.length` (hiragana character count)
+- `char_count` = `reading.length` (hiragana character count, 6-10 for lyrics)
 
 ## Vowel System
 - `extractVowels()` extracts vowels + 'n' (when ん is not followed by a vowel)
@@ -42,13 +42,13 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - Favorites grouped by last 2 vowels (including n) as bucket key
 - Within groups, words with 3+ matching vowel suffix sorted first
 
-## Generation System (5-Parallel Batch → Vowel Filter → AI Ranking)
-- **5 parallel AI calls**: Each batch generates mixed 5/6/7/8文字 words (15 per char count = 60 per batch)
-- **Vowel-suffix filter**: Only words whose last-2-vowels match ae/oe/ua/an/ao/iu are accepted (~30% pass rate)
-- **Supplement retries**: Up to 3 retries with 3 parallel calls each if < 30 words after filter
-- **AI Ranking**: All surviving words ranked by naturalness + meaning + diss quality → top 30 selected + 78th word (proof of full evaluation)
-- **Suffix dedup**: Max 2 words with same reading suffix (末尾2文字). Enforced server-side via `suffixCounts` map
-- **Constants**: `TOTAL_TARGET=60`, `MIN_FOR_RANKING=30`, `MAX_SAME_SUFFIX=2`
+## Generation System (6-Parallel Lyric Generation by Vowel Pattern)
+- **2-step lyric creation**: (1) Generate tail word (韻の核, ≤5 chars) matching vowel pattern, (2) Add furi (フリ/導入) prefix to make 6-10 char lyric
+- **6 parallel AI calls**: One per vowel pattern (ae/oe/ua/an/ao/iu), each generates 20 lyrics
+- **PATTERN_DATA constant**: Per-pattern ending examples and complete lyric examples for all 6 patterns
+- **PUNCHLINE_REFERENCE constant**: Japanese rap punchlines embedded as quality reference
+- **No ranking step**: All valid lyrics returned directly (no AI quality ranking)
+- **No supplement retries**: Single generation pass per pattern
 - **Result format**: `{ type:"result", direct: WordEntry[], combined: [], total }`
 - **Language**: 小学生でもわかる簡単な言葉のみ (elementary school level vocabulary)
 - **Content types**: insults, criticism, provocation, taunting (挑発・煽り・批判) for levels 4+
@@ -56,8 +56,7 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 ## Key Features
 - **Target selection**: Random from ~130 hardcoded targets (comedians + athletes) with 5-field data (name/appearance/career/personality/evaluation)
 - **NG word analysis**: When 5+ NG words exist, AI analyzes rejection patterns and avoids similar words
-- **Simple language**: All generated words must be understandable by elementary school students
-- **Sentences allowed**: Words, phrases, and short sentences all accepted if natural
+- **Simple language**: All generated lyrics must be understandable by elementary school students
 - **RAG research**: AI gathers target info (praise for Lv1-3, diss for Lv4-10)
 - **Live timer**: Running timer with green=success, red=error states
 - **Timing diagnostics**: Server logs timing for each phase
@@ -70,7 +69,7 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 
 ## API Routes
 - `GET /api/target` - Random target from hardcoded comedian list
-- `POST /api/diss` - Generate words via SSE. Body: `{ target, level }` (no count field)
+- `POST /api/diss` - Generate lyrics via SSE. Body: `{ target, level }` (no count field)
 - `GET /api/favorites` - Get all words grouped by last-2-vowel pattern
 - `POST /api/favorites` - Add words to DB (bulk insert, skip duplicates)
 - `POST /api/favorites/paste` - Parse and add words from pasted text (`word/reading(romaji)` format)
@@ -83,20 +82,18 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - `GET /api/ng-words` - Get all NG words
 - `GET /api/ng-words/count` - Get NG word count
 - `DELETE /api/ng-words` - Clear all NG words
-- `POST /api/favorites/cleanup` - DB cleanup via SSE (cluster dedup + merge small clusters into large ones)
+- `POST /api/favorites/cleanup` - DB cleanup via SSE (rhyme dedup within groups only)
 
 ## Recent Changes
+- 2026-03-10: Generation rebuilt: 6 parallel AI calls (one per vowel pattern ae/oe/ua/an/ao/iu), 2-step lyric creation (tail word + furi prefix), 6-10 char lyrics
+- 2026-03-10: PATTERN_DATA constant with per-pattern ending examples and lyric examples
+- 2026-03-10: PUNCHLINE_REFERENCE constant: Japanese rap punchlines as quality reference
+- 2026-03-10: Removed: supplement retries, AI ranking step, TOTAL_TARGET/MIN_FOR_RANKING/MAX_SAME_SUFFIX constants, old 5-parallel batch system
+- 2026-03-10: Cleanup simplified: only rhyme dedup within groups (removed cluster merge logic)
+- 2026-03-10: Char range changed to 6-10 for stored lyrics
 - 2026-03-10: Rich target data: 5 fields (name/appearance/career/personality/evaluation) for ~130 targets (comedians + athletes)
-- 2026-03-10: Anti-praise enforcement: Level 4+ explicitly bans positive words; prompt categorizes attacks (appearance/personality/scandal/provocation/existential)
-- 2026-03-10: Word quality: incomplete/cut-off phrases banned; research prompt enhanced for diss-relevant info
-- 2026-03-10: Clickable word rows: tapping word text toggles selection (not just checkbox)
-- 2026-03-10: 5-parallel batch system: 5 AI calls × 40 words each, filtered to 100 via suffix dedup
-- 2026-03-10: Suffix dedup: max 2 words with same 末尾2文字, enforced server-side
+- 2026-03-10: Anti-praise enforcement: Level 4+ explicitly bans positive words
 - 2026-03-10: Elementary school level vocabulary only (小学生でもわかる言葉)
 - 2026-03-10: Vowel extraction includes 「ん」(n) when not followed by a vowel
 - 2026-03-10: Favorites grouped by last 2 vowels, sorted by 3+ vowel suffix match within groups
 - 2026-03-10: NG bulk copy button, paste-to-add for both DB and NG tabs
-- 2026-03-10: Post-generation AI validation: flags unnatural/forced/incomplete words and removes them before returning results
-- 2026-03-10: Vowel-suffix filter: only words with last-2-vowels matching ae/oe/ua/an/ao/iu pass tryAdd()
-- 2026-03-10: AI ranking replaces pass/fail validation: ranks all words, selects top 30 + 78th (proof of full eval)
-- 2026-03-10: DB cleanup button: reading-suffix dedup (same trailing kana at rhyme position → delete duplicate) + top-6 cluster merge (AI rewrites words to match top 6 cluster vowel patterns, deletes unconvertible words)
