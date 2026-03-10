@@ -10,7 +10,7 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - **Gemini**: `gemini-2.5-flash` model, all harm categories OFF, `thinkingBudget: 0`
 
 ## File Structure
-- `server/routes.ts` — API routes, AI generation, 2-phase diss+support system (~600 lines, suffix dedup)
+- `server/routes.ts` — API routes, AI generation, 5-parallel batch system (~600 lines, suffix dedup)
 - `server/targets.ts` — Hardcoded ~150 comedian target data
 - `server/storage.ts` — Database CRUD operations via Drizzle ORM
 - `client/src/pages/home.tsx` — Single-page UI (~640 lines)
@@ -42,16 +42,12 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - Favorites grouped by last 2 vowels (including n) as bucket key
 - Within groups, words with 3+ matching vowel suffix sorted first
 
-## Generation System (2-Phase, Target: 100 words)
+## Generation System (5-Parallel Batch, Target: 100 words)
 - **No count selector** — fixed recipe, stops at 100 total words
-- **Phase 1** (3 parallel AI calls):
-  - 3 calls: diss/core words (2文字×20, 3文字×20, 4文字×20 = 60 cores)
-- **Phase 2** (2 parallel AI calls):
-  - Each diss core word gets words added before/after to form a complete phrase
-  - Max 7 characters (hiragana) per completed phrase
-  - Examples: 核「バカ」→「バカだろ」「おいバカ」, 核「ダサい」→「超ダサい」
-  - Stops at 100 total phrases
-- **Suffix dedup**: Max 2 words with same reading suffix (末尾2文字). Enforced server-side.
+- **5 parallel AI calls**: Each batch generates mixed 5/6/7/8文字 words (10 per char count = 40 per batch)
+  - With suffix dedup filtering, ~100 words survive from 200 raw candidates
+- **Supplement retries**: Up to 5 retries with 3 parallel calls each if initial batch < 100
+- **Suffix dedup**: Max 2 words with same reading suffix (末尾2文字). Enforced server-side via `suffixCounts` map
 - **Result format**: `{ type:"result", direct: WordEntry[], combined: [], total }`
 - **Language**: 小学生でもわかる簡単な言葉のみ (elementary school level vocabulary)
 - **Content types**: insults, criticism, provocation, taunting (挑発・煽り・批判) for levels 4+
@@ -88,9 +84,9 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - `DELETE /api/ng-words` - Clear all NG words
 
 ## Recent Changes
-- 2026-03-10: New 2-phase system: Phase1=diss cores (2/3/4文字×20), Phase2=extend with prefix/suffix (max 7文字)
+- 2026-03-10: 5-parallel batch system: 5 AI calls × 40 words each, filtered to 100 via suffix dedup
 - 2026-03-10: Suffix dedup: max 2 words with same 末尾2文字, enforced server-side
-- 2026-03-10: Total target: 100 words per generation
+- 2026-03-10: Total target: 100 words per generation (~12-15 seconds)
 - 2026-03-10: Elementary school level vocabulary only (小学生でもわかる言葉)
 - 2026-03-10: Vowel extraction includes 「ん」(n) when not followed by a vowel
 - 2026-03-10: Favorites grouped by last 2 vowels, sorted by 3+ vowel suffix match within groups

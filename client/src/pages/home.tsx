@@ -550,9 +550,9 @@ export default function Home() {
 
             <div className="rounded-md bg-muted/30 border border-border/50 p-2.5 text-xs text-muted-foreground">
               <div className="font-medium mb-1">生成内容 (目標100個):</div>
-              <div>Phase 1: ディスりワード生成 (2文字×20, 3文字×20, 4文字×20)</div>
-              <div>Phase 2: 各ワードの前後に付け足してフレーズ化 (最大7文字)</div>
-              <div>語尾の重複制限（同じ末尾2文字は最大2回）</div>
+              <div>5文字・6文字・7文字・8文字の悪口・指摘・挑発を生成</div>
+              <div>文末表現の重複制限（同じ末尾2文字は最大2回）</div>
+              <div>小学生でもわかる言葉・造語OK（意味がわかること）</div>
             </div>
 
             <Button onClick={handleGenerateDiss} disabled={isGenerating || !target} className="w-full" data-testid="button-generate-diss">

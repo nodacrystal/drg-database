@@ -66,9 +66,9 @@ function parseWordEntries(section: string): WordEntry[] {
   return entries;
 }
 
-const DISS_TARGETS: Record<number, number> = { 2: 20, 3: 20, 4: 20 };
 const TOTAL_TARGET = 100;
 const MAX_SAME_SUFFIX = 2;
+const CHAR_TARGETS: Record<number, number> = { 5: 30, 6: 30, 7: 25, 8: 25 };
 
 function formatElapsed(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -247,133 +247,134 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 【文字数ルール】ひらがな変換後の文字数。拗音・促音・撥音も各1文字。出力前に指折り確認！
 【フォーマット】各ワード「ワード/ひらがな読み(romaji)」形式。前置き不要。即座に出力。`;
 
-      send("generate", "Phase 1: ディスりワード生成中 (2文字×20, 3文字×20, 4文字×20)...");
-      const genStart = Date.now();
+      send("generate", "生成中 (5〜8文字の悪口・指摘・挑発 ×5並列)...");
 
-      const dissPrompt = (cc: number, count: number, examples: string) =>
-        `${contentType}のディスりワード（${cc}文字のみ）を${count + 10}個生成せよ。これは後で前後に言葉を付け足して完成フレーズにする「核」となる。小学生でもわかる簡単な言葉のみ。\n\n【ターゲット】\n${target}\n${research}${ngSection}${ngAnalysisSection}${baseRules}\n\n===${cc}文字===\nワード/ひらがな(romaji)を${count + 10}個出力（目標${count}個）\n\n${examples}`;
+      const dissExamples = level <= 3
+        ? `===5文字の例===
+すごいね/すごいね(sugoine), まじかよ/まじかよ(majikayo), やるじゃん/やるじゃん(yarujan)
+===6文字の例===
+がんばってね/がんばってね(ganbattene), すごいよまじ/すごいよまじ(sugoiyomaji)
+===7文字の例===
+いちばんすごい/いちばんすごい(ichibansugoi), みんなだいすき/みんなだいすき(minnadaisuki)
+===8文字の例===
+ほんとにすごいよね/ほんとにすごいよね(hontonisugoine), もっとみせてくれよ/もっとみせてくれよ(mottomisetekureyo)`
+        : `===5文字の例===
+ださいな/ださいな(dasaina), うざいよ/うざいよ(uzaiyo), ばかだな/ばかだな(bakadana), きもいぞ/きもいぞ(kimoizo)
+===6文字の例===
+まるがおだな/まるがおだな(marugaodana), くちだけだろ/くちだけだろ(kuchidakedaro), だめにんげん/だめにんげん(dameningen)
+===7文字の例===
+ちょうしのるなよ/ちょうしのるなよ(choushinorunayo), おまえがいうなよ/おまえがいうなよ(omaegaiunayo)
+===8文字の例===
+おまえにはむりだろ/おまえにはむりだろ(omaenihamuridaro), いいかげんにしろよ/いいかげんにしろよ(iikagennishiroyo)`;
 
-      const phase1Promises = [
-        ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: dissPrompt(2, DISS_TARGETS[2], level <= 3
-            ? `【例】\n神/かみ(kami),王/おう(ou),星/ほし(hoshi)`
-            : `【例】\nクズ/くず(kuzu),カス/かす(kasu),ブス/ぶす(busu),ゴミ/ごみ(gomi),バカ/ばか(baka),クソ/くそ(kuso),デブ/でぶ(debu),ハゲ/はげ(hage)`),
-          config: geminiConfig,
-        }),
-        ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: dissPrompt(3, DISS_TARGETS[3], level <= 3
-            ? `【例】\n天才/てんさい(tensai),凄い/すごい(sugoi),最高/さいこう(saikou)`
-            : `【例】\nダサい/ださい(dasai),無能/むのう(munou),ダメだ/だめだ(dameda),きもい/きもい(kimoi),うざい/うざい(uzai)`),
-          config: geminiConfig,
-        }),
-        ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: dissPrompt(4, DISS_TARGETS[4], level <= 3
-            ? `【例】\n実力派/じつりょくは(jitsuryokuha),努力家/どりょくか(doryokuka)`
-            : `【例】\n嘘つき/うそつき(usotsuki),負け犬/まけいぬ(makeinu),ヘタクソ/へたくそ(hetakuso),役立たず/やくたたず(yakutatazu)`),
-          config: geminiConfig,
-        }),
-      ];
+      const genPrompt = (batchNum: number) =>
+        `ターゲットに向けた${contentType}を生成せよ。バッチ${batchNum}/4。
 
-      const phase1Results = await Promise.allSettled(phase1Promises);
-      const dissEntries: WordEntry[] = [];
-
-      for (let i = 0; i < phase1Results.length; i++) {
-        const r = phase1Results[i];
-        if (r.status !== "fulfilled") continue;
-        for (const e of parseWordEntries(r.value.text || "")) {
-          if (seen.has(e.word)) continue;
-          const len = e.reading.length;
-          if (len >= 2 && len <= 4) dissEntries.push(e);
-        }
-      }
-
-      const dissParts: Record<number, WordEntry[]> = { 2: [], 3: [], 4: [] };
-      for (const e of dissEntries) {
-        const len = e.reading.length;
-        if (dissParts[len] && dissParts[len].length < DISS_TARGETS[len]) {
-          dissParts[len].push(e);
-          seen.add(e.word);
-        }
-      }
-
-      logTiming("phase1");
-      const dissTotal = Object.values(dissParts).reduce((s, arr) => s + arr.length, 0);
-      send("generate", `Phase 1完了: ディスりワード${dissTotal}個 (2文字:${dissParts[2].length}, 3文字:${dissParts[3].length}, 4文字:${dissParts[4].length})`);
-
-      send("generate", `Phase 2: ディスりワードに前後を付け足してフレーズ化中... (目標${TOTAL_TARGET}個)`);
-
-      const allDiss = [...dissParts[2], ...dissParts[3], ...dissParts[4]];
-      const dissFormatted = allDiss.map(e => `${e.word}/${e.reading}(${e.romaji})`);
-
-      const extendPrompt = `以下のディスりワード（核）それぞれに、前か後ろに言葉を付け足して、意味の通じる${contentType}フレーズを作成せよ。
-
-【生成ルール】
-1. 各ディスりワードの前か後ろに言葉を付け足して、完成したフレーズにすること
-2. 完成フレーズは最大7文字（ひらがな換算）まで
-3. ディスりワードがそのまま含まれていること（核を変形させない）
-4. 小学生でもわかる簡単な言葉のみ
-5. 全て異なるフレーズ。同じ意味・同じ構造の繰り返し禁止
-
-【超重要：語尾の重複禁止】
-同じ語尾・文末表現（ひらがな末尾2文字）を持つフレーズを複数出力するな。
-悪い例：「卑怯だろ」「ダサいだろ」「弱いだろ」→全て「だろ」で終わっている。禁止。
-良い例：「卑怯だろ」「ダサいかよ」「弱いくせに」→全て異なる語尾。OK。
-各フレーズの末尾2文字が全て異なるように工夫せよ。
-
-【例】
-核「バカ」→「バカだろ」「バカかよ」「おいバカ」
-核「ダサい」→「ダサいなお前」「超ダサい」
-核「ヘタクソ」→「ヘタクソめ」「超ヘタクソ」
-
-【ターゲット】
+【ターゲット情報】
 ${target}
-【レベル${level}/10: ${levelConfig.label}】
+${research}
+【レベル ${level}/10: ${levelConfig.label}】
+${levelConfig.instruction}
 
-【ディスりワード一覧（核）】
-${dissFormatted.join(", ")}
+【生成ルール - 全て厳守】
+1. 5文字・6文字・7文字・8文字の悪口・指摘・挑発・批判・煽りを混ぜて合計40個生成
+2. 「文字数」＝ひらがなに変換した後の文字数。拗音(ゃゅょ)・促音(っ)・撥音(ん)・長音(ー)も各1文字
+3. 小学生でもわかる簡単な日本語のみ。難しい漢字・専門用語・文語体は禁止
+4. 造語OK（意味がわかること）
+5. 完全に同じワードの生成禁止
+6. 文末表現（ひらがな末尾2文字）が同じワードを複数作るな
+   悪い例: 「バカだろ」「クズだろ」→両方「だろ」で終わり→禁止
+   良い例: 「バカだろ」「クズかよ」→末尾が異なる→OK
+${ngSection}${ngAnalysisSection}
+【既出ワード - 生成禁止】${historyList}
 
-【フォーマット】
-完成フレーズ/ひらがな読み(romaji)
-※前置き不要。各核から最低1個以上、合計${TOTAL_TARGET + 20}個以上出力。語尾が全て異なるように！`;
+${dissExamples}
 
-      const extendResults = await Promise.allSettled([
-        ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: extendPrompt,
-          config: { ...geminiConfig, maxOutputTokens: 16384 },
-        }),
-        ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: extendPrompt + "\n\n1つ目の回答とは異なるフレーズを作れ。同じ核でも別の付け足し方をせよ。語尾も異なるものにせよ。",
-          config: { ...geminiConfig, maxOutputTokens: 16384 },
-        }),
-      ]);
+【出力】
+===5文字===
+ワード/ひらがな(romaji) を10個
+===6文字===
+ワード/ひらがな(romaji) を10個
+===7文字===
+ワード/ひらがな(romaji) を10個
+===8文字===
+ワード/ひらがな(romaji) を10個
+前置き不要。即座に出力。`;
+
+      const genResults = await Promise.allSettled(
+        [1, 2, 3, 4, 5].map(batch =>
+          ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: genPrompt(batch),
+            config: { ...geminiConfig, maxOutputTokens: 8192 },
+          })
+        )
+      );
 
       const suffixCounts: Record<string, number> = {};
       const allWords: WordEntry[] = [];
+      const byLen: Record<number, number> = { 5: 0, 6: 0, 7: 0, 8: 0 };
 
-      for (const r of extendResults) {
+      function tryAdd(e: WordEntry): boolean {
+        if (seen.has(e.word)) return false;
+        if (allWords.some(w => w.word === e.word)) return false;
+        const len = e.reading.length;
+        if (len < 5 || len > 8) return false;
+        const suffix2 = e.reading.slice(-2);
+        if (suffix2.length === 2 && (suffixCounts[suffix2] || 0) >= MAX_SAME_SUFFIX) return false;
+        allWords.push(e);
+        seen.add(e.word);
+        byLen[len] = (byLen[len] || 0) + 1;
+        if (suffix2.length === 2) suffixCounts[suffix2] = (suffixCounts[suffix2] || 0) + 1;
+        return true;
+      }
+
+      for (const r of genResults) {
         if (r.status !== "fulfilled") continue;
         for (const e of parseWordEntries(r.value.text || "")) {
           if (allWords.length >= TOTAL_TARGET) break;
-          if (seen.has(e.word)) continue;
-          if (allWords.some(w => w.word === e.word)) continue;
-          const len = e.reading.length;
-          if (len < 3 || len > 7) continue;
-          const suffix2 = e.reading.slice(-2);
-          if (suffix2.length === 2 && (suffixCounts[suffix2] || 0) >= MAX_SAME_SUFFIX) continue;
-          allWords.push(e);
-          seen.add(e.word);
-          if (suffix2.length === 2) suffixCounts[suffix2] = (suffixCounts[suffix2] || 0) + 1;
+          tryAdd(e);
         }
-        if (allWords.length >= TOTAL_TARGET) break;
       }
 
-      logTiming("phase2");
-      send("generate", `Phase 2完了: フレーズ ${allWords.length}個生成`);
+      logTiming("generate");
+      send("generate", `生成完了: ${allWords.length}個 (5文字:${byLen[5]}, 6文字:${byLen[6]}, 7文字:${byLen[7]}, 8文字:${byLen[8]})`);
+
+      let retryCount = 0;
+      while (allWords.length < TOTAL_TARGET && retryCount < 5) {
+        retryCount++;
+        const shortage = TOTAL_TARGET - allWords.length;
+        send("generate", `追加生成中... (残り${shortage}個, リトライ${retryCount})`);
+
+        const usedSuffixList = Object.entries(suffixCounts).filter(([,v]) => v >= MAX_SAME_SUFFIX).map(([k]) => k).join(",");
+        const alreadyList = allWords.slice(-100).map(w => w.word).join(",");
+
+        const supplementResults = await Promise.allSettled(
+          [1, 2, 3].map(batch =>
+            ai.models.generateContent({
+              model: "gemini-2.5-flash",
+              contents: `ターゲット「${targetName}」への${contentType}を5〜8文字（ひらがな換算）で${Math.max(20, shortage * 3)}個生成。バッチ${batch}。
+小学生でもわかる簡単な言葉。造語OK（意味がわかること）。
+悪口・指摘・挑発・批判・煽りなど種類を散らせ。5文字・6文字・7文字・8文字を混ぜること。
+以下のひらがな末尾2文字で終わるワードは作るな: ${usedSuffixList}
+以下のワードと同じもの禁止: ${alreadyList}
+${ngSection}
+フォーマット: ワード/ひらがな(romaji) 1行1個。前置き不要。`,
+              config: { ...geminiConfig, maxOutputTokens: 8192 },
+            })
+          )
+        );
+
+        for (const r of supplementResults) {
+          if (r.status !== "fulfilled") continue;
+          for (const e of parseWordEntries(r.value?.text || "")) {
+            if (allWords.length >= TOTAL_TARGET) break;
+            tryAdd(e);
+          }
+        }
+        logTiming(`supplement-${retryCount}`);
+        send("generate", `追加生成${retryCount}回目完了: ${allWords.length}個 (5文字:${byLen[5]}, 6文字:${byLen[6]}, 7文字:${byLen[7]}, 8文字:${byLen[8]})`);
+      }
 
       if (heartbeat) clearInterval(heartbeat);
       logTiming("total");
