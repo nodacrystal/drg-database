@@ -39,6 +39,21 @@ export async function deleteWord(id: number): Promise<void> {
   await db.delete(words).where(eq(words.id, id));
 }
 
+export async function deleteWords(ids: number[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  let deleted = 0;
+  for (const id of ids) {
+    const result = await db.delete(words).where(eq(words.id, id)).returning({ id: words.id });
+    if (result.length > 0) deleted++;
+  }
+  return deleted;
+}
+
+export async function updateWord(id: number, data: { word: string; reading: string; romaji: string; vowels: string; charCount: number }): Promise<boolean> {
+  const result = await db.update(words).set(data).where(eq(words.id, id)).returning({ id: words.id });
+  return result.length > 0;
+}
+
 export async function clearAllWords(): Promise<void> {
   await db.delete(words);
 }

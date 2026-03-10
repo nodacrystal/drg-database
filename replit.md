@@ -82,6 +82,7 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - `GET /api/ng-words` - Get all NG words
 - `GET /api/ng-words/count` - Get NG word count
 - `DELETE /api/ng-words` - Clear all NG words
+- `POST /api/favorites/cleanup` - DB cleanup via SSE (cluster dedup + merge small clusters into large ones)
 
 ## Recent Changes
 - 2026-03-10: Rich target data: 5 fields (name/appearance/career/personality/evaluation) for ~130 targets (comedians + athletes)
@@ -94,3 +95,5 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - 2026-03-10: Vowel extraction includes 「ん」(n) when not followed by a vowel
 - 2026-03-10: Favorites grouped by last 2 vowels, sorted by 3+ vowel suffix match within groups
 - 2026-03-10: NG bulk copy button, paste-to-add for both DB and NG tabs
+- 2026-03-10: Post-generation AI validation: flags unnatural/forced/incomplete words and removes them before returning results
+- 2026-03-10: DB cleanup button: cluster dedup (same reading or same base word with particle suffix) + small cluster merge (AI rewrites words to match large cluster vowel patterns)

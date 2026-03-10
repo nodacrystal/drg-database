@@ -11,7 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
   Flame, Mic2, Sparkles, Zap, AlertTriangle, Loader2, Star,
-  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart, Plus, Combine,
+  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart, Plus, Combine, Wrench,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -272,6 +272,50 @@ export default function Home() {
     onError: (err: Error) => { toast({ title: "エラー", description: err.message || "追加に失敗しました", variant: "destructive" }); },
   });
 
+  const [isCleaningUp, setIsCleaningUp] = useState(false);
+  const [cleanupLogs, setCleanupLogs] = useState<ProgressLog[]>([]);
+
+  const runCleanup = useCallback(async () => {
+    setIsCleaningUp(true);
+    setCleanupLogs([]);
+    try {
+      const response = await fetch("/api/favorites/cleanup", { method: "POST", headers: { "Content-Type": "application/json" } });
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({ error: "整理に失敗しました" }));
+        throw new Error(errData.error || "整理に失敗しました");
+      }
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("No reader");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.type === "progress") {
+              setCleanupLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
+            } else if (data.type === "result") {
+              toast({ title: "整理完了", description: `重複削除${data.deleted}個, クラスタ統合${data.merged}個 (残り${data.total}語)` });
+              queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
+              queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
+            } else if (data.type === "error") {
+              toast({ title: "エラー", description: data.error, variant: "destructive" });
+            }
+          } catch {}
+        }
+      }
+    } catch (err) {
+      toast({ title: "エラー", description: "整理に失敗しました", variant: "destructive" });
+    }
+    setIsCleaningUp(false);
+  }, [toast, queryClient]);
+
   const handleGenerateDiss = useCallback(() => {
     if (!target) { toast({ title: "ターゲット未設定", description: "先にターゲットを生成してください" }); return; }
     if (level >= 8 && !ageConfirmed) { toast({ title: "年齢確認", description: "レベル8以上は年齢確認が必要です", variant: "destructive" }); return; }
@@ -429,6 +473,10 @@ export default function Home() {
                   <Badge variant="secondary">{totalCount.toLocaleString()}件</Badge>
                 </div>
                 <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={runCleanup} disabled={isCleaningUp || totalCount === 0} data-testid="button-cleanup-favorites">
+                    {isCleaningUp ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Wrench className="w-3.5 h-3.5 mr-1" />}
+                    整理
+                  </Button>
                   <Button variant="outline" size="sm" onClick={copyFavorites} data-testid="button-copy-favorites"><Copy className="w-3.5 h-3.5 mr-1" />エクスポート</Button>
                   <Button variant="outline" size="sm" onClick={() => clearFavMutation.mutate()} disabled={clearFavMutation.isPending} data-testid="button-clear-favorites"><Trash2 className="w-3.5 h-3.5 mr-1" />全削除</Button>
                 </div>
@@ -453,6 +501,24 @@ export default function Home() {
                   貼り付けて追加
                 </Button>
               </div>
+
+              {cleanupLogs.length > 0 && (
+                <div className="rounded-md border border-border/50 bg-muted/20 p-3 space-y-1" data-testid="cleanup-logs">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Wrench className="w-4 h-4 text-primary" />
+                    <span className="text-xs font-semibold">整理ログ</span>
+                  </div>
+                  <div className="max-h-32 overflow-y-auto space-y-0.5">
+                    {cleanupLogs.map((log, i) => (
+                      <div key={i} className="text-xs flex gap-2">
+                        <span className="text-muted-foreground font-mono shrink-0">[{log.elapsed}]</span>
+                        <span className="text-muted-foreground shrink-0">{log.time}</span>
+                        <span>{log.detail}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {favQuery.isLoading ? (
                 <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-16 w-full rounded-md" />)}</div>

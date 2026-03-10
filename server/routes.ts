@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from "@google/genai";
 import { z } from "zod";
 import {
-  getAllWords, getWordCount, getWordStrings, addWords, deleteWord,
+  getAllWords, getWordCount, getWordStrings, addWords, deleteWord, deleteWords, updateWord,
   clearAllWords, exportWords, getAllNgWords, getNgWordStrings,
   addNgWords, getNgWordCount, clearNgWords,
 } from "./storage";
@@ -401,6 +401,52 @@ ${ngSection}
         send("generate", `追加生成${retryCount}回目完了: ${allWords.length}個 (5文字:${byLen[5]}, 6文字:${byLen[6]}, 7文字:${byLen[7]}, 8文字:${byLen[8]})`);
       }
 
+      send("validate", `品質チェック中... (${allWords.length}個を検証)`);
+      try {
+        const validateResult = await ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: `以下の日本語ワードリストを品質チェックせよ。不良品のワード番号（1始まり）のみ出力せよ。
+
+【不良品の基準】
+・文字数合わせのために言葉が途中で切れている（例：「おまえの」→不完全）
+・日本語として不自然・意味不明な言葉
+・一般的でない造語で意味が通じない
+・同じような意味のワードが重複している（例：「バカだ」と「バカだな」は許容、「ダメだ」と「ダメだ」は不良）
+
+【ワードリスト】
+${allWords.map((w, i) => `${i + 1}. ${w.word}（${w.reading}）`).join("\n")}
+
+不良品がない場合は「なし」と出力。不良品がある場合は番号をカンマ区切りで出力（例: 3,15,42）。前置き不要。`,
+          config: { ...geminiConfig, maxOutputTokens: 2048 },
+        });
+        const validateText = (validateResult.text || "").trim();
+        if (validateText && validateText !== "なし") {
+          const rawNums = validateText.match(/\d+/g)?.map(n => parseInt(n) - 1) || [];
+          const badIndices = [...new Set(rawNums)].filter(i => i >= 0 && i < allWords.length);
+          if (badIndices.length > 0) {
+            const maxRemove = Math.min(badIndices.length, Math.floor(allWords.length * 0.4));
+            const toRemove = badIndices.slice(0, maxRemove);
+            const removeSet = new Set(toRemove);
+            const removed = toRemove.map(i => allWords[i].word);
+            const filtered = allWords.filter((_, i) => !removeSet.has(i));
+            allWords.length = 0;
+            allWords.push(...filtered);
+            const msg = badIndices.length > maxRemove
+              ? `品質チェック完了: ${removed.length}個除去 (${badIndices.length}個検出、上限${maxRemove}個) → ${allWords.length}個`
+              : `品質チェック完了: ${removed.length}個の不良品を除去 → ${allWords.length}個`;
+            send("validate", msg);
+            console.log(`[VALIDATE] Removed ${removed.length}: ${removed.join(", ")}`);
+          } else {
+            send("validate", `品質チェック完了: 問題なし (${allWords.length}個)`);
+          }
+        } else {
+          send("validate", `品質チェック完了: 問題なし (${allWords.length}個)`);
+        }
+      } catch (e) {
+        send("validate", `品質チェックスキップ (${allWords.length}個)`);
+      }
+      logTiming("validate");
+
       if (heartbeat) clearInterval(heartbeat);
       logTiming("total");
       const timingSummary = Object.entries(timings).map(([k, v]) => `${k}=${formatElapsed(v)}`).join(", ");
@@ -519,6 +565,272 @@ ${ngSection}
 
   app.delete("/api/ng-words", async (_req, res) => {
     try { await clearNgWords(); res.json({ success: true, total: 0 }); } catch { res.status(500).json({ error: "NGワードの全削除に失敗しました" }); }
+  });
+
+  app.post("/api/favorites/cleanup", async (req, res) => {
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    let disconnected = false;
+    res.on("close", () => { disconnected = true; if (heartbeat) clearInterval(heartbeat); });
+
+    try {
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders();
+
+      const startTime = Date.now();
+      let currentStep = "";
+
+      function send(step: string, detail: string) {
+        if (disconnected) return;
+        currentStep = step;
+        res.write(`data: ${JSON.stringify({ type: "progress", step, detail, elapsed: formatElapsed(Date.now() - startTime) })}\n\n`);
+        if (typeof (res as any).flush === "function") (res as any).flush();
+      }
+
+      heartbeat = setInterval(() => {
+        if (disconnected) { if (heartbeat) clearInterval(heartbeat); return; }
+        res.write(`data: ${JSON.stringify({ type: "progress", step: currentStep, detail: "処理継続中...", elapsed: formatElapsed(Date.now() - startTime) })}\n\n`);
+        if (typeof (res as any).flush === "function") (res as any).flush();
+      }, 5000);
+
+      send("init", "データベース分析中...");
+
+      const allDbWords = await getAllWords();
+      const items = allDbWords.map(w => ({
+        id: w.id, word: w.word, reading: w.reading, romaji: w.romaji,
+        vowels: extractVowels(w.romaji), charCount: w.charCount,
+      }));
+
+      const buckets: Record<string, typeof items> = {};
+      for (const item of items) {
+        const key = item.vowels.length >= 2 ? item.vowels.slice(-2) : item.vowels || "_";
+        (buckets[key] ??= []).push(item);
+      }
+
+      const clusterSizes = Object.entries(buckets).map(([k, v]) => ({ key: k, count: v.length }));
+      clusterSizes.sort((a, b) => b.count - a.count);
+      send("init", `${Object.keys(buckets).length}クラスタ, ${items.length}語を分析`);
+
+      let totalDeleted = 0;
+      let totalMerged = 0;
+
+      send("dedup", "クラスタ内重複チェック中...");
+      const toDelete: number[] = [];
+      for (const [clusterKey, clusterWords] of Object.entries(buckets)) {
+        if (clusterWords.length < 2) continue;
+        const seen = new Map<string, typeof clusterWords[0]>();
+        for (const w of clusterWords) {
+          const normalizedReading = w.reading;
+          let isDup = false;
+          for (const [existReading, existWord] of seen) {
+            if (normalizedReading === existReading && w.word !== existWord.word) {
+              toDelete.push(w.id);
+              isDup = true;
+              break;
+            }
+            const wVow = w.vowels;
+            const eVow = existWord.vowels;
+            if (wVow === eVow && w.reading.length === existWord.reading.length) {
+              const wBase = w.word.replace(/[だなよねぞさかがはまをへ]$/, "");
+              const eBase = existWord.word.replace(/[だなよねぞさかがはまをへ]$/, "");
+              if (wBase === eBase) {
+                toDelete.push(w.id);
+                isDup = true;
+                break;
+              }
+            }
+          }
+          if (!isDup) {
+            seen.set(normalizedReading, w);
+          }
+        }
+      }
+
+      if (toDelete.length > 0) {
+        totalDeleted = await deleteWords(toDelete);
+        send("dedup", `重複${totalDeleted}個を削除`);
+        for (const id of toDelete) {
+          const idx = items.findIndex(i => i.id === id);
+          if (idx >= 0) items.splice(idx, 1);
+          for (const [k, v] of Object.entries(buckets)) {
+            const bi = v.findIndex(i => i.id === id);
+            if (bi >= 0) v.splice(bi, 1);
+          }
+        }
+      } else {
+        send("dedup", "重複なし");
+      }
+
+      send("merge", "小クラスタの統合分析中...");
+      const smallClusters = Object.entries(buckets)
+        .filter(([, v]) => v.length > 0 && v.length <= 2)
+        .sort((a, b) => a[1].length - b[1].length);
+
+      const largeClusters = Object.entries(buckets)
+        .filter(([, v]) => v.length >= 5)
+        .sort((a, b) => b[1].length - a[1].length);
+
+      if (smallClusters.length === 0 || largeClusters.length === 0) {
+        send("merge", "統合不要（小クラスタなし、または大クラスタなし）");
+      } else {
+        send("merge", `${smallClusters.length}個の小クラスタを統合検討中...`);
+
+        const mergeTargets: { wordId: number; word: string; reading: string; romaji: string; fromCluster: string; toCluster: string; targetVowels: string }[] = [];
+
+        for (const [smallKey, smallWords] of smallClusters) {
+          if (smallWords.length === 0) continue;
+
+          for (const w of smallWords) {
+            let bestTarget: string | null = null;
+            let bestScore = 0;
+
+            for (const [largeKey, largeWords] of largeClusters) {
+              if (largeKey === smallKey) continue;
+
+              const wVow = w.vowels;
+              const targetSuffix = largeKey;
+              let matchCount = 0;
+              for (let i = 0; i < Math.min(wVow.length, targetSuffix.length); i++) {
+                if (wVow[wVow.length - 1 - i] === targetSuffix[targetSuffix.length - 1 - i]) matchCount++;
+                else break;
+              }
+
+              const score = largeWords.length + matchCount * 10;
+              if (score > bestScore) {
+                bestScore = score;
+                bestTarget = largeKey;
+              }
+            }
+
+            if (bestTarget) {
+              mergeTargets.push({
+                wordId: w.id,
+                word: w.word,
+                reading: w.reading,
+                romaji: w.romaji,
+                fromCluster: smallKey,
+                toCluster: bestTarget,
+                targetVowels: bestTarget,
+              });
+            }
+          }
+        }
+
+        if (mergeTargets.length === 0) {
+          send("merge", "統合候補なし");
+        } else {
+          send("merge", `${mergeTargets.length}語のアレンジをAIに依頼中...`);
+
+          const batchSize = 20;
+          for (let i = 0; i < mergeTargets.length; i += batchSize) {
+            if (disconnected) break;
+            const batch = mergeTargets.slice(i, i + batchSize);
+
+            const existingInTargetClusters = new Set<string>();
+            for (const mt of batch) {
+              const targetCluster = buckets[mt.toCluster] || [];
+              targetCluster.forEach(w => existingInTargetClusters.add(w.word));
+            }
+
+            const prompt = `以下のワードの末尾を変えて、指定された母音パターンに合わせよ。
+意味やニュアンスを大きく変えず、自然な日本語にすること。不自然なら「変換不可」と書け。
+
+【ルール】
+・元のワードの攻撃性・ニュアンスをできるだけ維持
+・末尾1〜2文字を変えるだけで母音パターンを変える
+・すでにクラスタ内に存在する言葉と同じにしてはならない
+・日本語として自然で意味が通じること
+
+【既存ワード（重複禁止）】
+${[...existingInTargetClusters].join(",")}
+
+${batch.map((mt, j) => `${j + 1}. 「${mt.word}」（${mt.reading}）→ 母音末尾を「${mt.targetVowels}」に変更`).join("\n")}
+
+フォーマット: 番号. 新ワード/新ひらがな(romaji) または 番号. 変換不可
+前置き不要。`;
+
+            try {
+              const result = await ai.models.generateContent({
+                model: "gemini-2.5-flash",
+                contents: prompt,
+                config: { ...geminiConfig, maxOutputTokens: 4096 },
+              });
+
+              const lines = (result.text || "").split("\n").map(l => l.trim()).filter(l => l.length > 0);
+              for (const line of lines) {
+                if (line.includes("変換不可")) continue;
+                const numMatch = line.match(/^(\d+)\.\s*/);
+                if (!numMatch) continue;
+                const idx = parseInt(numMatch[1]) - 1;
+                if (idx < 0 || idx >= batch.length) continue;
+
+                const entryMatch = line.match(/^(\d+)\.\s*(.+?)\s*[\/／]\s*([ぁ-ゟー]+)\s*[\(（]([a-zA-Z\s\-']+)[\)）]/);
+                if (!entryMatch) continue;
+
+                const mt = batch[idx];
+                const newWord = entryMatch[2].trim();
+                const newReading = entryMatch[3].trim();
+                const newRomaji = entryMatch[4].trim().toLowerCase();
+                const newVowels = extractVowels(newRomaji);
+
+                if (existingInTargetClusters.has(newWord)) continue;
+                if (items.some(item => item.word === newWord && item.id !== mt.wordId)) continue;
+
+                const newVowelSuffix = newVowels.length >= 2 ? newVowels.slice(-2) : newVowels;
+                if (newVowelSuffix !== mt.toCluster) continue;
+
+                try {
+                  const updated = await updateWord(mt.wordId, {
+                    word: newWord,
+                    reading: newReading,
+                    romaji: newRomaji,
+                    vowels: newVowels,
+                    charCount: newReading.length,
+                  });
+                  if (updated) {
+                    totalMerged++;
+                    existingInTargetClusters.add(newWord);
+                    const itemIdx = items.findIndex(it => it.id === mt.wordId);
+                    if (itemIdx >= 0) {
+                      items[itemIdx].word = newWord;
+                      items[itemIdx].reading = newReading;
+                      items[itemIdx].romaji = newRomaji;
+                      items[itemIdx].vowels = newVowels;
+                    }
+                  }
+                } catch (updateErr) {
+                  console.log(`[CLEANUP] Update failed for word ${mt.wordId}: ${updateErr}`);
+                }
+              }
+            } catch (aiErr) {
+              console.log(`[CLEANUP] AI merge batch failed: ${aiErr}`);
+              send("merge", `統合バッチ処理エラー（継続中）`);
+            }
+
+            send("merge", `統合進捗: ${Math.min(i + batchSize, mergeTargets.length)}/${mergeTargets.length}語処理完了 (${totalMerged}語アレンジ済)`);
+          }
+        }
+      }
+
+      if (heartbeat) clearInterval(heartbeat);
+      const finalCount = await getWordCount();
+      send("done", `整理完了: 重複削除${totalDeleted}個, クラスタ統合${totalMerged}個 (残り${finalCount}語, ${formatElapsed(Date.now() - startTime)})`);
+
+      if (!disconnected) {
+        res.write(`data: ${JSON.stringify({ type: "result", deleted: totalDeleted, merged: totalMerged, total: finalCount })}\n\n`);
+        if (typeof (res as any).flush === "function") (res as any).flush();
+        res.end();
+      }
+    } catch (error) {
+      if (heartbeat) clearInterval(heartbeat);
+      console.error("Cleanup error:", error);
+      if (!disconnected) {
+        try { res.write(`data: ${JSON.stringify({ type: "error", error: "整理に失敗しました" })}\n\n`); res.end(); }
+        catch { try { res.status(500).json({ error: "整理に失敗しました" }); } catch {} }
+      }
+    }
   });
 
   app.post("/api/favorites/paste", async (req, res) => {
