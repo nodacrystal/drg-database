@@ -616,41 +616,28 @@ ${allWords.map((w, i) => `${i + 1}. ${w.word}（${w.reading}）`).join("\n")}
       let totalDeleted = 0;
       let totalMerged = 0;
 
-      send("dedup", "クラスタ内重複チェック中...");
+      send("dedup", "クラスタ内韻かぶりチェック中...");
       const toDelete: number[] = [];
       for (const [clusterKey, clusterWords] of Object.entries(buckets)) {
         if (clusterWords.length < 2) continue;
-        const seen = new Map<string, typeof clusterWords[0]>();
+
+        const rhymeSeen = new Map<string, typeof clusterWords[0]>();
         for (const w of clusterWords) {
-          const normalizedReading = w.reading;
-          let isDup = false;
-          for (const [existReading, existWord] of seen) {
-            if (normalizedReading === existReading && w.word !== existWord.word) {
-              toDelete.push(w.id);
-              isDup = true;
-              break;
-            }
-            const wVow = w.vowels;
-            const eVow = existWord.vowels;
-            if (wVow === eVow && w.reading.length === existWord.reading.length) {
-              const wBase = w.word.replace(/[だなよねぞさかがはまをへ]$/, "");
-              const eBase = existWord.word.replace(/[だなよねぞさかがはまをへ]$/, "");
-              if (wBase === eBase) {
-                toDelete.push(w.id);
-                isDup = true;
-                break;
-              }
-            }
-          }
-          if (!isDup) {
-            seen.set(normalizedReading, w);
+          const vowelLen = clusterKey.length;
+          const rhymePart = w.reading.slice(-vowelLen);
+
+          if (rhymeSeen.has(rhymePart)) {
+            toDelete.push(w.id);
+            console.log(`[DEDUP] 韻かぶり削除: "${w.word}"(${w.reading}) ← 韻部分「${rhymePart}」が「${rhymeSeen.get(rhymePart)!.word}」と一致 [${clusterKey}]`);
+          } else {
+            rhymeSeen.set(rhymePart, w);
           }
         }
       }
 
       if (toDelete.length > 0) {
         totalDeleted = await deleteWords(toDelete);
-        send("dedup", `重複${totalDeleted}個を削除`);
+        send("dedup", `韻かぶり${totalDeleted}個を削除`);
         for (const id of toDelete) {
           const idx = items.findIndex(i => i.id === id);
           if (idx >= 0) items.splice(idx, 1);
@@ -660,156 +647,152 @@ ${allWords.map((w, i) => `${i + 1}. ${w.word}（${w.reading}）`).join("\n")}
           }
         }
       } else {
-        send("dedup", "重複なし");
+        send("dedup", "韻かぶりなし");
       }
 
-      send("merge", "小クラスタの統合分析中...");
-      const smallClusters = Object.entries(buckets)
-        .filter(([, v]) => v.length > 0 && v.length <= 2)
-        .sort((a, b) => a[1].length - b[1].length);
-
-      const largeClusters = Object.entries(buckets)
-        .filter(([, v]) => v.length >= 5)
+      const TOP_CLUSTER_COUNT = 6;
+      const sortedClusters = Object.entries(buckets)
+        .filter(([, v]) => v.length > 0)
         .sort((a, b) => b[1].length - a[1].length);
 
-      if (smallClusters.length === 0 || largeClusters.length === 0) {
-        send("merge", "統合不要（小クラスタなし、または大クラスタなし）");
-      } else {
-        send("merge", `${smallClusters.length}個の小クラスタを統合検討中...`);
+      const topClusters = sortedClusters.slice(0, TOP_CLUSTER_COUNT);
+      const mergeClusters = sortedClusters.slice(TOP_CLUSTER_COUNT);
+      const topKeys = topClusters.map(([k]) => k);
 
+      send("merge", `上位${TOP_CLUSTER_COUNT}クラスタ: [${topKeys.join(", ")}] に統合開始`);
+      send("merge", `統合対象: ${mergeClusters.length}クラスタ, ${mergeClusters.reduce((s, [,v]) => s + v.length, 0)}語`);
+
+      if (mergeClusters.length === 0) {
+        send("merge", "統合不要（全クラスタが上位6に収まっています）");
+      } else {
         const mergeTargets: { wordId: number; word: string; reading: string; romaji: string; fromCluster: string; toCluster: string; targetVowels: string }[] = [];
 
-        for (const [smallKey, smallWords] of smallClusters) {
-          if (smallWords.length === 0) continue;
-
-          for (const w of smallWords) {
-            let bestTarget: string | null = null;
-            let bestScore = 0;
-
-            for (const [largeKey, largeWords] of largeClusters) {
-              if (largeKey === smallKey) continue;
-
-              const wVow = w.vowels;
-              const targetSuffix = largeKey;
-              let matchCount = 0;
-              for (let i = 0; i < Math.min(wVow.length, targetSuffix.length); i++) {
-                if (wVow[wVow.length - 1 - i] === targetSuffix[targetSuffix.length - 1 - i]) matchCount++;
-                else break;
-              }
-
-              const score = largeWords.length + matchCount * 10;
-              if (score > bestScore) {
-                bestScore = score;
-                bestTarget = largeKey;
-              }
-            }
-
-            if (bestTarget) {
-              mergeTargets.push({
-                wordId: w.id,
-                word: w.word,
-                reading: w.reading,
-                romaji: w.romaji,
-                fromCluster: smallKey,
-                toCluster: bestTarget,
-                targetVowels: bestTarget,
-              });
-            }
+        let clusterIdx = 0;
+        for (const [fromKey, fromWords] of mergeClusters) {
+          for (const w of fromWords) {
+            const targetKey = topKeys[clusterIdx % TOP_CLUSTER_COUNT];
+            mergeTargets.push({
+              wordId: w.id, word: w.word, reading: w.reading, romaji: w.romaji,
+              fromCluster: fromKey, toCluster: targetKey, targetVowels: targetKey,
+            });
+            clusterIdx++;
           }
         }
 
-        if (mergeTargets.length === 0) {
-          send("merge", "統合候補なし");
-        } else {
-          send("merge", `${mergeTargets.length}語のアレンジをAIに依頼中...`);
+        send("merge", `${mergeTargets.length}語のアレンジをAIに依頼中...`);
 
-          const batchSize = 20;
-          for (let i = 0; i < mergeTargets.length; i += batchSize) {
-            if (disconnected) break;
-            const batch = mergeTargets.slice(i, i + batchSize);
+        const batchSize = 15;
+        for (let i = 0; i < mergeTargets.length; i += batchSize) {
+          if (disconnected) break;
+          const batch = mergeTargets.slice(i, i + batchSize);
 
-            const existingInTargetClusters = new Set<string>();
-            for (const mt of batch) {
-              const targetCluster = buckets[mt.toCluster] || [];
-              targetCluster.forEach(w => existingInTargetClusters.add(w.word));
+          const existingWords = new Set<string>();
+          items.forEach(w => existingWords.add(w.word));
+          const existingReadings = new Set<string>();
+          items.forEach(w => existingReadings.add(w.reading));
+
+          const clusterExamples: Record<string, string[]> = {};
+          for (const mt of batch) {
+            if (!clusterExamples[mt.toCluster]) {
+              const cl = buckets[mt.toCluster] || [];
+              clusterExamples[mt.toCluster] = cl.slice(0, 5).map(w => `${w.word}(${w.reading})`);
             }
+          }
 
-            const prompt = `以下のワードの末尾を変えて、指定された母音パターンに合わせよ。
-意味やニュアンスを大きく変えず、自然な日本語にすること。不自然なら「変換不可」と書け。
+          const prompt = `以下のワードを、指定されたクラスタの韻に合うよう書き換えよ。
+元の意味・攻撃性をできるだけ維持しつつ、末尾を変えて韻の母音パターンを合わせる。
 
 【ルール】
-・元のワードの攻撃性・ニュアンスをできるだけ維持
-・末尾1〜2文字を変えるだけで母音パターンを変える
-・すでにクラスタ内に存在する言葉と同じにしてはならない
-・日本語として自然で意味が通じること
+・末尾1〜3文字を変えて母音末尾パターンを変える
+・元のワードの意味を活かした自然な日本語にすること
+・不自然な場合は、同じ攻撃性で別の表現に言い換えてもOK（母音末尾が合えば）
+・5〜8文字（ひらがな換算）を維持
+・変換不可能なら「変換不可」と書け
 
-【既存ワード（重複禁止）】
-${[...existingInTargetClusters].join(",")}
+【クラスタの韻の例】
+${Object.entries(clusterExamples).map(([k, ex]) => `[*${k}]: ${ex.join(", ")}`).join("\n")}
 
-${batch.map((mt, j) => `${j + 1}. 「${mt.word}」（${mt.reading}）→ 母音末尾を「${mt.targetVowels}」に変更`).join("\n")}
+${batch.map((mt, j) => `${j + 1}. 「${mt.word}」（${mt.reading}）→ 母音末尾を「${mt.targetVowels}」に合わせる`).join("\n")}
 
 フォーマット: 番号. 新ワード/新ひらがな(romaji) または 番号. 変換不可
 前置き不要。`;
 
-            try {
-              const result = await ai.models.generateContent({
-                model: "gemini-2.5-flash",
-                contents: prompt,
-                config: { ...geminiConfig, maxOutputTokens: 4096 },
-              });
+          try {
+            const result = await ai.models.generateContent({
+              model: "gemini-2.5-flash",
+              contents: prompt,
+              config: { ...geminiConfig, maxOutputTokens: 4096 },
+            });
 
-              const lines = (result.text || "").split("\n").map(l => l.trim()).filter(l => l.length > 0);
-              for (const line of lines) {
-                if (line.includes("変換不可")) continue;
-                const numMatch = line.match(/^(\d+)\.\s*/);
-                if (!numMatch) continue;
-                const idx = parseInt(numMatch[1]) - 1;
-                if (idx < 0 || idx >= batch.length) continue;
+            const lines = (result.text || "").split("\n").map(l => l.trim()).filter(l => l.length > 0);
+            for (const line of lines) {
+              if (line.includes("変換不可")) continue;
+              const numMatch = line.match(/^(\d+)\.\s*/);
+              if (!numMatch) continue;
+              const idx = parseInt(numMatch[1]) - 1;
+              if (idx < 0 || idx >= batch.length) continue;
 
-                const entryMatch = line.match(/^(\d+)\.\s*(.+?)\s*[\/／]\s*([ぁ-ゟー]+)\s*[\(（]([a-zA-Z\s\-']+)[\)）]/);
-                if (!entryMatch) continue;
+              const entryMatch = line.match(/^(\d+)\.\s*(.+?)\s*[\/／]\s*([ぁ-ゟー]+)\s*[\(（]([a-zA-Z\s\-']+)[\)）]/);
+              if (!entryMatch) continue;
 
-                const mt = batch[idx];
-                const newWord = entryMatch[2].trim();
-                const newReading = entryMatch[3].trim();
-                const newRomaji = entryMatch[4].trim().toLowerCase();
-                const newVowels = extractVowels(newRomaji);
+              const mt = batch[idx];
+              const newWord = entryMatch[2].trim();
+              const newReading = entryMatch[3].trim();
+              const newRomaji = entryMatch[4].trim().toLowerCase();
+              const newVowels = extractVowels(newRomaji);
 
-                if (existingInTargetClusters.has(newWord)) continue;
-                if (items.some(item => item.word === newWord && item.id !== mt.wordId)) continue;
+              if (existingWords.has(newWord) && !items.some(item => item.id === mt.wordId && item.word === newWord)) continue;
 
-                const newVowelSuffix = newVowels.length >= 2 ? newVowels.slice(-2) : newVowels;
-                if (newVowelSuffix !== mt.toCluster) continue;
+              const newVowelSuffix = newVowels.length >= 2 ? newVowels.slice(-2) : newVowels;
+              if (newVowelSuffix !== mt.toCluster) continue;
 
-                try {
-                  const updated = await updateWord(mt.wordId, {
-                    word: newWord,
-                    reading: newReading,
-                    romaji: newRomaji,
-                    vowels: newVowels,
-                    charCount: newReading.length,
-                  });
-                  if (updated) {
-                    totalMerged++;
-                    existingInTargetClusters.add(newWord);
-                    const itemIdx = items.findIndex(it => it.id === mt.wordId);
-                    if (itemIdx >= 0) {
-                      items[itemIdx].word = newWord;
-                      items[itemIdx].reading = newReading;
-                      items[itemIdx].romaji = newRomaji;
-                      items[itemIdx].vowels = newVowels;
-                    }
+              try {
+                const updated = await updateWord(mt.wordId, {
+                  word: newWord, reading: newReading, romaji: newRomaji,
+                  vowels: newVowels, charCount: newReading.length,
+                });
+                if (updated) {
+                  totalMerged++;
+                  existingWords.add(newWord);
+                  const itemIdx = items.findIndex(it => it.id === mt.wordId);
+                  if (itemIdx >= 0) {
+                    items[itemIdx].word = newWord;
+                    items[itemIdx].reading = newReading;
+                    items[itemIdx].romaji = newRomaji;
+                    items[itemIdx].vowels = newVowels;
                   }
-                } catch (updateErr) {
-                  console.log(`[CLEANUP] Update failed for word ${mt.wordId}: ${updateErr}`);
+                  console.log(`[MERGE] ${mt.word} → ${newWord} [${mt.fromCluster}→${mt.toCluster}]`);
                 }
+              } catch (updateErr) {
+                console.log(`[CLEANUP] Update failed for word ${mt.wordId}: ${updateErr}`);
               }
-            } catch (aiErr) {
-              console.log(`[CLEANUP] AI merge batch failed: ${aiErr}`);
-              send("merge", `統合バッチ処理エラー（継続中）`);
             }
+          } catch (aiErr) {
+            console.log(`[CLEANUP] AI merge batch failed: ${aiErr}`);
+            send("merge", `統合バッチ処理エラー（継続中）`);
+          }
 
-            send("merge", `統合進捗: ${Math.min(i + batchSize, mergeTargets.length)}/${mergeTargets.length}語処理完了 (${totalMerged}語アレンジ済)`);
+          send("merge", `統合進捗: ${Math.min(i + batchSize, mergeTargets.length)}/${mergeTargets.length}語処理完了 (${totalMerged}語アレンジ済)`);
+        }
+
+        if (!disconnected) {
+          const failedIds: number[] = [];
+          for (const mt of mergeTargets) {
+            const item = items.find(it => it.id === mt.wordId);
+            if (!item) continue;
+            const currentSuffix = item.vowels.length >= 2 ? item.vowels.slice(-2) : item.vowels;
+            if (!topKeys.includes(currentSuffix)) failedIds.push(mt.wordId);
+          }
+
+          if (failedIds.length > 0) {
+            const failedDeleted = await deleteWords(failedIds);
+            totalDeleted += failedDeleted;
+            send("merge", `変換不可${failedDeleted}語を削除（上位6クラスタに統合不能）`);
+            for (const id of failedIds) {
+              const idx = items.findIndex(i => i.id === id);
+              if (idx >= 0) items.splice(idx, 1);
+            }
+            console.log(`[CLEANUP] Deleted ${failedDeleted} unconvertible words`);
           }
         }
       }

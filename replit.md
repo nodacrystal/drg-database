@@ -96,4 +96,4 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - 2026-03-10: Favorites grouped by last 2 vowels, sorted by 3+ vowel suffix match within groups
 - 2026-03-10: NG bulk copy button, paste-to-add for both DB and NG tabs
 - 2026-03-10: Post-generation AI validation: flags unnatural/forced/incomplete words and removes them before returning results
-- 2026-03-10: DB cleanup button: cluster dedup (same reading or same base word with particle suffix) + small cluster merge (AI rewrites words to match large cluster vowel patterns)
+- 2026-03-10: DB cleanup button: reading-suffix dedup (same trailing kana at rhyme position → delete duplicate) + top-6 cluster merge (AI rewrites words to match top 6 cluster vowel patterns, deletes unconvertible words)
