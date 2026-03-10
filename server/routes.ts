@@ -68,7 +68,7 @@ function parseWordEntries(section: string): WordEntry[] {
 
 const DISS_TARGETS: Record<number, number> = { 2: 20, 3: 20, 4: 20 };
 const SUPPORT_TARGETS: Record<number, number> = { 2: 20, 3: 20, 4: 20 };
-const DIRECT_TARGETS: Record<number, number> = { 5: 20, 6: 20, 7: 15, 8: 15 };
+const DIRECT_TARGETS: Record<number, number> = { 5: 25, 6: 25, 7: 20 };
 const TOTAL_TARGET = 100;
 
 function formatElapsed(ms: number): string {
@@ -302,9 +302,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         }),
         ai.models.generateContent({
           model: "gemini-2.5-flash",
-          contents: `${contentType}を生成せよ。5〜8文字の完成されたワード・フレーズ。小学生でもわかる簡単な言葉のみ使用すること。\n\n【ターゲット】\n${target}\n${research}${ngSection}${ngAnalysisSection}${baseRules}\n\n===5文字===\nワード/ひらがな(romaji),...(25個)\n===6文字===\nワード/ひらがな(romaji),...(25個)\n===7文字===\nワード/ひらがな(romaji),...(20個)\n===8文字===\nワード/ひらがな(romaji),...(20個)\n\n【例】\n${level <= 3
-            ? `===5文字===\nすばらしい/すばらしい(subarashii)...\n===6文字===\nカリスマてき/かりすまてき(karisumateki)...\n===7文字===\nだいせんぱいです/だいせんぱいです(daisenpaidesuu)...\n===8文字===\nみんなのあこがれ/みんなのあこがれ(minnanoacogare)...`
-            : `===5文字===\nできそこない/できそこない(dekisokonai)...\n===6文字===\nおちぶれやろう/おちぶれやろう(ochibureyarou)...\n===7文字===\nのうたりんやろう/のうたりんやろう(noutarinyarou)...\n===8文字===\nどうしようもないやつ/どうしようもないやつ(doushiyoumonaiyatsu)...`}`,
+          contents: `${contentType}を生成せよ。5〜7文字の完成されたワード・フレーズ。小学生でもわかる簡単な言葉のみ使用すること。
+
+【超重要ルール：語尾・文末表現の重複禁止】
+同じ語尾・文末表現を複数のワードで使うな。「だろ」「だね」「だよ」「やろう」「だろう」「みたい」「くせに」等の文末表現は、それぞれ1回だけ使用可能。
+悪い例：「卑怯だろ」「ダサいだろ」「弱いだろ」→ 全部「だろ」で終わっている。禁止。
+良い例：「卑怯だろ」「ダサいかよ」「弱いくせに」→ 全て異なる語尾。OK。
+同じ意味で同じ文字を含む類似ワードも禁止。バリエーション豊かに。
+
+\n\n【ターゲット】\n${target}\n${research}${ngSection}${ngAnalysisSection}${baseRules}\n\n===5文字===\nワード/ひらがな(romaji),...(30個)\n===6文字===\nワード/ひらがな(romaji),...(30個)\n===7文字===\nワード/ひらがな(romaji),...(25個)\n\n【例】\n${level <= 3
+            ? `===5文字===\nすばらしい/すばらしい(subarashii)...\n===6文字===\nカリスマてき/かりすまてき(karisumateki)...\n===7文字===\nだいせんぱいです/だいせんぱいです(daisenpaidesuu)...`
+            : `===5文字===\nできそこない/できそこない(dekisokonai)...\n===6文字===\nおちぶれやろう/おちぶれやろう(ochibureyarou)...\n===7文字===\nのうたりんかよ/のうたりんかよ(noutarinkayo)...`}`,
           config: { ...geminiConfig, maxOutputTokens: 16384 },
         }),
       ];
@@ -325,7 +333,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           } else if (i <= 5) {
             if (len >= 2 && len <= 4) supportEntries.push(e);
           } else {
-            if (len >= 5 && len <= 8) directEntries.push(e);
+            if (len >= 5 && len <= 7) directEntries.push(e);
           }
         }
       }
@@ -349,13 +357,18 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       const direct: WordEntry[] = [];
-      const directByLen: Record<number, number> = { 5: 0, 6: 0, 7: 0, 8: 0 };
+      const directByLen: Record<number, number> = { 5: 0, 6: 0, 7: 0 };
+      const suffixCounts: Record<string, number> = {};
+      const MAX_SAME_SUFFIX = 2;
       for (const e of directEntries) {
         const len = e.reading.length;
         if (directByLen[len] !== undefined && directByLen[len] < DIRECT_TARGETS[len]) {
+          const suffix2 = e.reading.slice(-2);
+          if (suffix2.length === 2 && (suffixCounts[suffix2] || 0) >= MAX_SAME_SUFFIX) continue;
           direct.push(e);
           directByLen[len]++;
           seen.add(e.word);
+          if (suffix2.length === 2) suffixCounts[suffix2] = (suffixCounts[suffix2] || 0) + 1;
         }
       }
 
@@ -377,6 +390,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
         const combinePrompt = `以下の「攻撃パーツ」と「接続パーツ」を1つずつ組み合わせて、意味の通じる${contentType}フレーズを作成せよ。
 小学生でもわかる簡単な言葉のみ。組み合わせた言葉だけを見て日本語として意味が通じるものだけ出力すること。
+組み合わせ結果は5〜7文字（ひらがな換算）のフレーズのみ。
 
 【重要ルール】
 ・必ず「攻撃パーツ1つ」＋「接続パーツ1つ」の組み合わせにすること
@@ -384,6 +398,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 ・同じパーツは1回だけ使用可能
 ・順序は自由（接続が先でも攻撃が先でもよい）
 ・例：「バカ＋やろう」→「バカやろう」、「邪魔＋だろう」→「邪魔だろう」、「俺が＋圧勝」→「俺が圧勝」
+
+【超重要：語尾の重複禁止】
+同じ語尾・文末表現（ひらがな末尾2文字）を持つフレーズを複数出力するな。
+悪い例：「バカだろ」「クズだろ」「ダメだろ」→全て「だろ」で終わる。禁止。
+良い例：「バカだろ」「クズかよ」「ダメだね」→全て異なる語尾。OK。
 
 【ターゲット】
 ${target}
@@ -421,9 +440,12 @@ ${supportFormatted.join(", ")}
             if (seen.has(e.word)) continue;
             if (combined.some(c => c.word === e.word)) continue;
             const len = e.reading.length;
-            if (len >= 4 && len <= 8) {
+            if (len >= 4 && len <= 7) {
+              const suffix2 = e.reading.slice(-2);
+              if (suffix2.length === 2 && (suffixCounts[suffix2] || 0) >= MAX_SAME_SUFFIX) continue;
               combined.push(e);
               seen.add(e.word);
+              if (suffix2.length === 2) suffixCounts[suffix2] = (suffixCounts[suffix2] || 0) + 1;
             }
           }
           if (direct.length + combined.length >= TOTAL_TARGET) break;

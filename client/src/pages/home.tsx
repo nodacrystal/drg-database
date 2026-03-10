@@ -550,8 +550,8 @@ export default function Home() {
 
             <div className="rounded-md bg-muted/30 border border-border/50 p-2.5 text-xs text-muted-foreground">
               <div className="font-medium mb-1">生成内容 (目標100個):</div>
-              <div>直接生成: 5〜8文字のワード・フレーズ</div>
-              <div>攻撃パーツ(2〜4文字) + 接続パーツ(2〜4文字) → 組み合わせ</div>
+              <div>直接生成 + 組み合わせ = 5〜7文字のワード・フレーズ</div>
+              <div>語尾の重複禁止（同じ末尾2文字は1回のみ）</div>
               <div>小学生でもわかる簡単な言葉のみ使用</div>
             </div>
 
