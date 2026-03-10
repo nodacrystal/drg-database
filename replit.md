@@ -10,10 +10,10 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - **Gemini**: `gemini-2.5-flash` model, all harm categories OFF, `thinkingBudget: 0`
 
 ## File Structure
-- `server/routes.ts` — API routes, AI generation, 2-phase system (~540 lines)
+- `server/routes.ts` — API routes, AI generation, 2-phase diss+support system (~600 lines)
 - `server/targets.ts` — Hardcoded ~150 comedian target data
 - `server/storage.ts` — Database CRUD operations via Drizzle ORM
-- `client/src/pages/home.tsx` — Single-page UI (~600 lines)
+- `client/src/pages/home.tsx` — Single-page UI (~640 lines)
 - `shared/schema.ts` — Drizzle schema definitions
 
 ## Level System (1-10)
@@ -42,27 +42,29 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - Favorites grouped by last 2 vowels (including n) as bucket key
 - Within groups, words with 3+ matching vowel suffix sorted first
 
-## Generation System (2-Phase)
-- **No count selector** — fixed recipe per generation
-- **Phase 1** (4 parallel AI calls):
-  - 3 calls: component words (2文字×20, 3文字×20, 4文字×20) — one call per char count
-  - 1 call: direct words (5文字×10, 6文字×10, 7文字×10)
+## Generation System (2-Phase, Target: 100 words)
+- **No count selector** — fixed recipe, stops at 100 total words
+- **Phase 1** (7 parallel AI calls):
+  - 3 calls: diss/attack parts (2文字×20, 3文字×20, 4文字×20)
+  - 3 calls: support/connector parts (2文字×20, 3文字×20, 4文字×20)
+  - 1 call: direct words (5文字×20, 6文字×20, 7文字×15, 8文字×15)
 - **Phase 2** (2 parallel AI calls):
-  - Sends components to AI for combination validation
-  - AI creates meaningful compound words from component pairs
-  - Once a component is used in a combination, it can't be reused
+  - AI combines 1 diss part + 1 support part into meaningful phrases
+  - Rule: both parts must NOT be diss words (one diss + one connector)
+  - Examples: 「バカ＋やろう」「邪魔＋だろう」「俺が＋圧勝」
+  - Stops when combined + direct reaches 100 total
 - **Result format**: `{ type:"result", direct: WordEntry[], combined: WordEntry[], total }`
+- **Language**: 小学生でもわかる簡単な言葉のみ (elementary school level vocabulary)
 - **Content types**: insults, criticism, provocation, taunting (挑発・煽り・批判) for levels 4+
 
 ## Key Features
 - **Target selection**: Random from ~150 hardcoded Japanese comedians
 - **NG word analysis**: When 5+ NG words exist, AI analyzes rejection patterns and avoids similar words
-- **Cross-character dedup**: Prevents reading overlap across character groups (min 3-char overlap, skip same-length)
+- **Simple language**: All generated words must be understandable by elementary school students
 - **Sentences allowed**: Words, phrases, and short sentences all accepted if natural
 - **RAG research**: AI gathers target info (praise for Lv1-3, diss for Lv4-10)
 - **Live timer**: Running timer with green=success, red=error states
 - **Timing diagnostics**: Server logs timing for each phase
-- Server-side suffix dedup: max 2 words with same reading suffix
 - NG words system: unchecked words saved to ng_words table
 - **NG bulk copy**: Copy all NG words to clipboard
 - **Manual paste-to-add**: Both DB and NG tabs have textarea to paste words in `word/reading(romaji)` format
@@ -87,11 +89,11 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - `DELETE /api/ng-words` - Clear all NG words
 
 ## Recent Changes
-- 2026-03-10: Split component generation into 3 separate AI calls (one per char count) for better yield
-- 2026-03-10: 2-phase generation system (components + direct → combination validation)
+- 2026-03-10: Diss+support combination system (one diss + one connector, not two diss words)
+- 2026-03-10: Total target: 100 words per generation (combined + direct)
+- 2026-03-10: Elementary school level vocabulary only (小学生でもわかる言葉)
+- 2026-03-10: 8-character words added to direct generation (5-8文字)
+- 2026-03-10: 7 parallel AI calls in Phase 1 (3 diss + 3 support + 1 direct)
 - 2026-03-10: Vowel extraction includes 「ん」(n) when not followed by a vowel
 - 2026-03-10: Favorites grouped by last 2 vowels, sorted by 3+ vowel suffix match within groups
 - 2026-03-10: NG bulk copy button, paste-to-add for both DB and NG tabs
-- 2026-03-10: Content includes criticism, provocation, taunting (not just insults)
-- 2026-03-10: Removed count selector (fixed generation recipe)
-- 2026-03-10: Reading regex supports ー (katakana long vowel mark)

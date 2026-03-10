@@ -549,10 +549,10 @@ export default function Home() {
             </AnimatePresence>
 
             <div className="rounded-md bg-muted/30 border border-border/50 p-2.5 text-xs text-muted-foreground">
-              <div className="font-medium mb-1">生成内容:</div>
-              <div>直接生成: 5文字×10, 6文字×10, 7文字×10</div>
-              <div>パーツ生成: 2文字×20, 3文字×20, 4文字×20</div>
-              <div>パーツ組み合わせ → AI検証 → 成立ワード追加</div>
+              <div className="font-medium mb-1">生成内容 (目標100個):</div>
+              <div>直接生成: 5〜8文字のワード・フレーズ</div>
+              <div>攻撃パーツ(2〜4文字) + 接続パーツ(2〜4文字) → 組み合わせ</div>
+              <div>小学生でもわかる簡単な言葉のみ使用</div>
             </div>
 
             <Button onClick={handleGenerateDiss} disabled={isGenerating || !target} className="w-full" data-testid="button-generate-diss">

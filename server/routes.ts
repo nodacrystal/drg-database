@@ -66,8 +66,10 @@ function parseWordEntries(section: string): WordEntry[] {
   return entries;
 }
 
-const COMPONENT_TARGETS: Record<number, number> = { 2: 20, 3: 20, 4: 20 };
-const DIRECT_TARGETS: Record<number, number> = { 5: 10, 6: 10, 7: 10 };
+const DISS_TARGETS: Record<number, number> = { 2: 20, 3: 20, 4: 20 };
+const SUPPORT_TARGETS: Record<number, number> = { 2: 20, 3: 20, 4: 20 };
+const DIRECT_TARGETS: Record<number, number> = { 5: 20, 6: 20, 7: 15, 8: 15 };
+const TOTAL_TARGET = 100;
 
 function formatElapsed(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -240,80 +242,114 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         : `ターゲット特化の個人攻撃・痛烈な批判・煽り・挑発。汚い言葉だけでなく、知的な皮肉や痛烈な批判も含めよ。単語・フレーズ・短い文いずれも可。`;
 
       const baseRules = `【厳守ルール】
-全て異なるワード。${contentInstr}造語不可。一般形容詞不可。漢字は小学生レベル。
+全て異なるワード。${contentInstr}造語不可。小学生でもわかる簡単な言葉のみ使用すること。難しい漢字・専門用語・文語体は禁止。
 【レベル${level}/10: ${levelConfig.label}】${levelConfig.instruction}
 【既出リスト - 絶対に重複するな】: ${historyList}
 【文字数ルール】ひらがな変換後の文字数。拗音・促音・撥音も各1文字。出力前に指折り確認！
 【フォーマット】各ワード「ワード/ひらがな読み(romaji)」形式。前置き不要。即座に出力。`;
 
-      send("generate", "Phase 1: コンポーネント＋直接ワード生成中...");
+      send("generate", "Phase 1: ディスパーツ＋接続パーツ＋直接ワード生成中...");
       const genStart = Date.now();
 
-      const componentExamples = level <= 3
-        ? `===2文字===\n神/かみ(kami),王/おう(ou),星/ほし(hoshi)...\n===3文字===\n天才/てんさい(tensai),凄い/すごい(sugoi)...\n===4文字===\n実力派/じつりょくは(jitsuryokuha),努力家/どりょくか(doryokuka)...`
-        : `===2文字===\nクズ/くず(kuzu),カス/かす(kasu),ブス/ぶす(busu)...\n===3文字===\nダサい/ださい(dasai),無能/むのう(munou),やろう/やろう(yarou)...\n===4文字===\n嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu),しょぼい/しょぼい(shoboi)...`;
+      const dissPrompt = (cc: number, count: number, examples: string) =>
+        `${contentType}の攻撃パーツ（${cc}文字のみ）を生成せよ。これは組み合わせの「攻撃側」として使う。小学生でもわかる簡単な言葉のみ。\n\n【ターゲット】\n${target}\n${research}${ngSection}${ngAnalysisSection}${baseRules}\n\n===${cc}文字===\nワード/ひらがな(romaji)を${count + 5}個出力（目標${count}個）\n\n${examples}`;
 
-      const directExamples = level <= 3
-        ? `===5文字===\nすばらしい/すばらしい(subarashii)...\n===6文字===\nカリスマてき/かりすまてき(karisumateki)...\n===7文字===\nだいせんぱいです/だいせんぱいです(daisenpaidesuu)...`
-        : `===5文字===\nできそこない/できそこない(dekisokonai)...\n===6文字===\nおちぶれやろう/おちぶれやろう(ochibureyarou)...\n===7文字===\nのうたりんやろう/のうたりんやろう(noutarinyarou)...`;
-
-      const compPrompt = (cc: number, count: number, examples: string) =>
-        `${contentType}の短いパーツ（${cc}文字のみ）を生成せよ。後で組み合わせて使うパーツだ。\n\n【ターゲット】\n${target}\n${research}${ngSection}${ngAnalysisSection}${baseRules}\n\n===${cc}文字===\nワード/ひらがな(romaji)を${count + 5}個出力（目標${count}個）\n\n${examples}`;
+      const supportPrompt = (cc: number, count: number, examples: string) =>
+        `以下は攻撃ワードと組み合わせるための「接続パーツ」（${cc}文字のみ）を生成せよ。
+これ自体は攻撃的でなくてよい。攻撃ワードと組み合わせた時に文として成立させるための言葉。
+全て異なるワード。小学生でもわかる簡単な言葉のみ。造語不可。
+【フォーマット】各ワード「ワード/ひらがな読み(romaji)」形式。前置き不要。即座に出力。\n\n===${cc}文字===\nワード/ひらがな(romaji)を${count + 5}個出力（目標${count}個）\n\n${examples}`;
 
       const phase1Promises = [
         ai.models.generateContent({
           model: "gemini-2.5-flash",
-          contents: compPrompt(2, 20, level <= 3
-            ? `【例】\n神/かみ(kami),王/おう(ou),星/ほし(hoshi),光/ひかり(hikari)`
-            : `【例】\nクズ/くず(kuzu),カス/かす(kasu),ブス/ぶす(busu),ゴミ/ごみ(gomi),クソ/くそ(kuso)`),
+          contents: dissPrompt(2, DISS_TARGETS[2], level <= 3
+            ? `【例】\n神/かみ(kami),王/おう(ou),星/ほし(hoshi)`
+            : `【例】\nクズ/くず(kuzu),カス/かす(kasu),ブス/ぶす(busu),ゴミ/ごみ(gomi),バカ/ばか(baka),クソ/くそ(kuso),デブ/でぶ(debu),ハゲ/はげ(hage)`),
           config: geminiConfig,
         }),
         ai.models.generateContent({
           model: "gemini-2.5-flash",
-          contents: compPrompt(3, 20, level <= 3
-            ? `【例】\n天才/てんさい(tensai),凄い/すごい(sugoi),偉い/えらい(erai)`
-            : `【例】\nダサい/ださい(dasai),無能/むのう(munou),やろう/やろう(yarou),ダメだ/だめだ(dameda)`),
+          contents: dissPrompt(3, DISS_TARGETS[3], level <= 3
+            ? `【例】\n天才/てんさい(tensai),凄い/すごい(sugoi)`
+            : `【例】\nダサい/ださい(dasai),無能/むのう(munou),ダメだ/だめだ(dameda),きもい/きもい(kimoi),うざい/うざい(uzai)`),
           config: geminiConfig,
         }),
         ai.models.generateContent({
           model: "gemini-2.5-flash",
-          contents: compPrompt(4, 20, level <= 3
+          contents: dissPrompt(4, DISS_TARGETS[4], level <= 3
             ? `【例】\n実力派/じつりょくは(jitsuryokuha),努力家/どりょくか(doryokuka)`
-            : `【例】\n嘘つき/うそつき(usotsuki),ゴミクズ/ごみくず(gomikuzu),負け犬/まけいぬ(makeinu)`),
+            : `【例】\n嘘つき/うそつき(usotsuki),負け犬/まけいぬ(makeinu),ヘタクソ/へたくそ(hetakuso),役立たず/やくたたず(yakutatazu)`),
           config: geminiConfig,
         }),
         ai.models.generateContent({
           model: "gemini-2.5-flash",
-          contents: `${contentType}を生成せよ。5〜7文字のワード。\n\n【ターゲット】\n${target}\n${research}${ngSection}${ngAnalysisSection}${baseRules}\n\n===5文字===\nワード/ひらがな(romaji),...(15個)\n===6文字===\nワード/ひらがな(romaji),...(15個)\n===7文字===\nワード/ひらがな(romaji),...(15個)\n\n【例】\n${directExamples}`,
+          contents: supportPrompt(2, SUPPORT_TARGETS[2],
+            `【例】\nだろ/だろ(daro),だな/だな(dana),かよ/かよ(kayo),だぜ/だぜ(daze),めが/めが(mega),おれ/おれ(ore),こら/こら(kora),のに/のに(noni)`),
+          config: geminiConfig,
+        }),
+        ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: supportPrompt(3, SUPPORT_TARGETS[3],
+            `【例】\nだろう/だろう(darou),やろう/やろう(yarou),みたい/みたい(mitai),以下の/いかの(ikano),俺が/おれが(orega),お前/おまえ(omae),丸出し/まるだし(marudashi)`),
+          config: geminiConfig,
+        }),
+        ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: supportPrompt(4, SUPPORT_TARGETS[4],
+            `【例】\nじゃねえ/じゃねえ(janee),みたいな/みたいな(mitaina),だろうが/だろうが(darouga),くせして/くせして(kuseshite),なんだよ/なんだよ(nandayo)`),
+          config: geminiConfig,
+        }),
+        ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: `${contentType}を生成せよ。5〜8文字の完成されたワード・フレーズ。小学生でもわかる簡単な言葉のみ使用すること。\n\n【ターゲット】\n${target}\n${research}${ngSection}${ngAnalysisSection}${baseRules}\n\n===5文字===\nワード/ひらがな(romaji),...(25個)\n===6文字===\nワード/ひらがな(romaji),...(25個)\n===7文字===\nワード/ひらがな(romaji),...(20個)\n===8文字===\nワード/ひらがな(romaji),...(20個)\n\n【例】\n${level <= 3
+            ? `===5文字===\nすばらしい/すばらしい(subarashii)...\n===6文字===\nカリスマてき/かりすまてき(karisumateki)...\n===7文字===\nだいせんぱいです/だいせんぱいです(daisenpaidesuu)...\n===8文字===\nみんなのあこがれ/みんなのあこがれ(minnanoacogare)...`
+            : `===5文字===\nできそこない/できそこない(dekisokonai)...\n===6文字===\nおちぶれやろう/おちぶれやろう(ochibureyarou)...\n===7文字===\nのうたりんやろう/のうたりんやろう(noutarinyarou)...\n===8文字===\nどうしようもないやつ/どうしようもないやつ(doushiyoumonaiyatsu)...`}`,
           config: { ...geminiConfig, maxOutputTokens: 16384 },
         }),
       ];
 
       const phase1Results = await Promise.allSettled(phase1Promises);
-      const componentEntries: WordEntry[] = [];
+      const dissEntries: WordEntry[] = [];
+      const supportEntries: WordEntry[] = [];
       const directEntries: WordEntry[] = [];
 
-      for (const r of phase1Results) {
+      for (let i = 0; i < phase1Results.length; i++) {
+        const r = phase1Results[i];
         if (r.status !== "fulfilled") continue;
         for (const e of parseWordEntries(r.value.text || "")) {
           if (seen.has(e.word)) continue;
           const len = e.reading.length;
-          if (len >= 2 && len <= 4) componentEntries.push(e);
-          else if (len >= 5 && len <= 7) directEntries.push(e);
+          if (i <= 2) {
+            if (len >= 2 && len <= 4) dissEntries.push(e);
+          } else if (i <= 5) {
+            if (len >= 2 && len <= 4) supportEntries.push(e);
+          } else {
+            if (len >= 5 && len <= 8) directEntries.push(e);
+          }
         }
       }
 
-      const components: Record<number, WordEntry[]> = { 2: [], 3: [], 4: [] };
-      for (const e of componentEntries) {
+      const dissParts: Record<number, WordEntry[]> = { 2: [], 3: [], 4: [] };
+      for (const e of dissEntries) {
         const len = e.reading.length;
-        if (components[len] && components[len].length < COMPONENT_TARGETS[len]) {
-          components[len].push(e);
+        if (dissParts[len] && dissParts[len].length < DISS_TARGETS[len]) {
+          dissParts[len].push(e);
+          seen.add(e.word);
+        }
+      }
+
+      const supportParts: Record<number, WordEntry[]> = { 2: [], 3: [], 4: [] };
+      for (const e of supportEntries) {
+        const len = e.reading.length;
+        if (supportParts[len] && supportParts[len].length < SUPPORT_TARGETS[len]) {
+          supportParts[len].push(e);
           seen.add(e.word);
         }
       }
 
       const direct: WordEntry[] = [];
-      const directByLen: Record<number, number> = { 5: 0, 6: 0, 7: 0 };
+      const directByLen: Record<number, number> = { 5: 0, 6: 0, 7: 0, 8: 0 };
       for (const e of directEntries) {
         const len = e.reading.length;
         if (directByLen[len] !== undefined && directByLen[len] < DIRECT_TARGETS[len]) {
@@ -324,97 +360,89 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       logTiming("phase1");
-      const compTotal = Object.values(components).reduce((s, arr) => s + arr.length, 0);
-      send("generate", `Phase 1完了: コンポーネント${compTotal}個 (2文字:${components[2].length}, 3文字:${components[3].length}, 4文字:${components[4].length}) + 直接${direct.length}個`);
+      const dissTotal = Object.values(dissParts).reduce((s, arr) => s + arr.length, 0);
+      const suppTotal = Object.values(supportParts).reduce((s, arr) => s + arr.length, 0);
+      send("generate", `Phase 1完了: 攻撃パーツ${dissTotal}個 + 接続パーツ${suppTotal}個 + 直接${direct.length}個`);
 
-      send("generate", "Phase 2: 組み合わせ検証中...");
+      let finalCombined: WordEntry[] = [];
+      const remaining = TOTAL_TARGET - direct.length;
+      if (remaining > 0) {
+        send("generate", `Phase 2: 組み合わせ生成中... (残り${remaining}個で${TOTAL_TARGET}個達成)`);
 
-      const comp2 = components[2].map(e => `${e.word}/${e.reading}(${e.romaji})`);
-      const comp3 = components[3].map(e => `${e.word}/${e.reading}(${e.romaji})`);
-      const comp4 = components[4].map(e => `${e.word}/${e.reading}(${e.romaji})`);
+        const allDiss = [...dissParts[2], ...dissParts[3], ...dissParts[4]];
+        const allSupport = [...supportParts[2], ...supportParts[3], ...supportParts[4]];
 
-      const combinePrompt = `以下の短い日本語ワードを2つ組み合わせて、意味の通じる${contentType}を作成せよ。
-造語でもOKだが、その組み合わせた言葉だけを見て日本語として意味が通じるものだけ出力すること。
-同じワードは1回だけ使用可能（一度組み合わせに使ったら他では使えない）。
-汚い言葉だけでなく、痛烈な批判・煽り・挑発・皮肉も作れ。
+        const dissFormatted = allDiss.map(e => `${e.word}/${e.reading}(${e.romaji})`);
+        const supportFormatted = allSupport.map(e => `${e.word}/${e.reading}(${e.romaji})`);
+
+        const combinePrompt = `以下の「攻撃パーツ」と「接続パーツ」を1つずつ組み合わせて、意味の通じる${contentType}フレーズを作成せよ。
+小学生でもわかる簡単な言葉のみ。組み合わせた言葉だけを見て日本語として意味が通じるものだけ出力すること。
+
+【重要ルール】
+・必ず「攻撃パーツ1つ」＋「接続パーツ1つ」の組み合わせにすること
+・攻撃パーツ同士の組み合わせは禁止（意味不明になるため）
+・同じパーツは1回だけ使用可能
+・順序は自由（接続が先でも攻撃が先でもよい）
+・例：「バカ＋やろう」→「バカやろう」、「邪魔＋だろう」→「邪魔だろう」、「俺が＋圧勝」→「俺が圧勝」
 
 【ターゲット】
 ${target}
 【レベル${level}/10: ${levelConfig.label}】
 
-【2文字パーツ】
-${comp2.join(", ")}
+【攻撃パーツ】
+${dissFormatted.join(", ")}
 
-【3文字パーツ】
-${comp3.join(", ")}
-
-【4文字パーツ】
-${comp4.join(", ")}
-
-【組み合わせ方】
-- 2文字+2文字、2文字+3文字、2文字+4文字、3文字+3文字、3文字+4文字 など
-- 順序は自由（前後入れ替えてもよい）
-- 意味が通じる組み合わせのみ出力
+【接続パーツ】
+${supportFormatted.join(", ")}
 
 【フォーマット】
 組み合わせワード/ひらがな読み(romaji)
-※前置き不要。成立する組み合わせを可能な限り多く出力。`;
+※前置き不要。成立する組み合わせを可能な限り多く出力。最低${remaining}個以上。`;
 
-      const combineResults = await Promise.allSettled([
-        ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: combinePrompt,
-          config: { ...geminiConfig, maxOutputTokens: 16384 },
-        }),
-        ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: combinePrompt + "\n\n先ほどとは異なる組み合わせパターンで、まだ使われていないパーツを優先して別の組み合わせを作れ。",
-          config: { ...geminiConfig, maxOutputTokens: 16384 },
-        }),
-      ]);
+        const combineResults = await Promise.allSettled([
+          ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: combinePrompt,
+            config: { ...geminiConfig, maxOutputTokens: 16384 },
+          }),
+          ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: combinePrompt + "\n\n先ほどとは異なる組み合わせパターンで、まだ使われていないパーツを優先して別の組み合わせを作れ。",
+            config: { ...geminiConfig, maxOutputTokens: 16384 },
+          }),
+        ]);
 
-      const combined: WordEntry[] = [];
-      const usedComponents = new Set<string>();
+        const combined: WordEntry[] = [];
 
-      for (const r of combineResults) {
-        if (r.status !== "fulfilled") continue;
-        for (const e of parseWordEntries(r.value.text || "")) {
-          if (seen.has(e.word)) continue;
-          if (combined.some(c => c.word === e.word)) continue;
-
-          const allComps = [...components[2], ...components[3], ...components[4]];
-          let matchedParts: string[] = [];
-          for (const c1 of allComps) {
-            if (usedComponents.has(c1.word)) continue;
-            for (const c2 of allComps) {
-              if (c2.word === c1.word || usedComponents.has(c2.word)) continue;
-              if (e.reading === c1.reading + c2.reading || e.reading === c2.reading + c1.reading) {
-                matchedParts = [c1.word, c2.word];
-                break;
-              }
+        for (const r of combineResults) {
+          if (r.status !== "fulfilled") continue;
+          for (const e of parseWordEntries(r.value.text || "")) {
+            if (direct.length + combined.length >= TOTAL_TARGET) break;
+            if (seen.has(e.word)) continue;
+            if (combined.some(c => c.word === e.word)) continue;
+            const len = e.reading.length;
+            if (len >= 4 && len <= 8) {
+              combined.push(e);
+              seen.add(e.word);
             }
-            if (matchedParts.length > 0) break;
           }
-
-          if (matchedParts.length === 2) {
-            combined.push(e);
-            seen.add(e.word);
-            for (const p of matchedParts) usedComponents.add(p);
-          }
+          if (direct.length + combined.length >= TOTAL_TARGET) break;
         }
-      }
 
-      logTiming("phase2");
-      send("generate", `Phase 2完了: 組み合わせ ${combined.length}個成立 (使用パーツ: ${usedComponents.size}個)`);
+        logTiming("phase2");
+        send("generate", `Phase 2完了: 組み合わせ ${combined.length}個成立`);
+
+        finalCombined = combined;
+      }
 
       if (heartbeat) clearInterval(heartbeat);
       logTiming("total");
-      const totalWords = direct.length + combined.length;
+      const totalWords = direct.length + finalCombined.length;
       const timingSummary = Object.entries(timings).map(([k, v]) => `${k}=${formatElapsed(v)}`).join(", ");
-      send("done", `完了: 直接${direct.length}個 + 組み合わせ${combined.length}個 = 計${totalWords}個 (${formatElapsed(Date.now() - startTime)}) [${timingSummary}]`);
+      send("done", `完了: 直接${direct.length}個 + 組み合わせ${finalCombined.length}個 = 計${totalWords}個 (${formatElapsed(Date.now() - startTime)}) [${timingSummary}]`);
 
       if (!disconnected) {
-        res.write(`data: ${JSON.stringify({ type: "result", direct, combined, total: totalWords })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: "result", direct, combined: finalCombined, total: totalWords })}\n\n`);
         if (typeof (res as any).flush === "function") (res as any).flush();
         res.end();
       }
