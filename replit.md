@@ -44,17 +44,15 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 
 ## Generation System (2-Phase, Target: 100 words)
 - **No count selector** — fixed recipe, stops at 100 total words
-- **Phase 1** (7 parallel AI calls):
-  - 3 calls: diss/attack parts (2文字×20, 3文字×20, 4文字×20)
-  - 3 calls: support/connector parts (2文字×20, 3文字×20, 4文字×20)
-  - 1 call: direct words (5文字×25, 6文字×25, 7文字×20)
+- **Phase 1** (3 parallel AI calls):
+  - 3 calls: diss/core words (2文字×20, 3文字×20, 4文字×20 = 60 cores)
 - **Phase 2** (2 parallel AI calls):
-  - AI combines 1 diss part + 1 support part into meaningful phrases (5-7文字)
-  - Rule: both parts must NOT be diss words (one diss + one connector)
-  - Examples: 「バカ＋やろう」「邪魔＋だろう」「俺が＋圧勝」
-  - Stops when combined + direct reaches 100 total
-- **Suffix dedup**: Max 2 words with same reading suffix (末尾2文字). Enforced server-side across direct+combined.
-- **Result format**: `{ type:"result", direct: WordEntry[], combined: WordEntry[], total }`
+  - Each diss core word gets words added before/after to form a complete phrase
+  - Max 7 characters (hiragana) per completed phrase
+  - Examples: 核「バカ」→「バカだろ」「おいバカ」, 核「ダサい」→「超ダサい」
+  - Stops at 100 total phrases
+- **Suffix dedup**: Max 2 words with same reading suffix (末尾2文字). Enforced server-side.
+- **Result format**: `{ type:"result", direct: WordEntry[], combined: [], total }`
 - **Language**: 小学生でもわかる簡単な言葉のみ (elementary school level vocabulary)
 - **Content types**: insults, criticism, provocation, taunting (挑発・煽り・批判) for levels 4+
 
@@ -90,12 +88,10 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - `DELETE /api/ng-words` - Clear all NG words
 
 ## Recent Changes
-- 2026-03-10: Suffix dedup: max 2 words with same 末尾2文字 (across direct+combined)
-- 2026-03-10: Direct words 5-7文字 only (removed 8文字)
-- 2026-03-10: Diss+support combination system (one diss + one connector, not two diss words)
-- 2026-03-10: Total target: 100 words per generation (combined + direct)
+- 2026-03-10: New 2-phase system: Phase1=diss cores (2/3/4文字×20), Phase2=extend with prefix/suffix (max 7文字)
+- 2026-03-10: Suffix dedup: max 2 words with same 末尾2文字, enforced server-side
+- 2026-03-10: Total target: 100 words per generation
 - 2026-03-10: Elementary school level vocabulary only (小学生でもわかる言葉)
-- 2026-03-10: 7 parallel AI calls in Phase 1 (3 diss + 3 support + 1 direct)
 - 2026-03-10: Vowel extraction includes 「ん」(n) when not followed by a vowel
 - 2026-03-10: Favorites grouped by last 2 vowels, sorted by 3+ vowel suffix match within groups
 - 2026-03-10: NG bulk copy button, paste-to-add for both DB and NG tabs

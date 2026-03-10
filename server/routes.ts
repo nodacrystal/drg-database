@@ -67,9 +67,8 @@ function parseWordEntries(section: string): WordEntry[] {
 }
 
 const DISS_TARGETS: Record<number, number> = { 2: 20, 3: 20, 4: 20 };
-const SUPPORT_TARGETS: Record<number, number> = { 2: 20, 3: 20, 4: 20 };
-const DIRECT_TARGETS: Record<number, number> = { 5: 25, 6: 25, 7: 20 };
 const TOTAL_TARGET = 100;
+const MAX_SAME_SUFFIX = 2;
 
 function formatElapsed(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -248,17 +247,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 【文字数ルール】ひらがな変換後の文字数。拗音・促音・撥音も各1文字。出力前に指折り確認！
 【フォーマット】各ワード「ワード/ひらがな読み(romaji)」形式。前置き不要。即座に出力。`;
 
-      send("generate", "Phase 1: ディスパーツ＋接続パーツ＋直接ワード生成中...");
+      send("generate", "Phase 1: ディスりワード生成中 (2文字×20, 3文字×20, 4文字×20)...");
       const genStart = Date.now();
 
       const dissPrompt = (cc: number, count: number, examples: string) =>
-        `${contentType}の攻撃パーツ（${cc}文字のみ）を生成せよ。これは組み合わせの「攻撃側」として使う。小学生でもわかる簡単な言葉のみ。\n\n【ターゲット】\n${target}\n${research}${ngSection}${ngAnalysisSection}${baseRules}\n\n===${cc}文字===\nワード/ひらがな(romaji)を${count + 5}個出力（目標${count}個）\n\n${examples}`;
-
-      const supportPrompt = (cc: number, count: number, examples: string) =>
-        `以下は攻撃ワードと組み合わせるための「接続パーツ」（${cc}文字のみ）を生成せよ。
-これ自体は攻撃的でなくてよい。攻撃ワードと組み合わせた時に文として成立させるための言葉。
-全て異なるワード。小学生でもわかる簡単な言葉のみ。造語不可。
-【フォーマット】各ワード「ワード/ひらがな読み(romaji)」形式。前置き不要。即座に出力。\n\n===${cc}文字===\nワード/ひらがな(romaji)を${count + 5}個出力（目標${count}個）\n\n${examples}`;
+        `${contentType}のディスりワード（${cc}文字のみ）を${count + 10}個生成せよ。これは後で前後に言葉を付け足して完成フレーズにする「核」となる。小学生でもわかる簡単な言葉のみ。\n\n【ターゲット】\n${target}\n${research}${ngSection}${ngAnalysisSection}${baseRules}\n\n===${cc}文字===\nワード/ひらがな(romaji)を${count + 10}個出力（目標${count}個）\n\n${examples}`;
 
       const phase1Promises = [
         ai.models.generateContent({
@@ -271,7 +264,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         ai.models.generateContent({
           model: "gemini-2.5-flash",
           contents: dissPrompt(3, DISS_TARGETS[3], level <= 3
-            ? `【例】\n天才/てんさい(tensai),凄い/すごい(sugoi)`
+            ? `【例】\n天才/てんさい(tensai),凄い/すごい(sugoi),最高/さいこう(saikou)`
             : `【例】\nダサい/ださい(dasai),無能/むのう(munou),ダメだ/だめだ(dameda),きもい/きもい(kimoi),うざい/うざい(uzai)`),
           config: geminiConfig,
         }),
@@ -282,45 +275,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             : `【例】\n嘘つき/うそつき(usotsuki),負け犬/まけいぬ(makeinu),ヘタクソ/へたくそ(hetakuso),役立たず/やくたたず(yakutatazu)`),
           config: geminiConfig,
         }),
-        ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: supportPrompt(2, SUPPORT_TARGETS[2],
-            `【例】\nだろ/だろ(daro),だな/だな(dana),かよ/かよ(kayo),だぜ/だぜ(daze),めが/めが(mega),おれ/おれ(ore),こら/こら(kora),のに/のに(noni)`),
-          config: geminiConfig,
-        }),
-        ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: supportPrompt(3, SUPPORT_TARGETS[3],
-            `【例】\nだろう/だろう(darou),やろう/やろう(yarou),みたい/みたい(mitai),以下の/いかの(ikano),俺が/おれが(orega),お前/おまえ(omae),丸出し/まるだし(marudashi)`),
-          config: geminiConfig,
-        }),
-        ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: supportPrompt(4, SUPPORT_TARGETS[4],
-            `【例】\nじゃねえ/じゃねえ(janee),みたいな/みたいな(mitaina),だろうが/だろうが(darouga),くせして/くせして(kuseshite),なんだよ/なんだよ(nandayo)`),
-          config: geminiConfig,
-        }),
-        ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: `${contentType}を生成せよ。5〜7文字の完成されたワード・フレーズ。小学生でもわかる簡単な言葉のみ使用すること。
-
-【超重要ルール：語尾・文末表現の重複禁止】
-同じ語尾・文末表現を複数のワードで使うな。「だろ」「だね」「だよ」「やろう」「だろう」「みたい」「くせに」等の文末表現は、それぞれ1回だけ使用可能。
-悪い例：「卑怯だろ」「ダサいだろ」「弱いだろ」→ 全部「だろ」で終わっている。禁止。
-良い例：「卑怯だろ」「ダサいかよ」「弱いくせに」→ 全て異なる語尾。OK。
-同じ意味で同じ文字を含む類似ワードも禁止。バリエーション豊かに。
-
-\n\n【ターゲット】\n${target}\n${research}${ngSection}${ngAnalysisSection}${baseRules}\n\n===5文字===\nワード/ひらがな(romaji),...(30個)\n===6文字===\nワード/ひらがな(romaji),...(30個)\n===7文字===\nワード/ひらがな(romaji),...(25個)\n\n【例】\n${level <= 3
-            ? `===5文字===\nすばらしい/すばらしい(subarashii)...\n===6文字===\nカリスマてき/かりすまてき(karisumateki)...\n===7文字===\nだいせんぱいです/だいせんぱいです(daisenpaidesuu)...`
-            : `===5文字===\nできそこない/できそこない(dekisokonai)...\n===6文字===\nおちぶれやろう/おちぶれやろう(ochibureyarou)...\n===7文字===\nのうたりんかよ/のうたりんかよ(noutarinkayo)...`}`,
-          config: { ...geminiConfig, maxOutputTokens: 16384 },
-        }),
       ];
 
       const phase1Results = await Promise.allSettled(phase1Promises);
       const dissEntries: WordEntry[] = [];
-      const supportEntries: WordEntry[] = [];
-      const directEntries: WordEntry[] = [];
 
       for (let i = 0; i < phase1Results.length; i++) {
         const r = phase1Results[i];
@@ -328,13 +286,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         for (const e of parseWordEntries(r.value.text || "")) {
           if (seen.has(e.word)) continue;
           const len = e.reading.length;
-          if (i <= 2) {
-            if (len >= 2 && len <= 4) dissEntries.push(e);
-          } else if (i <= 5) {
-            if (len >= 2 && len <= 4) supportEntries.push(e);
-          } else {
-            if (len >= 5 && len <= 7) directEntries.push(e);
-          }
+          if (len >= 2 && len <= 4) dissEntries.push(e);
         }
       }
 
@@ -347,124 +299,89 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         }
       }
 
-      const supportParts: Record<number, WordEntry[]> = { 2: [], 3: [], 4: [] };
-      for (const e of supportEntries) {
-        const len = e.reading.length;
-        if (supportParts[len] && supportParts[len].length < SUPPORT_TARGETS[len]) {
-          supportParts[len].push(e);
-          seen.add(e.word);
-        }
-      }
-
-      const direct: WordEntry[] = [];
-      const directByLen: Record<number, number> = { 5: 0, 6: 0, 7: 0 };
-      const suffixCounts: Record<string, number> = {};
-      const MAX_SAME_SUFFIX = 2;
-      for (const e of directEntries) {
-        const len = e.reading.length;
-        if (directByLen[len] !== undefined && directByLen[len] < DIRECT_TARGETS[len]) {
-          const suffix2 = e.reading.slice(-2);
-          if (suffix2.length === 2 && (suffixCounts[suffix2] || 0) >= MAX_SAME_SUFFIX) continue;
-          direct.push(e);
-          directByLen[len]++;
-          seen.add(e.word);
-          if (suffix2.length === 2) suffixCounts[suffix2] = (suffixCounts[suffix2] || 0) + 1;
-        }
-      }
-
       logTiming("phase1");
       const dissTotal = Object.values(dissParts).reduce((s, arr) => s + arr.length, 0);
-      const suppTotal = Object.values(supportParts).reduce((s, arr) => s + arr.length, 0);
-      send("generate", `Phase 1完了: 攻撃パーツ${dissTotal}個 + 接続パーツ${suppTotal}個 + 直接${direct.length}個`);
+      send("generate", `Phase 1完了: ディスりワード${dissTotal}個 (2文字:${dissParts[2].length}, 3文字:${dissParts[3].length}, 4文字:${dissParts[4].length})`);
 
-      let finalCombined: WordEntry[] = [];
-      const remaining = TOTAL_TARGET - direct.length;
-      if (remaining > 0) {
-        send("generate", `Phase 2: 組み合わせ生成中... (残り${remaining}個で${TOTAL_TARGET}個達成)`);
+      send("generate", `Phase 2: ディスりワードに前後を付け足してフレーズ化中... (目標${TOTAL_TARGET}個)`);
 
-        const allDiss = [...dissParts[2], ...dissParts[3], ...dissParts[4]];
-        const allSupport = [...supportParts[2], ...supportParts[3], ...supportParts[4]];
+      const allDiss = [...dissParts[2], ...dissParts[3], ...dissParts[4]];
+      const dissFormatted = allDiss.map(e => `${e.word}/${e.reading}(${e.romaji})`);
 
-        const dissFormatted = allDiss.map(e => `${e.word}/${e.reading}(${e.romaji})`);
-        const supportFormatted = allSupport.map(e => `${e.word}/${e.reading}(${e.romaji})`);
+      const extendPrompt = `以下のディスりワード（核）それぞれに、前か後ろに言葉を付け足して、意味の通じる${contentType}フレーズを作成せよ。
 
-        const combinePrompt = `以下の「攻撃パーツ」と「接続パーツ」を1つずつ組み合わせて、意味の通じる${contentType}フレーズを作成せよ。
-小学生でもわかる簡単な言葉のみ。組み合わせた言葉だけを見て日本語として意味が通じるものだけ出力すること。
-組み合わせ結果は5〜7文字（ひらがな換算）のフレーズのみ。
-
-【重要ルール】
-・必ず「攻撃パーツ1つ」＋「接続パーツ1つ」の組み合わせにすること
-・攻撃パーツ同士の組み合わせは禁止（意味不明になるため）
-・同じパーツは1回だけ使用可能
-・順序は自由（接続が先でも攻撃が先でもよい）
-・例：「バカ＋やろう」→「バカやろう」、「邪魔＋だろう」→「邪魔だろう」、「俺が＋圧勝」→「俺が圧勝」
+【生成ルール】
+1. 各ディスりワードの前か後ろに言葉を付け足して、完成したフレーズにすること
+2. 完成フレーズは最大7文字（ひらがな換算）まで
+3. ディスりワードがそのまま含まれていること（核を変形させない）
+4. 小学生でもわかる簡単な言葉のみ
+5. 全て異なるフレーズ。同じ意味・同じ構造の繰り返し禁止
 
 【超重要：語尾の重複禁止】
 同じ語尾・文末表現（ひらがな末尾2文字）を持つフレーズを複数出力するな。
-悪い例：「バカだろ」「クズだろ」「ダメだろ」→全て「だろ」で終わる。禁止。
-良い例：「バカだろ」「クズかよ」「ダメだね」→全て異なる語尾。OK。
+悪い例：「卑怯だろ」「ダサいだろ」「弱いだろ」→全て「だろ」で終わっている。禁止。
+良い例：「卑怯だろ」「ダサいかよ」「弱いくせに」→全て異なる語尾。OK。
+各フレーズの末尾2文字が全て異なるように工夫せよ。
+
+【例】
+核「バカ」→「バカだろ」「バカかよ」「おいバカ」
+核「ダサい」→「ダサいなお前」「超ダサい」
+核「ヘタクソ」→「ヘタクソめ」「超ヘタクソ」
 
 【ターゲット】
 ${target}
 【レベル${level}/10: ${levelConfig.label}】
 
-【攻撃パーツ】
+【ディスりワード一覧（核）】
 ${dissFormatted.join(", ")}
 
-【接続パーツ】
-${supportFormatted.join(", ")}
-
 【フォーマット】
-組み合わせワード/ひらがな読み(romaji)
-※前置き不要。成立する組み合わせを可能な限り多く出力。最低${remaining}個以上。`;
+完成フレーズ/ひらがな読み(romaji)
+※前置き不要。各核から最低1個以上、合計${TOTAL_TARGET + 20}個以上出力。語尾が全て異なるように！`;
 
-        const combineResults = await Promise.allSettled([
-          ai.models.generateContent({
-            model: "gemini-2.5-flash",
-            contents: combinePrompt,
-            config: { ...geminiConfig, maxOutputTokens: 16384 },
-          }),
-          ai.models.generateContent({
-            model: "gemini-2.5-flash",
-            contents: combinePrompt + "\n\n先ほどとは異なる組み合わせパターンで、まだ使われていないパーツを優先して別の組み合わせを作れ。",
-            config: { ...geminiConfig, maxOutputTokens: 16384 },
-          }),
-        ]);
+      const extendResults = await Promise.allSettled([
+        ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: extendPrompt,
+          config: { ...geminiConfig, maxOutputTokens: 16384 },
+        }),
+        ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: extendPrompt + "\n\n1つ目の回答とは異なるフレーズを作れ。同じ核でも別の付け足し方をせよ。語尾も異なるものにせよ。",
+          config: { ...geminiConfig, maxOutputTokens: 16384 },
+        }),
+      ]);
 
-        const combined: WordEntry[] = [];
+      const suffixCounts: Record<string, number> = {};
+      const allWords: WordEntry[] = [];
 
-        for (const r of combineResults) {
-          if (r.status !== "fulfilled") continue;
-          for (const e of parseWordEntries(r.value.text || "")) {
-            if (direct.length + combined.length >= TOTAL_TARGET) break;
-            if (seen.has(e.word)) continue;
-            if (combined.some(c => c.word === e.word)) continue;
-            const len = e.reading.length;
-            if (len >= 4 && len <= 7) {
-              const suffix2 = e.reading.slice(-2);
-              if (suffix2.length === 2 && (suffixCounts[suffix2] || 0) >= MAX_SAME_SUFFIX) continue;
-              combined.push(e);
-              seen.add(e.word);
-              if (suffix2.length === 2) suffixCounts[suffix2] = (suffixCounts[suffix2] || 0) + 1;
-            }
-          }
-          if (direct.length + combined.length >= TOTAL_TARGET) break;
+      for (const r of extendResults) {
+        if (r.status !== "fulfilled") continue;
+        for (const e of parseWordEntries(r.value.text || "")) {
+          if (allWords.length >= TOTAL_TARGET) break;
+          if (seen.has(e.word)) continue;
+          if (allWords.some(w => w.word === e.word)) continue;
+          const len = e.reading.length;
+          if (len < 3 || len > 7) continue;
+          const suffix2 = e.reading.slice(-2);
+          if (suffix2.length === 2 && (suffixCounts[suffix2] || 0) >= MAX_SAME_SUFFIX) continue;
+          allWords.push(e);
+          seen.add(e.word);
+          if (suffix2.length === 2) suffixCounts[suffix2] = (suffixCounts[suffix2] || 0) + 1;
         }
-
-        logTiming("phase2");
-        send("generate", `Phase 2完了: 組み合わせ ${combined.length}個成立`);
-
-        finalCombined = combined;
+        if (allWords.length >= TOTAL_TARGET) break;
       }
+
+      logTiming("phase2");
+      send("generate", `Phase 2完了: フレーズ ${allWords.length}個生成`);
 
       if (heartbeat) clearInterval(heartbeat);
       logTiming("total");
-      const totalWords = direct.length + finalCombined.length;
       const timingSummary = Object.entries(timings).map(([k, v]) => `${k}=${formatElapsed(v)}`).join(", ");
-      send("done", `完了: 直接${direct.length}個 + 組み合わせ${finalCombined.length}個 = 計${totalWords}個 (${formatElapsed(Date.now() - startTime)}) [${timingSummary}]`);
+      send("done", `完了: ${allWords.length}個 (${formatElapsed(Date.now() - startTime)}) [${timingSummary}]`);
 
       if (!disconnected) {
-        res.write(`data: ${JSON.stringify({ type: "result", direct, combined: finalCombined, total: totalWords })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: "result", direct: allWords, combined: [], total: allWords.length })}\n\n`);
         if (typeof (res as any).flush === "function") (res as any).flush();
         res.end();
       }

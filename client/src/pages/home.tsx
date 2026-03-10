@@ -550,9 +550,9 @@ export default function Home() {
 
             <div className="rounded-md bg-muted/30 border border-border/50 p-2.5 text-xs text-muted-foreground">
               <div className="font-medium mb-1">生成内容 (目標100個):</div>
-              <div>直接生成 + 組み合わせ = 5〜7文字のワード・フレーズ</div>
-              <div>語尾の重複禁止（同じ末尾2文字は1回のみ）</div>
-              <div>小学生でもわかる簡単な言葉のみ使用</div>
+              <div>Phase 1: ディスりワード生成 (2文字×20, 3文字×20, 4文字×20)</div>
+              <div>Phase 2: 各ワードの前後に付け足してフレーズ化 (最大7文字)</div>
+              <div>語尾の重複制限（同じ末尾2文字は最大2回）</div>
             </div>
 
             <Button onClick={handleGenerateDiss} disabled={isGenerating || !target} className="w-full" data-testid="button-generate-diss">
@@ -613,8 +613,7 @@ export default function Home() {
                     )}
                   </div>
                   <div className="space-y-4">
-                    {renderWordList("直接生成", Zap, directWords, 0)}
-                    {renderWordList("組み合わせ", Combine, combinedWords, directWords.length)}
+                    {renderWordList("生成ワード", Zap, getAllEntries(), 0)}
                   </div>
                   <div className="mt-4">
                     <Button onClick={addToFavorites} disabled={checkedWords.size === 0 || addFavMutation.isPending} variant="destructive" className="w-full" data-testid="button-add-favorites">
