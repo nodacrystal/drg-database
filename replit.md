@@ -43,13 +43,17 @@ A Japanese rap battle tool that uses Gemini AI to generate lyrics (6-10 chars) r
 - Within groups, words with 3+ matching vowel suffix sorted first
 
 ## Generation System (6-Parallel Lyric Generation by Vowel Pattern)
-- **2-step lyric creation**: (1) Generate tail word (韻の核, ≤5 chars) matching vowel pattern, (2) Add furi (フリ/導入) prefix to make 6-10 char lyric
+- **2-step lyric creation**: (1) Choose tail word (韻の核, ≤5 chars) from valid endings list, (2) Add furi (フリ/導入) prefix to make 6-10 char lyric
 - **6 parallel AI calls**: One per vowel pattern (ae/oe/ua/an/ao/iu), each generates 20 lyrics
-- **PATTERN_DATA constant**: Per-pattern ending examples and complete lyric examples for all 6 patterns
-- **PUNCHLINE_REFERENCE constant**: Japanese rap punchlines embedded as quality reference
-- **No ranking step**: All valid lyrics returned directly (no AI quality ranking)
-- **No supplement retries**: Single generation pass per pattern
+- **PATTERN_DATA constant**: Per-pattern `validEndings` (allowed tail words list) + `lyricExamples` (complete examples)
+- **Valid endings approach**: AI is given explicit list of allowed tail words per pattern (not abstract vowel rules)
+- **PUNCHLINE_REFERENCE constant**: Japanese rap punchlines as quality reference (compact)
+- **Flexible parser**: `parseWordEntries()` handles 5 formats: word/reading(romaji), reading(romaji), word(romaji), reading/romaji, word/romaji
+- **Mora counter**: `countMoraFromRomaji()` for length validation when reading has kanji
+- **Per-pattern rejection logging**: Logs parsed/accepted/rejected counts + vowel mismatch examples per pattern
+- **No ranking step**: All valid lyrics returned directly
 - **Result format**: `{ type:"result", direct: WordEntry[], combined: [], total }`
+- **Typical output**: ~80-90 lyrics per generation, ~15-45 seconds
 - **Language**: 小学生でもわかる簡単な言葉のみ (elementary school level vocabulary)
 - **Content types**: insults, criticism, provocation, taunting (挑発・煽り・批判) for levels 4+
 
@@ -85,15 +89,13 @@ A Japanese rap battle tool that uses Gemini AI to generate lyrics (6-10 chars) r
 - `POST /api/favorites/cleanup` - DB cleanup via SSE (rhyme dedup within groups only)
 
 ## Recent Changes
-- 2026-03-10: Generation rebuilt: 6 parallel AI calls (one per vowel pattern ae/oe/ua/an/ao/iu), 2-step lyric creation (tail word + furi prefix), 6-10 char lyrics
-- 2026-03-10: PATTERN_DATA constant with per-pattern ending examples and lyric examples
-- 2026-03-10: PUNCHLINE_REFERENCE constant: Japanese rap punchlines as quality reference
-- 2026-03-10: Removed: supplement retries, AI ranking step, TOTAL_TARGET/MIN_FOR_RANKING/MAX_SAME_SUFFIX constants, old 5-parallel batch system
-- 2026-03-10: Cleanup simplified: only rhyme dedup within groups (removed cluster merge logic)
-- 2026-03-10: Char range changed to 6-10 for stored lyrics
-- 2026-03-10: Rich target data: 5 fields (name/appearance/career/personality/evaluation) for ~130 targets (comedians + athletes)
-- 2026-03-10: Anti-praise enforcement: Level 4+ explicitly bans positive words
-- 2026-03-10: Elementary school level vocabulary only (小学生でもわかる言葉)
-- 2026-03-10: Vowel extraction includes 「ん」(n) when not followed by a vowel
-- 2026-03-10: Favorites grouped by last 2 vowels, sorted by 3+ vowel suffix match within groups
-- 2026-03-10: NG bulk copy button, paste-to-add for both DB and NG tabs
+- 2026-03-10: Prompt restructured: valid endings list approach (not abstract vowel rules), ~80-90 lyrics/gen in 15-45s
+- 2026-03-10: Flexible parser: handles 5 output formats (word/reading(romaji), reading(romaji), word(romaji), etc.)
+- 2026-03-10: Mora counter from romaji for length validation when kanji in reading
+- 2026-03-10: Per-pattern rejection logging (parsed/accepted/reject breakdown + vowel mismatch examples)
+- 2026-03-10: Prompt noise reduced: history capped at 80, NG words at 50, NG analysis at 80 words
+- 2026-03-10: Generation rebuilt: 6 parallel AI calls (one per vowel pattern ae/oe/ua/an/ao/iu), 2-step lyric creation
+- 2026-03-10: Cleanup simplified: only rhyme dedup within groups
+- 2026-03-10: Char range 6-10, elementary school vocabulary, anti-praise for level 4+
+- 2026-03-10: Rich target data: ~130 targets (comedians + athletes) with 5-field data
+- 2026-03-10: NG bulk copy, paste-to-add for both DB and NG tabs

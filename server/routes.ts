@@ -55,65 +55,126 @@ function extractVowels(romaji: string): string {
 }
 
 function parseWordEntries(section: string): WordEntry[] {
-  const lines = section.replace(/、/g, ",").replace(/\r\n/g, "\n").split("\n").map(l => l.trim()).filter(l => l.length > 0);
+  const lines = section.replace(/\r\n/g, "\n").split("\n").map(l => l.trim()).filter(l => l.length > 0);
   const entries: WordEntry[] = [];
   for (const line of lines) {
-    for (const item of line.split(",").map(s => s.trim()).filter(s => s.length > 0)) {
-      const match = item.match(/^(.+?)\s*[\/／]\s*([ぁ-ゟー]+)\s*[\(（]([a-zA-Z\s\-']+)[\)）]$/);
-      if (match) entries.push({ word: match[1].trim(), reading: match[2].trim(), romaji: match[3].trim().toLowerCase() });
+    const cleaned = line.replace(/^\d+[\.\)）、]\s*/, "").replace(/^[\[【][^\]】]*[\]】]\s*/, "").replace(/^[・●▸►\-]\s*/, "").replace(/^韻の核「[^」]*」→\s*/, "").trim();
+    if (!cleaned) continue;
+
+    let match: RegExpMatchArray | null;
+
+    match = cleaned.match(/^(.+?)\s*[\/／]\s*([ぁ-ゟー]+)\s*[\(（]\s*([a-zA-Z\s\-']+)\s*[\)）]/);
+    if (match) {
+      entries.push({ word: match[1].trim(), reading: match[2].trim(), romaji: match[3].trim().toLowerCase().replace(/\s+/g, "") });
+      continue;
+    }
+
+    match = cleaned.match(/^([ぁ-ゟー]{3,})\s*[\(（]\s*([a-zA-Z\s\-']+)\s*[\)）]/);
+    if (match) {
+      entries.push({ word: match[1].trim(), reading: match[1].trim(), romaji: match[2].trim().toLowerCase().replace(/\s+/g, "") });
+      continue;
+    }
+
+    match = cleaned.match(/^(.+?)\s*[\(（]\s*([a-zA-Z\s\-']+)\s*[\)）]/);
+    if (match && match[1].length >= 3) {
+      const word = match[1].trim();
+      entries.push({ word, reading: word, romaji: match[2].trim().toLowerCase().replace(/\s+/g, "") });
+      continue;
+    }
+
+    match = cleaned.match(/^([ぁ-ゟー]{3,})\s*[\/／]\s*([a-zA-Z\s\-']+)$/);
+    if (match) {
+      entries.push({ word: match[1].trim(), reading: match[1].trim(), romaji: match[2].trim().toLowerCase().replace(/\s+/g, "") });
+      continue;
+    }
+
+    match = cleaned.match(/^(.+?)\s*[\/／]\s*([a-zA-Z\s\-']+)$/);
+    if (match && match[1].length >= 3) {
+      const word = match[1].trim();
+      entries.push({ word, reading: word, romaji: match[2].trim().toLowerCase().replace(/\s+/g, "") });
+      continue;
     }
   }
   return entries;
 }
 
+function countMoraFromRomaji(romaji: string): number {
+  const clean = romaji.toLowerCase().replace(/[^a-z]/g, "");
+  let count = 0;
+  for (let i = 0; i < clean.length; i++) {
+    const c = clean[i];
+    if ("aiueo".includes(c)) {
+      count++;
+    } else if (c === "n" && (i === clean.length - 1 || !"aiueo".includes(clean[i + 1]))) {
+      count++;
+    } else if (i > 0 && c === clean[i - 1] && !"aiueo".includes(c) && c !== "n") {
+      count++;
+    }
+  }
+  return count;
+}
+
 const ALLOWED_VOWEL_SUFFIXES = ["ae", "oe", "ua", "an", "ao", "iu"];
 
-const PATTERN_DATA: Record<string, { endings: string; examples: string }> = {
+const PATTERN_DATA: Record<string, { validEndings: string; lyricExamples: string }> = {
   ae: {
-    endings: "おまえ, だめ, だぜ, ため, かげ, 負け(make), はげ, さらせ, だらけ",
-    examples: `・ダメなおまえ/だめなおまえ(damenaomae) ← 語尾「おまえ」
-・しわだらけ/しわだらけ(shiwadarake) ← 語尾「だらけ」
-・おまえはだめ/おまえはだめ(omaewadame) ← 語尾「だめ」`,
+    validEndings: `おまえ, だめ, だぜ, ため, かげ, 負け/まけ, はげ, さらせ, だらけ, 構え/かまえ, かかれ, しらけ, やれ, ふざけ, 逃げ/にげ, きえ`,
+    lyricExamples: `ダメなおまえ/だめなおまえ(damenaomae)
+うそだらけ/うそだらけ(usodarake)
+やっぱりだめ/やっぱりだめ(yapparidame)
+このくそはげ/このくそはげ(konokusohage)
+いいわけすんな/いいわけするな(iiwakesuruna) ←これはua、aeではない！`,
   },
   oe: {
-    endings: "声(koe), とけ, ぼけ, それ, どけ, ころせ, おそれ, もどれ",
-    examples: `・ガラガラごえ/がらがらごえ(garagaragoe) ← 語尾「ごえ」
-・いいかげんぼけ/いいかげんぼけ(iikagenboke) ← 語尾「ぼけ」
-・そこをどけ/そこをどけ(sokowodoke) ← 語尾「どけ」`,
+    validEndings: `ぼけ, どけ, 声/こえ, それ, これ, あれ, ほれ, もどれ, おこせ, 殺せ/ころせ, しょぼけ, おぼれ, 消え/きえ ←ieなのでoe不可`,
+    lyricExamples: `いいかげんぼけ/いいかげんぼけ(iikagenboke)
+きたないこえ/きたないこえ(kitanaikoe)
+じゃまだどけ/じゃまだどけ(jamadadoke)
+なんだそれ/なんだそれ(nandasore)
+うせろぼけ/うせろぼけ(useroboke)
+まじかよこれ/まじかよこれ(majikayokore)`,
   },
   ua: {
-    endings: "くさ, するな, づら, ぶた, くだ, つら, うざ, やるか",
-    examples: `・でしゃばるな/でしゃばるな(deshabaruna) ← 語尾「るな」
-・おまえはぶた/おまえはぶた(omaewabuta) ← 語尾「ぶた」
-・まぬけづら/まぬけづら(manukezura) ← 語尾「づら」`,
+    validEndings: `するな, くさ, づら, ぶた, つら, うざ, くだ, やるか, でるな, くるな, のるな, バカ, あるか`,
+    lyricExamples: `でしゃばるな/でしゃばるな(deshabaruna)
+おまえはくさ/おまえはくさ(omaewakusa)
+まぬけづら/まぬけづら(manukezura)
+このこぶた/このこぶた(konokobuta)
+いきがるな/いきがるな(ikigaruna)
+まじでうざ/まじでうざ(majideuza)`,
   },
   an: {
-    endings: "じゃん, さん, かん, だん, ばん, おっさん, はん, やん",
-    examples: `・うそつきじゃん/うそつきじゃん(usotsukijan) ← 語尾「じゃん」
-・ただのおっさん/ただのおっさん(tadanoossan) ← 語尾「おっさん」
-・へんなおじさん/へんなおじさん(hennaojisan) ← 語尾「おじさん」`,
+    validEndings: `じゃん, さん, かん, だん, ばん, おっさん, やん, はん, おじさん, にんげん ←enなのでan不可`,
+    lyricExamples: `うそつきじゃん/うそつきじゃん(usotsukijan)
+ただのおっさん/ただのおっさん(tadanoossan)
+へんなおじさん/へんなおじさん(hennaojisan)
+なっとくいかん/なっとくいかん(nattokuikan)
+もういやじゃん/もういやじゃん(mouiyajan)`,
   },
   ao: {
-    endings: "かよ, だろ, なよ, がお(顔), あほ, ざこ, たろ",
-    examples: `・もういいだろ/もういいだろ(mouiidaro) ← 語尾「だろ」
-・やめろかよ/やめろかよ(yamerokayo) ← 語尾「かよ」
-・ぶさいくがお/ぶさいくがお(busaikugao) ← 語尾「がお」`,
+    validEndings: `だろ, かよ, なよ, 顔/がお, あほ, ざこ, だよ, たろ, やろ, まろ, するなよ, やばいぞ`,
+    lyricExamples: `もういいだろ/もういいだろ(mouiidaro)
+まだやるかよ/まだやるかよ(madayarukayo)
+おまえはあほ/おまえはあほ(omaewaaho)
+ぶさいくがお/ぶさいくがお(busaikugao)
+おまえだよ/おまえだよ(omaedayo)
+やめろよなよ/やめろよなよ(yameronayo)`,
   },
   iu: {
-    endings: "きる, いく, すぎる, にく, おちる, つきる",
-    examples: `・でぶすぎる/でぶすぎる(debusugiru) ← 語尾「すぎる」
-・もうおちる/もうおちる(mouochiru) ← 語尾「おちる」
-・おまえきえていく/おまえきえていく(omaekieteiku) ← 語尾「いく」`,
+    validEndings: `すぎる, きる, いく, おちる, みる, しる, にく, つきる, ひく, きく, ちぎる, にる, ちる, びびる
+※語尾は必ず「〜る」「〜く」で終わる（ローマ字末尾が-iru or -iku）`,
+    lyricExamples: `でぶすぎる/でぶすぎる(debusugiru)
+もうおちる/もうおちる(mouochiru)
+えんをきる/えんをきる(enwokiru)
+きえていく/きえていく(kieteiku)
+おまえにく/おまえにく(omaeniku)
+うそみえみる/うそみえみる(usomiemiru)
+はよひっこめきる/はよひっこめきる(hayohikkomekiru) ←NG:9文字超`,
   },
 };
 
-const PUNCHLINE_REFERENCE = `【パンチライン参考 - このレベルのインパクトを目指せ】
-・「クリティカルな言葉、デジタルな音の上」韻: クリティカル/デジタル
-・「過去の傷跡、明日への足跡」韻: 傷跡(kizuato)/足跡(ashiato)
-・「冷徹なロジック、情熱的なマジック」韻: ロジック/マジック
-・「言葉の弾丸、心の眼差し」韻: 弾丸(dangan)/眼差し(manazashi)
-・「韻の弾み、人生の深み」韻: 弾み(hazumi)/深み(fukami)
-・「勘違いすんなパンチライン」韻: 勘違い/パンチライン`;
+const PUNCHLINE_REFERENCE = `このようなインパクトのあるパンチラインを参考にせよ:
+「クリティカルな言葉、デジタルな音の上」「過去の傷跡、明日への足跡」「冷徹なロジック、情熱的なマジック」`;
 
 function formatElapsed(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -268,7 +329,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         try {
           const r = await ai.models.generateContent({
             model: "gemini-2.5-flash",
-            contents: `以下はユーザーが拒否した日本語ワード一覧。どのような種類・傾向のワードが拒否されているか分析し、今後の生成で避けるべきパターンを箇条書き3-5行で簡潔に述べよ:\n${ngWordList.slice(-300).join("、")}`,
+            contents: `以下はユーザーが拒否した日本語ワード一覧。避けるべきパターンを3行以内で簡潔に述べよ:\n${ngWordList.slice(-80).join("、")}`,
             config: geminiConfig,
           });
           ngAnalysis = r.text || "";
@@ -276,58 +337,51 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         logTiming("ng-analysis");
       }
 
-      const ngList = ngWordList.slice(-100).join(",");
-      const ngSection = ngList ? `\n【NGワード - 生成禁止】\n${ngList}\n` : "";
-      const ngAnalysisSection = ngAnalysis ? `\n【NG傾向分析 - このような傾向のワードも避けよ】\n${ngAnalysis}\n` : "";
-      const research = researchResult ? `\n【リサーチ情報】\n${researchResult}\n` : "";
+      const ngAnalysisSection = ngAnalysis ? `\nNG傾向分析（避けよ）: ${ngAnalysis}` : "";
+      const research = researchResult ? `\nリサーチ: ${researchResult}` : "";
 
       const seen = new Set<string>([...existingWords, ...ngWordList]);
-      const historyList = existingWords.slice(-200).join(",") || "なし";
 
       const contentType = level <= 2 ? "リスペクト・称賛" : level === 3 ? "親しみ・愛あるイジり" : level === 4 ? "軽口・テレビ的イジり" : "ディスり・攻撃・挑発";
-      const antiPraise = level >= 4 ? `\n【禁止】褒め言葉・ポジティブ表現は一切使うな。全てが攻撃・批判・挑発・煽りであること。` : "";
+      const antiPraise = level >= 4 ? `\n全てが攻撃・批判・挑発・煽りであること。褒め言葉・ポジティブ表現は禁止。` : "";
 
       send("generate", `6パターンでリリック生成中... (×6並列)`);
 
+      const shortHistory = existingWords.slice(-80).join(",") || "なし";
+      const shortNg = ngWordList.length > 0 ? `\n生成禁止ワード: ${ngWordList.slice(-50).join(",")}` : "";
+
       const lyricPrompt = (pattern: string) => {
         const pd = PATTERN_DATA[pattern];
-        return `ターゲットへの${contentType}リリックを生成せよ。
+        return `【タスク】ターゲットへの${contentType}リリックを20個作れ。
+
+【最重要ルール: 語尾の制限】
+リリックの最後の単語（韻の核）は、以下のリストから選べ。リスト外の語尾は禁止:
+${pd.validEndings}
+
+【2ステップで作れ】
+1. 上のリストから「韻の核」（語尾、1〜5文字）を選ぶ
+2. その前に「フリ」（前振り）を付けて、全体6〜10文字のリリックにする
+
+【完成例】
+${pd.lyricExamples}
 
 【ターゲット】
 ${target}
 ${research}
-【レベル ${level}/10: ${levelConfig.label}】
-${levelConfig.instruction}
-${antiPraise}
-
-【韻パターン: ${pattern}】
-リリックの語尾が「${pattern}」の韻を踏むこと。
-ローマ字から母音(a,i,u,e,o)とn(「ん」で次が母音でない場合)を抽出した末尾2文字が「${pattern}」になる語尾を使え。
-
-語尾例（韻の核、1〜5文字）: ${pd.endings}
-
-【リリック完成例】
-${pd.examples}
-
-【作り方】
-1. 韻の核（語尾、1〜5文字）を決める
-2. その語尾の前にフリ（導入・前振り）を付けてリリックにする
-3. フリ＋語尾が自然な一つのフレーズとして成立すること
+【Lv.${level} ${levelConfig.label}】${levelConfig.instruction}${antiPraise}
 
 【ルール】
-- リリック全体が6〜10文字（ひらがな換算、拗音・促音・撥音・長音も各1文字）
-- 20個全て異なる語尾を使うこと（同じ語尾の重複禁止）
-- 小学生でもわかる簡単な日本語のみ
-- 途中で切れた不完全な文は禁止
-- ターゲット特化のパーソナルな内容にすること
-${ngSection}${ngAnalysisSection}
-【既出 - 禁止】${historyList}
+- リリック全体が6〜10文字（ひらがな換算）
+- 20個全て異なる語尾を使え
+- 小学生でもわかる簡単な言葉のみ
+- ターゲット特化の内容
+${shortNg}${ngAnalysisSection}
+既出禁止: ${shortHistory}
 
-${PUNCHLINE_REFERENCE}
-
-【出力】20個。1行1個:
-リリック/ひらがな(romaji)
-前置き不要。即座に出力。`;
+【出力】20個。1行1個。説明不要、即座に出力:
+リリック/ひらがなよみ(romaji)
+例: ダメなおまえ/だめなおまえ(damenaomae)
+※必ず「/」の後にひらがな読みを書き、(romaji)を付けること`;
       };
 
       const genResults = await Promise.allSettled(
@@ -349,24 +403,42 @@ ${PUNCHLINE_REFERENCE}
         const pattern = ALLOWED_VOWEL_SUFFIXES[i];
         const result = genResults[i];
         if (result.status !== "fulfilled") {
-          console.log(`[GEN] Pattern ${pattern} failed:`, result.status === "rejected" ? result.reason : "unknown");
+          console.log(`[GEN] Pattern ${pattern} FAILED:`, result.status === "rejected" ? result.reason : "unknown");
           continue;
         }
+        const rawText = result.value.text || "";
+        const parsed = parseWordEntries(rawText);
+        if (parsed.length === 0) {
+          const preview = rawText.split("\n").slice(0, 5).join(" | ");
+          console.log(`[GEN:${pattern}] RAW (0 parsed): ${preview.slice(0, 300)}`);
+        }
         let patternCount = 0;
-        for (const e of parseWordEntries(result.value.text || "")) {
+        let rejectSeen = 0, rejectDup = 0, rejectLen = 0, rejectVowel = 0;
+        const vowelMismatches: string[] = [];
+        for (const e of parsed) {
           if (patternCount >= 20) break;
-          if (seen.has(e.word)) continue;
-          if (allWords.some(w => w.word === e.word)) continue;
-          const len = e.reading.length;
-          if (len < 6 || len > 10) continue;
+          if (seen.has(e.word)) { rejectSeen++; continue; }
+          if (allWords.some(w => w.word === e.word)) { rejectDup++; continue; }
+          const isHiraganaReading = /^[ぁ-ゟー]+$/.test(e.reading);
+          const len = isHiraganaReading ? e.reading.length : countMoraFromRomaji(e.romaji);
+          if (len < 6 || len > 10) { rejectLen++; continue; }
+          if (!isHiraganaReading) {
+            e.reading = e.word;
+          }
           const vowels = extractVowels(e.romaji);
           const vowelSuffix = vowels.length >= 2 ? vowels.slice(-2) : vowels;
-          if (vowelSuffix !== pattern) continue;
+          if (vowelSuffix !== pattern) {
+            rejectVowel++;
+            if (vowelMismatches.length < 5) vowelMismatches.push(`${e.word}(${e.romaji}→${vowels}→${vowelSuffix})`);
+            continue;
+          }
           allWords.push(e);
           seen.add(e.word);
           byPattern[pattern] = (byPattern[pattern] || 0) + 1;
           patternCount++;
         }
+        console.log(`[GEN:${pattern}] parsed=${parsed.length} accepted=${patternCount} | reject: seen=${rejectSeen} dup=${rejectDup} len=${rejectLen} vowel=${rejectVowel}`);
+        if (vowelMismatches.length > 0) console.log(`[GEN:${pattern}] vowel mismatches: ${vowelMismatches.join(", ")}`);
       }
 
       const patternSummary = ALLOWED_VOWEL_SUFFIXES.map(p => `${p}:${byPattern[p]}`).join(", ");
