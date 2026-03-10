@@ -42,12 +42,13 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - Favorites grouped by last 2 vowels (including n) as bucket key
 - Within groups, words with 3+ matching vowel suffix sorted first
 
-## Generation System (5-Parallel Batch, Target: 100 words)
-- **No count selector** — fixed recipe, stops at 100 total words
-- **5 parallel AI calls**: Each batch generates mixed 5/6/7/8文字 words (10 per char count = 40 per batch)
-  - With suffix dedup filtering, ~100 words survive from 200 raw candidates
-- **Supplement retries**: Up to 5 retries with 3 parallel calls each if initial batch < 100
+## Generation System (5-Parallel Batch → Vowel Filter → AI Ranking)
+- **5 parallel AI calls**: Each batch generates mixed 5/6/7/8文字 words (15 per char count = 60 per batch)
+- **Vowel-suffix filter**: Only words whose last-2-vowels match ae/oe/ua/an/ao/iu are accepted (~30% pass rate)
+- **Supplement retries**: Up to 3 retries with 3 parallel calls each if < 30 words after filter
+- **AI Ranking**: All surviving words ranked by naturalness + meaning + diss quality → top 30 selected + 78th word (proof of full evaluation)
 - **Suffix dedup**: Max 2 words with same reading suffix (末尾2文字). Enforced server-side via `suffixCounts` map
+- **Constants**: `TOTAL_TARGET=60`, `MIN_FOR_RANKING=30`, `MAX_SAME_SUFFIX=2`
 - **Result format**: `{ type:"result", direct: WordEntry[], combined: [], total }`
 - **Language**: 小学生でもわかる簡単な言葉のみ (elementary school level vocabulary)
 - **Content types**: insults, criticism, provocation, taunting (挑発・煽り・批判) for levels 4+
@@ -96,4 +97,6 @@ A Japanese rap battle tool that uses Gemini AI to generate words ranging from pu
 - 2026-03-10: Favorites grouped by last 2 vowels, sorted by 3+ vowel suffix match within groups
 - 2026-03-10: NG bulk copy button, paste-to-add for both DB and NG tabs
 - 2026-03-10: Post-generation AI validation: flags unnatural/forced/incomplete words and removes them before returning results
+- 2026-03-10: Vowel-suffix filter: only words with last-2-vowels matching ae/oe/ua/an/ao/iu pass tryAdd()
+- 2026-03-10: AI ranking replaces pass/fail validation: ranks all words, selects top 30 + 78th (proof of full eval)
 - 2026-03-10: DB cleanup button: reading-suffix dedup (same trailing kana at rhyme position → delete duplicate) + top-6 cluster merge (AI rewrites words to match top 6 cluster vowel patterns, deletes unconvertible words)

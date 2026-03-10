@@ -66,8 +66,9 @@ function parseWordEntries(section: string): WordEntry[] {
   return entries;
 }
 
-const TOTAL_TARGET = 100;
+const TOTAL_TARGET = 60;
 const MAX_SAME_SUFFIX = 2;
+const ALLOWED_VOWEL_SUFFIXES = ["ae", "oe", "ua", "an", "ao", "iu"];
 const CHAR_TARGETS: Record<number, number> = { 5: 30, 6: 30, 7: 25, 8: 25 };
 
 function formatElapsed(ms: number): string {
@@ -289,6 +290,27 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 以下のような表現は一切使うな: すごい、天才、男前、かっこいい、イケメン、素敵、尊敬、最高、面白い、上手い、さすが、センスいい
 全てのワードが「攻撃・批判・挑発・煽り・馬鹿にする」内容であること。1つでも褒め言葉が混じったら失格。` : "";
 
+      const vowelSuffixRule = `【母音末尾ルール - 最重要】
+生成するワードのローマ字から母音(a,i,u,e,o)とn(「ん」)を抽出した末尾2文字が、以下の6パターンのいずれかに該当すること。
+許可パターン: ae, oe, ua, an, ao, iu
+例:
+・「おまえ」→ omae → 母音 oae → 末尾2文字「ae」→ OK
+・「ばかだな」→ bakadana → 母音 aana → 末尾2文字「na」→ NG（許可外）
+・「だまれこら」→ damarekora → 母音 aaeoa → 末尾2文字「oa」→ NG（許可外）
+・「ざこすぎる」→ zakosugiru → 母音 aouiu → 末尾2文字「iu」→ OK
+・「まぬけだな」→ manukedana → 母音 aueana → 末尾2文字「na」→ NG
+・「しわだらけ」→ shiwadarake → 母音 iaaae → 末尾2文字「ae」→ OK
+・「へんなおじさん」→ hennaojisan → 母音 enaoian → 末尾2文字「an」→ OK
+・「くたばれよ」→ kutabareyo → 母音 uaaeo → 末尾2文字「eo」→ NG
+
+各パターンの語尾例:
+[ae]: 〜おまえ、〜だめ、〜だぜ、〜かげ、〜ため
+[oe]: 〜ごえ、〜とけ、〜ぐれ、〜もね
+[ua]: 〜くさ、〜するな、〜でぶだ、〜づら
+[an]: 〜じゃん、〜さん、〜だん、〜なん
+[ao]: 〜かよ、〜だろ、〜なよ、〜がお
+[iu]: 〜しつ、〜きる、〜いく、〜りっく`;
+
       const genPrompt = (batchNum: number) =>
         `ターゲットに向けた${contentType}を生成せよ。バッチ${batchNum}/5。
 
@@ -298,8 +320,9 @@ ${research}
 【レベル ${level}/10: ${levelConfig.label}】
 ${levelConfig.instruction}
 ${antiPraise}
+${vowelSuffixRule}
 【生成ルール - 全て厳守】
-1. 5文字・6文字・7文字・8文字の${level <= 3 ? "褒め言葉" : "悪口・挑発・批判・煽り"}を混ぜて合計40個生成
+1. 5文字・6文字・7文字・8文字の${level <= 3 ? "褒め言葉" : "悪口・挑発・批判・煽り"}を混ぜて合計60個生成
 2. 「文字数」＝ひらがなに変換した後の文字数。拗音(ゃゅょ)・促音(っ)・撥音(ん)・長音(ー)も各1文字
 3. 小学生でもわかる簡単な日本語のみ。難しい漢字・専門用語・文語体は禁止
 4. 造語OK（意味がわかること）
@@ -315,13 +338,13 @@ ${dissExamples}
 
 【出力】
 ===5文字===
-ワード/ひらがな(romaji) を10個
+ワード/ひらがな(romaji) を15個
 ===6文字===
-ワード/ひらがな(romaji) を10個
+ワード/ひらがな(romaji) を15個
 ===7文字===
-ワード/ひらがな(romaji) を10個
+ワード/ひらがな(romaji) を15個
 ===8文字===
-ワード/ひらがな(romaji) を10個
+ワード/ひらがな(romaji) を15個
 前置き不要。即座に出力。`;
 
       const genResults = await Promise.allSettled(
@@ -338,11 +361,20 @@ ${dissExamples}
       const allWords: WordEntry[] = [];
       const byLen: Record<number, number> = { 5: 0, 6: 0, 7: 0, 8: 0 };
 
+      let vowelRejectCount = 0;
+      let totalParsed = 0;
       function tryAdd(e: WordEntry): boolean {
+        totalParsed++;
         if (seen.has(e.word)) return false;
         if (allWords.some(w => w.word === e.word)) return false;
         const len = e.reading.length;
         if (len < 5 || len > 8) return false;
+        const vowels = extractVowels(e.romaji);
+        const vowelSuffix = vowels.length >= 2 ? vowels.slice(-2) : vowels;
+        if (!ALLOWED_VOWEL_SUFFIXES.includes(vowelSuffix)) {
+          vowelRejectCount++;
+          return false;
+        }
         const suffix2 = e.reading.slice(-2);
         if (suffix2.length === 2 && (suffixCounts[suffix2] || 0) >= MAX_SAME_SUFFIX) return false;
         allWords.push(e);
@@ -361,12 +393,14 @@ ${dissExamples}
       }
 
       logTiming("generate");
-      send("generate", `生成完了: ${allWords.length}個 (5文字:${byLen[5]}, 6文字:${byLen[6]}, 7文字:${byLen[7]}, 8文字:${byLen[8]})`);
+      console.log(`[FILTER] ${totalParsed} parsed, ${vowelRejectCount} rejected by vowel filter, ${allWords.length} accepted`);
+      send("generate", `生成完了: ${allWords.length}個 (母音フィルタ除外: ${vowelRejectCount}個) (5文字:${byLen[5]}, 6文字:${byLen[6]}, 7文字:${byLen[7]}, 8文字:${byLen[8]})`);
 
+      const MIN_FOR_RANKING = 30;
       let retryCount = 0;
-      while (allWords.length < TOTAL_TARGET && retryCount < 5) {
+      while (allWords.length < MIN_FOR_RANKING && retryCount < 3) {
         retryCount++;
-        const shortage = TOTAL_TARGET - allWords.length;
+        const shortage = MIN_FOR_RANKING - allWords.length;
         send("generate", `追加生成中... (残り${shortage}個, リトライ${retryCount})`);
 
         const usedSuffixList = Object.entries(suffixCounts).filter(([,v]) => v >= MAX_SAME_SUFFIX).map(([k]) => k).join(",");
@@ -381,6 +415,8 @@ ${dissExamples}
 小学生でもわかる簡単な言葉。造語OK（意味がわかること）。
 ${level <= 3 ? "褒め言葉・称賛" : "悪口・指摘・挑発・批判・煽り"}など種類を散らせ。5文字・6文字・7文字・8文字を混ぜること。
 途中で切れた不完全な文は禁止。意味の通じる完結した表現のみ。${supplementAntiPraise}
+【母音末尾ルール - 最重要】ローマ字の母音(a,i,u,e,o)+n抽出後の末尾2文字が ae,oe,ua,an,ao,iu のいずれかであること。
+語尾例: [ae]〜おまえ/だめ/だぜ [oe]〜ごえ/とけ/もね [ua]〜くさ/するな/づら [an]〜じゃん/さん [ao]〜かよ/だろ/なよ [iu]〜すぎる/いく
 以下のひらがな末尾2文字で終わるワードは作るな: ${usedSuffixList}
 以下のワードと同じもの禁止: ${alreadyList}
 ${ngSection}
@@ -401,49 +437,55 @@ ${ngSection}
         send("generate", `追加生成${retryCount}回目完了: ${allWords.length}個 (5文字:${byLen[5]}, 6文字:${byLen[6]}, 7文字:${byLen[7]}, 8文字:${byLen[8]})`);
       }
 
-      send("validate", `品質チェック中... (${allWords.length}個を検証)`);
+      send("validate", `品質評価中... (${allWords.length}個をランキング)`);
       try {
-        const validateResult = await ai.models.generateContent({
+        const rankResult = await ai.models.generateContent({
           model: "gemini-2.5-flash",
-          contents: `以下の日本語ワードリストを品質チェックせよ。不良品のワード番号（1始まり）のみ出力せよ。
+          contents: `以下の${allWords.length}個のディスりワードを品質評価し、ランキングせよ。
 
-【不良品の基準】
-・文字数合わせのために言葉が途中で切れている（例：「おまえの」→不完全）
-・日本語として不自然・意味不明な言葉
-・一般的でない造語で意味が通じない
-・同じような意味のワードが重複している（例：「バカだ」と「バカだな」は許容、「ダメだ」と「ダメだ」は不良）
+【評価基準】（各10点満点、合計30点）
+1. 自然さ: 日本語として違和感がないか？不完全・意味不明でないか？
+2. 意味伝達: 言いたいことが一発で伝わるか？
+3. ディスり力: 悪口・煽り・批判として刺さるか？インパクトがあるか？
 
 【ワードリスト】
 ${allWords.map((w, i) => `${i + 1}. ${w.word}（${w.reading}）`).join("\n")}
 
-不良品がない場合は「なし」と出力。不良品がある場合は番号をカンマ区切りで出力（例: 3,15,42）。前置き不要。`,
-          config: { ...geminiConfig, maxOutputTokens: 2048 },
+【出力】全${allWords.length}個を評価し、評価の高い順に番号を並べよ。
+フォーマット: 1位の番号,2位の番号,3位の番号,...,${allWords.length}位の番号
+カンマ区切りの数字のみ。前置き・説明不要。全${allWords.length}個の番号を必ず出力すること。`,
+          config: { ...geminiConfig, maxOutputTokens: 4096 },
         });
-        const validateText = (validateResult.text || "").trim();
-        if (validateText && validateText !== "なし") {
-          const rawNums = validateText.match(/\d+/g)?.map(n => parseInt(n) - 1) || [];
-          const badIndices = [...new Set(rawNums)].filter(i => i >= 0 && i < allWords.length);
-          if (badIndices.length > 0) {
-            const maxRemove = Math.min(badIndices.length, Math.floor(allWords.length * 0.4));
-            const toRemove = badIndices.slice(0, maxRemove);
-            const removeSet = new Set(toRemove);
-            const removed = toRemove.map(i => allWords[i].word);
-            const filtered = allWords.filter((_, i) => !removeSet.has(i));
-            allWords.length = 0;
-            allWords.push(...filtered);
-            const msg = badIndices.length > maxRemove
-              ? `品質チェック完了: ${removed.length}個除去 (${badIndices.length}個検出、上限${maxRemove}個) → ${allWords.length}個`
-              : `品質チェック完了: ${removed.length}個の不良品を除去 → ${allWords.length}個`;
-            send("validate", msg);
-            console.log(`[VALIDATE] Removed ${removed.length}: ${removed.join(", ")}`);
-          } else {
-            send("validate", `品質チェック完了: 問題なし (${allWords.length}個)`);
+
+        const rankText = (rankResult.text || "").trim();
+        const rankedNums = rankText.match(/\d+/g)?.map(n => parseInt(n)) || [];
+        const validRanked = [...new Set(rankedNums)].filter(n => n >= 1 && n <= allWords.length);
+
+        if (validRanked.length >= 30) {
+          const top30Indices = validRanked.slice(0, 30).map(n => n - 1);
+          const rank78Index = validRanked.length >= 78 ? validRanked[77] - 1 : -1;
+
+          const ranked: WordEntry[] = top30Indices.map(i => allWords[i]);
+          const rank78Word = rank78Index >= 0 && rank78Index < allWords.length ? allWords[rank78Index] : null;
+
+          send("validate", `品質評価完了: ${allWords.length}個を評価 → 上位30個を選出`);
+          if (rank78Word) {
+            send("validate", `78位: ${rank78Word.word}（${rank78Word.reading}）`);
+          }
+          console.log(`[RANK] ${allWords.length}個評価 → 上位30: ${ranked.map(w => w.word).join(", ")}`);
+          if (rank78Word) console.log(`[RANK] 78位: ${rank78Word.word}`);
+
+          allWords.length = 0;
+          allWords.push(...ranked);
+          if (rank78Word && !ranked.some(w => w.word === rank78Word.word)) {
+            allWords.push(rank78Word);
           }
         } else {
-          send("validate", `品質チェック完了: 問題なし (${allWords.length}個)`);
+          send("validate", `品質評価: ランキング解析不能 (${validRanked.length}個のみ取得) → 全${allWords.length}個を出力`);
         }
       } catch (e) {
-        send("validate", `品質チェックスキップ (${allWords.length}個)`);
+        send("validate", `品質評価スキップ (${allWords.length}個をそのまま出力)`);
+        console.log(`[RANK] Error:`, e);
       }
       logTiming("validate");
 
