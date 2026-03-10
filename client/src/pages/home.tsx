@@ -11,7 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
   Flame, Mic2, Sparkles, Zap, AlertTriangle, Loader2, Star,
-  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart, Plus, Combine, Wrench,
+  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart, Plus, Wrench,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -20,6 +20,11 @@ interface FavWord { id: number; word: string; reading: string; romaji: string; v
 interface FavGroup { vowels: string; words: FavWord[]; }
 interface NgWord { id: number; word: string; reading: string; romaji: string; }
 interface ProgressLog { time: string; detail: string; elapsed: string; }
+interface GenerationResult {
+  groups: Record<string, WordEntry[]>;
+  ungrouped: WordEntry[];
+  total: number;
+}
 
 function extractVowels(romaji: string): string {
   const r = romaji.toLowerCase();
@@ -37,17 +42,28 @@ function extractVowels(romaji: string): string {
   return result;
 }
 
-const LEVEL_INFO: Record<number, { label: string; color: string; icon: string }> = {
-  1:  { label: "リスペクト", color: "text-blue-400", icon: "respect" },
-  2:  { label: "称賛", color: "text-cyan-400", icon: "praise" },
-  3:  { label: "親しみ", color: "text-green-400", icon: "friendly" },
-  4:  { label: "軽口", color: "text-lime-400", icon: "light" },
-  5:  { label: "毒舌", color: "text-yellow-400", icon: "poison" },
-  6:  { label: "辛辣", color: "text-amber-400", icon: "sharp" },
-  7:  { label: "攻撃", color: "text-orange-400", icon: "attack" },
-  8:  { label: "過激", color: "text-red-400", icon: "extreme" },
-  9:  { label: "暴言", color: "text-red-500", icon: "violent" },
-  10: { label: "放禁", color: "text-red-600", icon: "banned" },
+const VOWEL_PATTERNS = ["ae", "oe", "ua", "an", "ao", "iu"];
+
+const PATTERN_COLORS: Record<string, string> = {
+  ae: "bg-rose-500/20 text-rose-300 border-rose-500/30",
+  oe: "bg-amber-500/20 text-amber-300 border-amber-500/30",
+  ua: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30",
+  an: "bg-sky-500/20 text-sky-300 border-sky-500/30",
+  ao: "bg-violet-500/20 text-violet-300 border-violet-500/30",
+  iu: "bg-pink-500/20 text-pink-300 border-pink-500/30",
+};
+
+const LEVEL_INFO: Record<number, { label: string; color: string }> = {
+  1:  { label: "リスペクト", color: "text-blue-400" },
+  2:  { label: "称賛", color: "text-cyan-400" },
+  3:  { label: "親しみ", color: "text-green-400" },
+  4:  { label: "軽口", color: "text-lime-400" },
+  5:  { label: "毒舌", color: "text-yellow-400" },
+  6:  { label: "辛辣", color: "text-amber-400" },
+  7:  { label: "攻撃", color: "text-orange-400" },
+  8:  { label: "過激", color: "text-red-400" },
+  9:  { label: "暴言", color: "text-red-500" },
+  10: { label: "放禁", color: "text-red-600" },
 };
 
 const LEVEL_BAR_COLORS: Record<number, string> = {
@@ -69,8 +85,7 @@ export default function Home() {
   const [target, setTarget] = useState("");
   const [level, setLevel] = useState(5);
   const [ageConfirmed, setAgeConfirmed] = useState(false);
-  const [directWords, setDirectWords] = useState<WordEntry[]>([]);
-  const [combinedWords, setCombinedWords] = useState<WordEntry[]>([]);
+  const [genResult, setGenResult] = useState<GenerationResult | null>(null);
   const [activeTab, setActiveTab] = useState<"gen" | "fav" | "ng">("gen");
   const [checkedWords, setCheckedWords] = useState<Set<string>>(new Set());
   const [isGenerating, setIsGenerating] = useState(false);
@@ -93,27 +108,35 @@ export default function Home() {
   const totalCount = favCountQuery.data?.total ?? favQuery.data?.total ?? 0;
   const ngCount = ngCountQuery.data?.total ?? ngWordsQuery.data?.total ?? 0;
 
-  const hasResults = directWords.length > 0 || combinedWords.length > 0;
-  const getAllEntries = (): WordEntry[] => [...directWords, ...combinedWords];
+  const getAllEntries = useCallback((): WordEntry[] => {
+    if (!genResult) return [];
+    const all: WordEntry[] = [];
+    for (const p of VOWEL_PATTERNS) {
+      if (genResult.groups[p]) all.push(...genResult.groups[p]);
+    }
+    all.push(...genResult.ungrouped);
+    return all;
+  }, [genResult]);
+
+  const hasResults = genResult !== null && genResult.total > 0;
 
   const toggleChecked = useCallback((word: string) => {
     setCheckedWords(prev => { const next = new Set(prev); next.has(word) ? next.delete(word) : next.add(word); return next; });
   }, []);
-  const selectAll = useCallback(() => { setCheckedWords(new Set(getAllEntries().map(e => e.word))); }, [directWords, combinedWords]);
+  const selectAll = useCallback(() => { setCheckedWords(new Set(getAllEntries().map(e => e.word))); }, [getAllEntries]);
   const deselectAll = useCallback(() => setCheckedWords(new Set()), []);
   const isAllSelected = hasResults ? checkedWords.size === getAllEntries().length && getAllEntries().length > 0 : false;
 
   const targetMutation = useMutation({
     mutationFn: async () => { const res = await apiRequest("GET", "/api/target"); return res.json(); },
-    onSuccess: (data: { target: string }) => { setTarget(data.target); setDirectWords([]); setCombinedWords([]); },
+    onSuccess: (data: { target: string }) => { setTarget(data.target); setGenResult(null); },
     onError: () => { toast({ title: "エラー", description: "ターゲット生成に失敗しました", variant: "destructive" }); },
   });
 
   const generateDissSSE = useCallback(async () => {
     setIsGenerating(true);
     setProgressLogs([]);
-    setDirectWords([]);
-    setCombinedWords([]);
+    setGenResult(null);
     setGenStatus("running");
     setTimerSeconds(0);
 
@@ -163,10 +186,18 @@ export default function Home() {
               addLog(data.detail, data.elapsed || "");
             } else if (data.type === "result") {
               setGenStatus("success");
-              setDirectWords(data.direct || []);
-              setCombinedWords(data.combined || []);
-              const all = [...(data.direct || []), ...(data.combined || [])];
-              setCheckedWords(new Set(all.map((e: WordEntry) => e.word)));
+              const result: GenerationResult = {
+                groups: data.groups || {},
+                ungrouped: data.ungrouped || [],
+                total: data.total || 0,
+              };
+              setGenResult(result);
+              const allWords: WordEntry[] = [];
+              for (const p of VOWEL_PATTERNS) {
+                if (result.groups[p]) allWords.push(...result.groups[p]);
+              }
+              allWords.push(...result.ungrouped);
+              setCheckedWords(new Set(allWords.map(e => e.word)));
             } else if (data.type === "error") {
               setGenStatus("error");
               toast({ title: "エラー", description: data.error, variant: "destructive" });
@@ -231,7 +262,7 @@ export default function Home() {
       } catch {}
     }
     setCheckedWords(new Set());
-  }, [checkedWords, directWords, combinedWords, toast]);
+  }, [checkedWords, getAllEntries, toast, addFavMutation, queryClient]);
 
   const copyFavorites = useCallback(async () => {
     try {
@@ -301,7 +332,7 @@ export default function Home() {
             if (data.type === "progress") {
               setCleanupLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
             } else if (data.type === "result") {
-              toast({ title: "整理完了", description: `重複削除${data.deleted}個, クラスタ統合${data.merged}個 (残り${data.total}語)` });
+              toast({ title: "整理完了", description: `重複削除${data.deleted}個 (残り${data.total}語)` });
               queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
               queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
             } else if (data.type === "error") {
@@ -317,7 +348,7 @@ export default function Home() {
   }, [toast, queryClient]);
 
   const handleGenerateDiss = useCallback(() => {
-    if (!target) { toast({ title: "ターゲット未設定", description: "先にターゲットを生成してください" }); return; }
+    if (!target) { toast({ title: "ターゲット未設定", description: "先にターゲットを選んでください" }); return; }
     if (level >= 8 && !ageConfirmed) { toast({ title: "年齢確認", description: "レベル8以上は年齢確認が必要です", variant: "destructive" }); return; }
     generateDissSSE();
   }, [target, level, ageConfirmed, generateDissSSE, toast]);
@@ -325,46 +356,110 @@ export default function Home() {
   const progressPercent = Math.min((totalCount / 10000) * 100, 100);
   const levelInfo = LEVEL_INFO[level];
 
-  const renderWordList = (label: string, icon: typeof Zap, entries: WordEntry[], startIndex: number) => {
-    if (entries.length === 0) return null;
-    const groupWords = entries.map(e => e.word);
-    const allChecked = groupWords.every(w => checkedWords.has(w));
-    const toggleGroup = () => {
+  const renderGroupedResults = () => {
+    if (!genResult) return null;
+
+    const toggleGroupWords = (words: WordEntry[]) => {
       setCheckedWords(prev => {
         const next = new Set(prev);
-        allChecked ? groupWords.forEach(w => next.delete(w)) : groupWords.forEach(w => next.add(w));
+        const wordNames = words.map(w => w.word);
+        const allChecked = wordNames.every(w => next.has(w));
+        wordNames.forEach(w => allChecked ? next.delete(w) : next.add(w));
         return next;
       });
     };
-    const Icon = icon;
+
     return (
-      <div className="space-y-2" key={label}>
-        <div className="flex items-center gap-2">
-          <Icon className="w-4 h-4 text-primary" />
-          <Badge variant="outline" className="text-xs font-mono">{label}</Badge>
-          <span className="text-xs text-muted-foreground">{entries.length}個</span>
-          <button onClick={toggleGroup} className="text-xs text-primary hover:underline ml-auto" data-testid={`button-toggle-group-${label}`}>
-            {allChecked ? "選択解除" : "全選択"}
-          </button>
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-          {entries.map((entry, i) => (
-            <motion.div
-              key={`${entry.word}-${startIndex + i}`}
-              initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
-              transition={{ delay: Math.min((startIndex + i) * 0.01, 0.5) }}
-              className="flex items-center gap-2 px-2.5 py-2 rounded-md border border-border/60 bg-card transition-colors"
-              data-testid={`word-row-${startIndex + i}`}
-            >
-              <Checkbox checked={checkedWords.has(entry.word)} onCheckedChange={() => toggleChecked(entry.word)} data-testid={`checkbox-word-${startIndex + i}`} />
-              <div className="flex-1 min-w-0 cursor-pointer select-none" onClick={() => toggleChecked(entry.word)} data-testid={`word-text-${startIndex + i}`}>
-                <span className="text-sm font-medium">{entry.word}</span>
-                {entry.reading && <span className="text-xs text-muted-foreground ml-1.5">({entry.reading})</span>}
-                <span className="text-xs text-primary/70 ml-1">[{extractVowels(entry.romaji)}]</span>
+      <div className="space-y-3" data-testid="gen-results-grouped">
+        {VOWEL_PATTERNS.map(pattern => {
+          const words = genResult.groups[pattern] || [];
+          if (words.length === 0) return null;
+          const allChecked = words.every(w => checkedWords.has(w.word));
+          return (
+            <div key={pattern} className="rounded-lg border border-border/50 bg-muted/10 overflow-hidden" data-testid={`result-group-${pattern}`}>
+              <div className="flex items-center gap-2 px-3 py-2 bg-muted/20 border-b border-border/30">
+                <Badge className={`font-mono text-xs px-2 py-0.5 border ${PATTERN_COLORS[pattern]}`}>*{pattern}</Badge>
+                <span className="text-xs text-muted-foreground font-medium">{words.length}個</span>
+                <button
+                  onClick={() => toggleGroupWords(words)}
+                  className="text-xs text-primary hover:underline ml-auto"
+                  data-testid={`button-toggle-group-${pattern}`}
+                >
+                  {allChecked ? "選択解除" : "全選択"}
+                </button>
               </div>
-            </motion.div>
-          ))}
-        </div>
+              <div className="p-2 flex flex-wrap gap-1.5">
+                {words.map((entry, i) => (
+                  <motion.div
+                    key={`${pattern}-${entry.word}-${i}`}
+                    initial={{ opacity: 0, scale: 0.9 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    transition={{ delay: Math.min(i * 0.02, 0.3) }}
+                    onClick={() => toggleChecked(entry.word)}
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border cursor-pointer select-none transition-all ${
+                      checkedWords.has(entry.word)
+                        ? "bg-primary/15 border-primary/40 text-foreground"
+                        : "bg-card border-border/40 text-muted-foreground hover:border-border"
+                    }`}
+                    data-testid={`word-chip-${pattern}-${i}`}
+                  >
+                    <Checkbox
+                      checked={checkedWords.has(entry.word)}
+                      onCheckedChange={() => toggleChecked(entry.word)}
+                      onClick={(e: React.MouseEvent) => e.stopPropagation()}
+                      className="w-3.5 h-3.5"
+                      data-testid={`checkbox-word-${pattern}-${i}`}
+                    />
+                    <span className="text-sm font-medium">{entry.word}</span>
+                    <span className="text-xs text-muted-foreground">({entry.reading})</span>
+                  </motion.div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+
+        {genResult.ungrouped.length > 0 && (
+          <div className="rounded-lg border border-border/50 bg-muted/10 overflow-hidden" data-testid="result-group-ungrouped">
+            <div className="flex items-center gap-2 px-3 py-2 bg-muted/20 border-b border-border/30">
+              <Badge variant="outline" className="font-mono text-xs px-2 py-0.5">未分類</Badge>
+              <span className="text-xs text-muted-foreground font-medium">{genResult.ungrouped.length}個</span>
+              <button
+                onClick={() => toggleGroupWords(genResult.ungrouped)}
+                className="text-xs text-primary hover:underline ml-auto"
+                data-testid="button-toggle-group-ungrouped"
+              >
+                {genResult.ungrouped.every(w => checkedWords.has(w.word)) ? "選択解除" : "全選択"}
+              </button>
+            </div>
+            <div className="p-2 flex flex-wrap gap-1.5">
+              {genResult.ungrouped.map((entry, i) => (
+                <motion.div
+                  key={`ungrouped-${entry.word}-${i}`}
+                  initial={{ opacity: 0, scale: 0.9 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  transition={{ delay: Math.min(i * 0.02, 0.3) }}
+                  onClick={() => toggleChecked(entry.word)}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border cursor-pointer select-none transition-all ${
+                    checkedWords.has(entry.word)
+                      ? "bg-primary/15 border-primary/40 text-foreground"
+                      : "bg-card border-border/40 text-muted-foreground hover:border-border"
+                  }`}
+                  data-testid={`word-chip-ungrouped-${i}`}
+                >
+                  <Checkbox
+                    checked={checkedWords.has(entry.word)}
+                    onCheckedChange={() => toggleChecked(entry.word)}
+                    onClick={(e: React.MouseEvent) => e.stopPropagation()}
+                    className="w-3.5 h-3.5"
+                  />
+                  <span className="text-sm font-medium">{entry.word}</span>
+                  <span className="text-xs text-muted-foreground">({entry.reading})</span>
+                </motion.div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     );
   };
@@ -615,10 +710,10 @@ export default function Home() {
             </AnimatePresence>
 
             <div className="rounded-md bg-muted/30 border border-border/50 p-2.5 text-xs text-muted-foreground">
-              <div className="font-medium mb-1">生成内容 (目標100個):</div>
-              <div>5文字・6文字・7文字・8文字の悪口・指摘・挑発を生成</div>
-              <div>文末表現の重複制限（同じ末尾2文字は最大2回）</div>
-              <div>小学生でもわかる言葉・造語OK（意味がわかること）</div>
+              <div className="font-medium mb-1">3ステップ生成:</div>
+              <div>STEP1: ディスワード300個を一括生成（6並列×50個）</div>
+              <div>STEP2: 品質フィルタ（子供でもわかるか？リリックとして成立するか？）</div>
+              <div>STEP3: 母音パターン別にグルーピング（ae/oe/ua/an/ao/iu）</div>
             </div>
 
             <Button onClick={handleGenerateDiss} disabled={isGenerating || !target} className="w-full" data-testid="button-generate-diss">
@@ -670,7 +765,7 @@ export default function Home() {
                     <div className="flex items-center gap-2">
                       <Zap className="w-5 h-5 text-primary" />
                       <h2 className="text-base font-semibold">生成結果</h2>
-                      <Badge variant="secondary" className="text-xs">{getAllEntries().length}個</Badge>
+                      <Badge variant="secondary" className="text-xs">{genResult?.total || 0}個</Badge>
                     </div>
                     {getAllEntries().length > 0 && (
                       <Button variant="ghost" size="sm" onClick={isAllSelected ? deselectAll : selectAll} data-testid="button-select-all">
@@ -678,9 +773,29 @@ export default function Home() {
                       </Button>
                     )}
                   </div>
-                  <div className="space-y-4">
-                    {renderWordList("生成ワード", Zap, getAllEntries(), 0)}
-                  </div>
+
+                  {genResult && (
+                    <div className="flex flex-wrap gap-1.5 mb-4">
+                      {VOWEL_PATTERNS.map(p => {
+                        const count = (genResult.groups[p] || []).length;
+                        return (
+                          <div key={p} className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded border ${PATTERN_COLORS[p]}`}>
+                            <span className="font-mono font-bold">*{p}</span>
+                            <span>{count}</span>
+                          </div>
+                        );
+                      })}
+                      {genResult.ungrouped.length > 0 && (
+                        <div className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border border-border/50 text-muted-foreground">
+                          <span className="font-mono">未分類</span>
+                          <span>{genResult.ungrouped.length}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {renderGroupedResults()}
+
                   <div className="mt-4">
                     <Button onClick={addToFavorites} disabled={checkedWords.size === 0 || addFavMutation.isPending} variant="destructive" className="w-full" data-testid="button-add-favorites">
                       {addFavMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Star className="w-4 h-4 mr-2" />}

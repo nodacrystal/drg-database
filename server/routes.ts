@@ -116,66 +116,6 @@ function countMoraFromRomaji(romaji: string): number {
 
 const ALLOWED_VOWEL_SUFFIXES = ["ae", "oe", "ua", "an", "ao", "iu"];
 
-const PATTERN_DATA: Record<string, { validEndings: string; lyricExamples: string }> = {
-  ae: {
-    validEndings: `おまえ, だめ, だぜ, ため, かげ, 負け/まけ, はげ, さらせ, だらけ, 構え/かまえ, かかれ, しらけ, やれ, ふざけ, 逃げ/にげ, きえ`,
-    lyricExamples: `ダメなおまえ/だめなおまえ(damenaomae)
-うそだらけ/うそだらけ(usodarake)
-やっぱりだめ/やっぱりだめ(yapparidame)
-このくそはげ/このくそはげ(konokusohage)
-いいわけすんな/いいわけするな(iiwakesuruna) ←これはua、aeではない！`,
-  },
-  oe: {
-    validEndings: `ぼけ, どけ, 声/こえ, それ, これ, あれ, ほれ, もどれ, おこせ, 殺せ/ころせ, しょぼけ, おぼれ, 消え/きえ ←ieなのでoe不可`,
-    lyricExamples: `いいかげんぼけ/いいかげんぼけ(iikagenboke)
-きたないこえ/きたないこえ(kitanaikoe)
-じゃまだどけ/じゃまだどけ(jamadadoke)
-なんだそれ/なんだそれ(nandasore)
-うせろぼけ/うせろぼけ(useroboke)
-まじかよこれ/まじかよこれ(majikayokore)`,
-  },
-  ua: {
-    validEndings: `するな, くさ, づら, ぶた, つら, うざ, くだ, やるか, でるな, くるな, のるな, バカ, あるか`,
-    lyricExamples: `でしゃばるな/でしゃばるな(deshabaruna)
-おまえはくさ/おまえはくさ(omaewakusa)
-まぬけづら/まぬけづら(manukezura)
-このこぶた/このこぶた(konokobuta)
-いきがるな/いきがるな(ikigaruna)
-まじでうざ/まじでうざ(majideuza)`,
-  },
-  an: {
-    validEndings: `じゃん, さん, かん, だん, ばん, おっさん, やん, はん, おじさん, にんげん ←enなのでan不可`,
-    lyricExamples: `うそつきじゃん/うそつきじゃん(usotsukijan)
-ただのおっさん/ただのおっさん(tadanoossan)
-へんなおじさん/へんなおじさん(hennaojisan)
-なっとくいかん/なっとくいかん(nattokuikan)
-もういやじゃん/もういやじゃん(mouiyajan)`,
-  },
-  ao: {
-    validEndings: `だろ, かよ, なよ, 顔/がお, あほ, ざこ, だよ, たろ, やろ, まろ, するなよ, やばいぞ`,
-    lyricExamples: `もういいだろ/もういいだろ(mouiidaro)
-まだやるかよ/まだやるかよ(madayarukayo)
-おまえはあほ/おまえはあほ(omaewaaho)
-ぶさいくがお/ぶさいくがお(busaikugao)
-おまえだよ/おまえだよ(omaedayo)
-やめろよなよ/やめろよなよ(yameronayo)`,
-  },
-  iu: {
-    validEndings: `すぎる, きる, いく, おちる, みる, しる, にく, つきる, ひく, きく, ちぎる, にる, ちる, びびる
-※語尾は必ず「〜る」「〜く」で終わる（ローマ字末尾が-iru or -iku）`,
-    lyricExamples: `でぶすぎる/でぶすぎる(debusugiru)
-もうおちる/もうおちる(mouochiru)
-えんをきる/えんをきる(enwokiru)
-きえていく/きえていく(kieteiku)
-おまえにく/おまえにく(omaeniku)
-うそみえみる/うそみえみる(usomiemiru)
-はよひっこめきる/はよひっこめきる(hayohikkomekiru) ←NG:9文字超`,
-  },
-};
-
-const PUNCHLINE_REFERENCE = `このようなインパクトのあるパンチラインを参考にせよ:
-「クリティカルな言葉、デジタルな音の上」「過去の傷跡、明日への足跡」「冷徹なロジック、情熱的なマジック」`;
-
 function formatElapsed(ms: number): string {
   const s = Math.floor(ms / 1000);
   const m = Math.floor(s / 60);
@@ -249,7 +189,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/target", (_req, res) => {
     const t = TARGETS[Math.floor(Math.random() * TARGETS.length)];
-    res.json({ target: `名前：${t.name}\n見た目：${t.appearance}\n経歴：${t.career}\n性格：${t.personality}\n周りからの評価：${t.evaluation}` });
+    res.json({ target: `名前：${t.name}\n見た目：${t.appearance}\n性格：${t.personality}` });
   });
 
   app.post("/api/diss", async (req, res) => {
@@ -296,32 +236,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       const targetName = target.split("\n")[0]?.replace("名前：", "").trim() || "";
 
-      const researchPrompt = level <= 3
-        ? `「${targetName}」の良い面を箇条書き。前置き不要。
-1. 代表的な功績・受賞歴 2. 尊敬される理由 3. 才能・スキル 4. 人柄の良さ 5. ファンに愛される理由
-各3-5個。`
-        : `「${targetName}」について、悪口・ディスに使えるネタを箇条書き。前置き不要。
-1. 代表的ギャグ・決めゼリフ（パロって馬鹿にできるもの）
-2. よく弄られるポイント・コンプレックス
-3. スキャンダル・失敗談・黒歴史
-4. 身体的特徴で馬鹿にされやすいもの
-5. 性格の悪い面・嫌われるポイント
-6. ネット上の悪口・蔑称・あだ名
-7. 弱点・痛い所・触れられたくない話題
-各3-5個。`;
-
       const dbStart = Date.now();
-      const [existingWords, ngWordList, researchResult] = await Promise.all([
+      const [existingWords, ngWordList] = await Promise.all([
         getWordStrings(),
         getNgWordStrings(),
-        ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: researchPrompt,
-          config: geminiConfig,
-        }).then(r => r.text || "").catch(() => ""),
       ]);
-      logTiming("db+research");
-      send("init", `準備完了 (DB: ${existingWords.length}語, NG: ${ngWordList.length}語, ${formatElapsed(Date.now() - dbStart)})`);
+      logTiming("db");
+      send("init", `準備完了 (DB: ${existingWords.length}語, NG: ${ngWordList.length}語)`);
 
       let ngAnalysis = "";
       if (ngWordList.length >= 5) {
@@ -337,121 +258,161 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         logTiming("ng-analysis");
       }
 
-      const ngAnalysisSection = ngAnalysis ? `\nNG傾向分析（避けよ）: ${ngAnalysis}` : "";
-      const research = researchResult ? `\nリサーチ: ${researchResult}` : "";
-
+      const ngSection = ngAnalysis ? `\n【NG傾向（避けよ）】${ngAnalysis}` : "";
       const seen = new Set<string>([...existingWords, ...ngWordList]);
+      const shortHistory = existingWords.slice(-80).join(",") || "なし";
+      const shortNg = ngWordList.length > 0 ? ngWordList.slice(-50).join(",") : "";
 
       const contentType = level <= 2 ? "リスペクト・称賛" : level === 3 ? "親しみ・愛あるイジり" : level === 4 ? "軽口・テレビ的イジり" : "ディスり・攻撃・挑発";
-      const antiPraise = level >= 4 ? `\n全てが攻撃・批判・挑発・煽りであること。褒め言葉・ポジティブ表現は禁止。` : "";
+      const antiPraise = level >= 4 ? `\n全てのワードが攻撃・批判・挑発・煽りであること。褒め言葉・ポジティブ表現は絶対に禁止。` : "";
 
-      send("generate", `6パターンでリリック生成中... (×6並列)`);
+      send("step1", `STEP1: ディスワード300個を生成中... (6並列×50個)`);
 
-      const shortHistory = existingWords.slice(-80).join(",") || "なし";
-      const shortNg = ngWordList.length > 0 ? `\n生成禁止ワード: ${ngWordList.slice(-50).join(",")}` : "";
+      const wordTypes = level <= 3
+        ? `- 褒め言葉・称賛（ターゲットの長所を称える）
+- 愛称・ニックネーム（親しみを込めた呼び名）
+- 応援・エール（励ましの言葉）
+- 尊敬の表現（才能や努力への敬意）`
+        : `- 悪口・罵倒（ストレートな悪口）
+- 嫌なあだ名（ターゲットの特徴を誇張した呼び名）
+- 挑発（相手を怒らせる言葉）
+- 弱点の指摘（痛い所を突く言葉）`;
 
-      const lyricPrompt = (pattern: string) => {
-        const pd = PATTERN_DATA[pattern];
-        return `【タスク】ターゲットへの${contentType}リリックを20個作れ。
+      const step1Prompt = (batchIndex: number) => `【タスク】「${targetName}」に対する${contentType}ワードを50個生成せよ。
 
-【最重要ルール: 語尾の制限】
-リリックの最後の単語（韻の核）は、以下のリストから選べ。リスト外の語尾は禁止:
-${pd.validEndings}
-
-【2ステップで作れ】
-1. 上のリストから「韻の核」（語尾、1〜5文字）を選ぶ
-2. その前に「フリ」（前振り）を付けて、全体6〜10文字のリリックにする
-
-【完成例】
-${pd.lyricExamples}
-
-【ターゲット】
+【ターゲット情報】
 ${target}
-${research}
+
 【Lv.${level} ${levelConfig.label}】${levelConfig.instruction}${antiPraise}
 
-【ルール】
-- リリック全体が6〜10文字（ひらがな換算）
-- 20個全て異なる語尾を使え
+【生成するワードの種類】
+${wordTypes}
+
+【絶対ルール】
+- 1ワード10文字以内（ひらがな換算）
 - 小学生でもわかる簡単な言葉のみ
-- ターゲット特化の内容
-${shortNg}${ngAnalysisSection}
-既出禁止: ${shortHistory}
+- 同じ助詞・助動詞で終わるワードを重複させるな（例：〜だろ、〜だろ は禁止）
+- ターゲット「${targetName}」に特化した内容
+- 造語OK（ただし意味が通じること）
+${shortNg ? `\n生成禁止ワード: ${shortNg}` : ""}${ngSection}
+既出（生成するな）: ${shortHistory}
+バッチ${batchIndex + 1}/6: 他バッチと重複しないよう多様な切り口で攻めろ
 
-【出力】20個。1行1個。説明不要、即座に出力:
-リリック/ひらがなよみ(romaji)
-例: ダメなおまえ/だめなおまえ(damenaomae)
+【出力形式】50個。1行1個。番号不要。説明不要。即座に出力:
+ワード/よみ(romaji)
+例: ポンコツ野郎/ぽんこつやろう(ponkotsuyarou)
 ※必ず「/」の後にひらがな読みを書き、(romaji)を付けること`;
-      };
 
-      const genResults = await Promise.allSettled(
-        ALLOWED_VOWEL_SUFFIXES.map(pattern =>
+      const step1Results = await Promise.allSettled(
+        Array.from({ length: 6 }, (_, i) =>
           ai.models.generateContent({
             model: "gemini-2.5-flash",
-            contents: lyricPrompt(pattern),
+            contents: step1Prompt(i),
             config: { ...geminiConfig, maxOutputTokens: 4096 },
           })
         )
       );
-      logTiming("generate");
+      logTiming("step1-generate");
 
-      const allWords: WordEntry[] = [];
-      const byPattern: Record<string, number> = {};
-      for (const p of ALLOWED_VOWEL_SUFFIXES) byPattern[p] = 0;
-
-      for (let i = 0; i < ALLOWED_VOWEL_SUFFIXES.length; i++) {
-        const pattern = ALLOWED_VOWEL_SUFFIXES[i];
-        const result = genResults[i];
+      const rawWords: WordEntry[] = [];
+      for (let i = 0; i < 6; i++) {
+        const result = step1Results[i];
         if (result.status !== "fulfilled") {
-          console.log(`[GEN] Pattern ${pattern} FAILED:`, result.status === "rejected" ? result.reason : "unknown");
+          console.log(`[STEP1] Batch ${i + 1} FAILED`);
           continue;
         }
-        const rawText = result.value.text || "";
-        const parsed = parseWordEntries(rawText);
-        if (parsed.length === 0) {
-          const preview = rawText.split("\n").slice(0, 5).join(" | ");
-          console.log(`[GEN:${pattern}] RAW (0 parsed): ${preview.slice(0, 300)}`);
+        const text = result.value.text || "";
+        const entries = parseWordEntries(text);
+        let batchAdded = 0;
+        for (const e of entries) {
+          if (seen.has(e.word)) continue;
+          if (rawWords.some(w => w.word === e.word)) continue;
+          const isHiragana = /^[ぁ-ゟー]+$/.test(e.reading);
+          const len = isHiragana ? e.reading.length : countMoraFromRomaji(e.romaji);
+          if (len < 3 || len > 10) continue;
+          if (!isHiragana) e.reading = e.word;
+          rawWords.push(e);
+          batchAdded++;
         }
-        let patternCount = 0;
-        let rejectSeen = 0, rejectDup = 0, rejectLen = 0, rejectVowel = 0;
-        const vowelMismatches: string[] = [];
-        for (const e of parsed) {
-          if (patternCount >= 20) break;
-          if (seen.has(e.word)) { rejectSeen++; continue; }
-          if (allWords.some(w => w.word === e.word)) { rejectDup++; continue; }
-          const isHiraganaReading = /^[ぁ-ゟー]+$/.test(e.reading);
-          const len = isHiraganaReading ? e.reading.length : countMoraFromRomaji(e.romaji);
-          if (len < 6 || len > 10) { rejectLen++; continue; }
-          if (!isHiraganaReading) {
-            e.reading = e.word;
-          }
-          const vowels = extractVowels(e.romaji);
-          const vowelSuffix = vowels.length >= 2 ? vowels.slice(-2) : vowels;
-          if (vowelSuffix !== pattern) {
-            rejectVowel++;
-            if (vowelMismatches.length < 5) vowelMismatches.push(`${e.word}(${e.romaji}→${vowels}→${vowelSuffix})`);
-            continue;
-          }
-          allWords.push(e);
-          seen.add(e.word);
-          byPattern[pattern] = (byPattern[pattern] || 0) + 1;
-          patternCount++;
+        console.log(`[STEP1] Batch ${i + 1}: parsed=${entries.length} added=${batchAdded}`);
+      }
+      send("step1", `STEP1完了: ${rawWords.length}個のワード生成`);
+      console.log(`[STEP1] Total raw words: ${rawWords.length}`);
+
+      send("step2", `STEP2: 品質フィルタリング中... (${rawWords.length}個を評価)`);
+
+      const wordListForFilter = rawWords.map(w => w.word).join("\n");
+      const step2Prompt = `【タスク】以下のワード一覧から品質チェックを行い、合格ワードだけを出力せよ。
+
+【評価基準】
+1. 子供でもわかる言葉か？→ 難しい漢語・専門用語・マイナーな慣用句は不合格
+2. リリック（ラップの歌詞）として成立するか？→ 自然に口に出せる、リズムがある
+3. 意味不明でないか？→ 造語でも意味が通じなければ不合格
+4. 短すぎないか？→ 3文字以下は不合格（ひらがな換算）
+
+【ワード一覧】
+${wordListForFilter}
+
+【出力】合格ワードのみ、1行1個。元の形そのまま出力。説明不要:`;
+
+      let filteredWordSet: Set<string>;
+      const rawWordSet = new Set(rawWords.map(w => w.word));
+      try {
+        const filterResult = await ai.models.generateContent({
+          model: "gemini-2.5-flash",
+          contents: step2Prompt,
+          config: { ...geminiConfig, maxOutputTokens: 8192 },
+        });
+        const filterText = filterResult.text || "";
+        const passedWords = filterText.split("\n")
+          .map(l => l.trim().replace(/^\d+[\.\)）、]\s*/, "").replace(/^[・●▸►\-]\s*/, "").replace(/^「/, "").replace(/」$/, "").trim())
+          .filter(l => l.length > 0 && rawWordSet.has(l));
+        filteredWordSet = new Set(passedWords);
+        if (filteredWordSet.size < rawWords.length * 0.1) {
+          console.log(`[STEP2] Filter pass rate too low (${filteredWordSet.size}/${rawWords.length}), keeping all words`);
+          filteredWordSet = rawWordSet;
+        } else {
+          console.log(`[STEP2] Filter passed: ${filteredWordSet.size}/${rawWords.length}`);
         }
-        console.log(`[GEN:${pattern}] parsed=${parsed.length} accepted=${patternCount} | reject: seen=${rejectSeen} dup=${rejectDup} len=${rejectLen} vowel=${rejectVowel}`);
-        if (vowelMismatches.length > 0) console.log(`[GEN:${pattern}] vowel mismatches: ${vowelMismatches.join(", ")}`);
+      } catch (err) {
+        console.log(`[STEP2] Filter failed, using all words:`, err);
+        filteredWordSet = rawWordSet;
+      }
+      logTiming("step2-filter");
+
+      const qualityWords = rawWords.filter(w => filteredWordSet.has(w.word));
+      send("step2", `STEP2完了: ${qualityWords.length}/${rawWords.length}個が合格`);
+
+      send("step3", `STEP3: 母音パターンでグルーピング中...`);
+
+      const groups: Record<string, WordEntry[]> = {};
+      for (const suffix of ALLOWED_VOWEL_SUFFIXES) groups[suffix] = [];
+      const ungrouped: WordEntry[] = [];
+
+      for (const w of qualityWords) {
+        const vowels = extractVowels(w.romaji);
+        const suffix = vowels.length >= 2 ? vowels.slice(-2) : "";
+        if (suffix && ALLOWED_VOWEL_SUFFIXES.includes(suffix)) {
+          groups[suffix].push(w);
+        } else {
+          ungrouped.push(w);
+        }
       }
 
-      const patternSummary = ALLOWED_VOWEL_SUFFIXES.map(p => `${p}:${byPattern[p]}`).join(", ");
-      console.log(`[GEN] Total: ${allWords.length} lyrics (${patternSummary})`);
-      send("generate", `生成完了: ${allWords.length}個 (${patternSummary})`);
+      const patternSummary = ALLOWED_VOWEL_SUFFIXES.map(p => `${p}:${groups[p].length}`).join(", ");
+      const totalGrouped = ALLOWED_VOWEL_SUFFIXES.reduce((sum, p) => sum + groups[p].length, 0);
+      console.log(`[STEP3] Grouped: ${totalGrouped} (${patternSummary}), ungrouped: ${ungrouped.length}`);
+      logTiming("step3-group");
+
+      send("step3", `STEP3完了: ${totalGrouped}個をグループ化 (${patternSummary})`);
 
       if (heartbeat) clearInterval(heartbeat);
       logTiming("total");
       const timingSummary = Object.entries(timings).map(([k, v]) => `${k}=${formatElapsed(v)}`).join(", ");
-      send("done", `完了: ${allWords.length}個 (${formatElapsed(Date.now() - startTime)}) [${timingSummary}]`);
+      send("done", `完了: ${totalGrouped + ungrouped.length}個 (グループ${totalGrouped} + 未分類${ungrouped.length}) [${timingSummary}]`);
 
       if (!disconnected) {
-        res.write(`data: ${JSON.stringify({ type: "result", direct: allWords, combined: [], total: allWords.length })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: "result", groups, ungrouped, total: totalGrouped + ungrouped.length })}\n\n`);
         if (typeof (res as any).flush === "function") (res as any).flush();
         res.end();
       }
@@ -459,8 +420,8 @@ ${shortNg}${ngAnalysisSection}
       if (heartbeat) clearInterval(heartbeat);
       console.error("Generation error:", error);
       if (!disconnected) {
-        try { res.write(`data: ${JSON.stringify({ type: "error", error: "リリック生成に失敗しました" })}\n\n`); res.end(); }
-        catch { try { res.status(500).json({ error: "リリック生成に失敗しました" }); } catch {} }
+        try { res.write(`data: ${JSON.stringify({ type: "error", error: "ワード生成に失敗しました" })}\n\n`); res.end(); }
+        catch { try { res.status(500).json({ error: "ワード生成に失敗しました" }); } catch {} }
       }
     }
   });
