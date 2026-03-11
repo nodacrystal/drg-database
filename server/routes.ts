@@ -488,23 +488,21 @@ ${wordListForFilter}
             }
           }
         }
-        const usedPerfectSuffixes = new Set<string>();
         const perfectEntries = Object.entries(perfectBuckets)
           .filter(([s, g]) => {
             const uniqueIds = [...new Set(g.map(w => w.id))];
             return uniqueIds.length >= 2 && uniqueIds.some(id => {
               const w = g.find(w2 => w2.id === id)!;
-              return w.vowels.length === s.length;
+              return w.vowels.length >= 4 && (s.length / w.vowels.length) >= 0.9;
             });
           })
           .sort((a, b) => b[0].length - a[0].length);
         for (const [ps, pWords] of perfectEntries) {
           const uniqueWords = [...new Map(pWords.map(w => [w.id, w])).values()]
             .filter(w => !assigned.has(w.id));
-          if (uniqueWords.length >= 2 && uniqueWords.some(w => w.vowels.length === ps.length)) {
+          if (uniqueWords.length >= 2 && uniqueWords.some(w => w.vowels.length >= 4 && (ps.length / w.vowels.length) >= 0.9)) {
             rhymeGroups.push({ suffix: ps, words: sortByRomaji(uniqueWords), tier: "perfect" });
             for (const w of uniqueWords) assigned.add(w.id);
-            usedPerfectSuffixes.add(ps);
           }
         }
 
