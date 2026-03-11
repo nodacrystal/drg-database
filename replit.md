@@ -42,11 +42,15 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - Favorites grouped by last 2 vowels (including n) as bucket key
 - Within groups, words sorted by romaji length (shortest first)
 - **Tiered Rhyme System** (within each vowel group, words sharing vowel suffixes):
+  - **Perfect Rhyme**: 4+ vowel suffix match AND at least one word's entire vowels == suffix (100% match), fuchsia/magenta styling
   - **伝説級硬い韻 (Legendary)**: 5+ vowel suffix match, yellow/gold styling
   - **超硬い韻 (Super Hard)**: 4 vowel suffix match, orange styling
   - **固い韻 (Hard)**: 3 vowel suffix match, primary/blue styling
-  - Assignment: legendary first, then super (unassigned only), then hard (unassigned only)
-  - Sorted by tier (legendary → super → hard) then by word count within tier
+  - Assignment: perfect first, then legendary, then super (unassigned only), then hard (unassigned only)
+  - Sorted by tier (perfect → legendary → super → hard) then by word count within tier
+  - **Filter buttons**: すべて / Perfect Rhyme / 伝説級 / 超硬い / 硬い to filter display
+- **Romaji Display**: Each word shows romaji below in small font, with rhyme-matching portion highlighted in tier color
+- **重複整理 (Dedup Cleanup)**: Dedicated button for tail-dedup-only cleanup using AI to detect same ending words across scripts (漢字/ひらがな/カタカナ). Keeps most impactful word, deletes rest, saves ending to NG
 - **Auto-cleanup**: Adding words via "選択ワードをデータベースに追加" automatically triggers the database "整理" cleanup process
 - **NG単語リスト (NG Word List)**: Stores banned suffix/ending terms. Words ending with any NG term are blocked from generation and addition. Cleanup saves only the shared suffix (not full word) to NG. Multi-select + batch delete supported.
 
@@ -139,6 +143,11 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - Dependency array only includes `toast` (stable) — not the functions themselves
 
 ## Recent Changes
+- 2026-03-11: Perfect Rhyme tier: 4+ vowel match AND 100% match rate, fuchsia styling, filter buttons for all tiers
+- 2026-03-11: Romaji display: each word shows romaji below with rhyme-matching portion highlighted
+- 2026-03-11: 重複整理: dedicated AI tail-dedup button with cross-script detection (漢字/ひらがな/カタカナ)
+- 2026-03-11: Check4 rewritten: AI-powered same-ending detection replacing hardcoded SPECIAL_TAILS
+- 2026-03-11: UI cleanup: removed paste textarea from DB tab, "やり直し"→"ターゲット変更"
 - 2026-03-11: Timer recording: generation and cleanup record elapsed time and compare with previous run (green = faster, red = slower)
 - 2026-03-11: Cleanup optimization: check4 parallelism 3→5, check5 parallelism 3→5
 - 2026-03-11: NG suffix fix: only meaningful words (顔, 野郎 etc.) go to NG, not generic 2-char hiragana reading tails

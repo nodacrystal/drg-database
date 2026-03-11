@@ -470,24 +470,52 @@ ${wordListForFilter}
         (buckets[key] ??= []).push(item);
       }
 
-      type RhymeGroup = { suffix: string; words: typeof items; tier: "hard" | "super" | "legendary" };
+      type RhymeGroup = { suffix: string; words: typeof items; tier: "hard" | "super" | "legendary" | "perfect" };
       const groups: { vowels: string; words: typeof items; hardRhymes: RhymeGroup[] }[] = [];
 
       for (const [suffix, words] of Object.entries(buckets)) {
         if (words.length === 0) continue;
 
-        const legendaryBuckets: Record<string, typeof items> = {};
-        const superBuckets: Record<string, typeof items> = {};
-        const hardBuckets: Record<string, typeof items> = {};
         const assigned = new Set<number>();
+        const rhymeGroups: RhymeGroup[] = [];
 
+        const perfectBuckets: Record<string, typeof items> = {};
         for (const w of words) {
+          if (w.vowels.length >= 4) {
+            for (let len = w.vowels.length; len >= 4; len--) {
+              const s = w.vowels.slice(-len);
+              (perfectBuckets[s] ??= []).push(w);
+            }
+          }
+        }
+        const usedPerfectSuffixes = new Set<string>();
+        const perfectEntries = Object.entries(perfectBuckets)
+          .filter(([s, g]) => {
+            const uniqueIds = [...new Set(g.map(w => w.id))];
+            return uniqueIds.length >= 2 && uniqueIds.some(id => {
+              const w = g.find(w2 => w2.id === id)!;
+              return w.vowels.length === s.length;
+            });
+          })
+          .sort((a, b) => b[0].length - a[0].length);
+        for (const [ps, pWords] of perfectEntries) {
+          const uniqueWords = [...new Map(pWords.map(w => [w.id, w])).values()]
+            .filter(w => !assigned.has(w.id));
+          if (uniqueWords.length >= 2 && uniqueWords.some(w => w.vowels.length === ps.length)) {
+            rhymeGroups.push({ suffix: ps, words: sortByRomaji(uniqueWords), tier: "perfect" });
+            for (const w of uniqueWords) assigned.add(w.id);
+            usedPerfectSuffixes.add(ps);
+          }
+        }
+
+        const legendaryBuckets: Record<string, typeof items> = {};
+        for (const w of words) {
+          if (assigned.has(w.id)) continue;
           if (w.vowels.length >= 5) {
             const s5 = w.vowels.slice(-5);
             (legendaryBuckets[s5] ??= []).push(w);
           }
         }
-        const rhymeGroups: RhymeGroup[] = [];
         for (const [s5, lWords] of Object.entries(legendaryBuckets)) {
           if (lWords.length >= 2) {
             rhymeGroups.push({ suffix: s5, words: sortByRomaji(lWords), tier: "legendary" });
@@ -495,6 +523,7 @@ ${wordListForFilter}
           }
         }
 
+        const superBuckets: Record<string, typeof items> = {};
         for (const w of words) {
           if (assigned.has(w.id)) continue;
           if (w.vowels.length >= 4) {
@@ -509,6 +538,7 @@ ${wordListForFilter}
           }
         }
 
+        const hardBuckets: Record<string, typeof items> = {};
         for (const w of words) {
           if (assigned.has(w.id)) continue;
           if (w.vowels.length >= 3) {
@@ -523,7 +553,7 @@ ${wordListForFilter}
           }
         }
 
-        const tierOrder = { legendary: 0, super: 1, hard: 2 };
+        const tierOrder = { perfect: 0, legendary: 1, super: 2, hard: 3 };
         rhymeGroups.sort((a, b) => tierOrder[a.tier] - tierOrder[b.tier] || b.words.length - a.words.length);
 
         const remaining = sortByRomaji(words.filter(w => !assigned.has(w.id)));
@@ -792,6 +822,163 @@ ${wordList}
     } catch { res.status(500).json({ error: "一括削除に失敗しました" }); }
   });
 
+  type TailDupItem = { id: number; word: string; reading: string; romaji: string; vowels: string; charCount: number; protected?: boolean };
+
+  async function aiTailDedup(
+    buckets: Record<string, TailDupItem[]>,
+    toDelete: Set<number>,
+    send: (step: string, detail: string) => void,
+    protectNone: boolean
+  ): Promise<{ deletedCount: number; ngSuffixes: Set<string> }> {
+    let tailDupCount = 0;
+    const ngSuffixes = new Set<string>();
+    const PARALLEL = 5;
+
+    const groupsToScan = Object.entries(buckets)
+      .map(([key, words]) => ({ key, words: words.filter(w => !toDelete.has(w.id)) }))
+      .filter(g => g.words.length >= 3);
+
+    const detectTasks: { key: string; words: TailDupItem[] }[] = [];
+    for (const g of groupsToScan) {
+      detectTasks.push({ key: g.key, words: g.words });
+    }
+
+    type EndingGroup = { ending: string; words: string[] };
+    const allEndingGroups: { key: string; endings: EndingGroup[]; srcWords: TailDupItem[] }[] = [];
+
+    for (let b = 0; b < detectTasks.length; b += PARALLEL) {
+      const batch = detectTasks.slice(b, b + PARALLEL);
+      const results = await Promise.all(batch.map(async g => {
+        const wordList = g.words.map(w => `${w.word}(${w.reading}/${w.romaji})`).join("\n");
+        const prompt = `以下の悪口ワードリストで「末尾の単語」が同じものをグループ化せよ。
+重要ルール:
+- 漢字・ひらがな・カタカナの表記違いでも同じ言葉なら同一グループ
+- フリガナの誤りで同じ言葉と認識できないケースも同一とみなす
+- 1文字だけの一致は除外、意味のある2文字以上の単語の一致のみ対象
+- 助詞・接尾辞（的、化、さ等）は除外
+
+ワード一覧:
+${wordList}
+
+JSON配列のみ出力（説明不要）:
+[{"ending":"共通末尾単語","words":["word1","word2",...]}]
+一致がない場合は空配列[]を返せ。`;
+        try {
+          const result = await aiGenerate(prompt);
+          const text = result.text || "";
+          const jsonMatch = text.match(/\[[\s\S]*\]/);
+          if (!jsonMatch) return [];
+          return JSON.parse(jsonMatch[0]) as EndingGroup[];
+        } catch { return []; }
+      }));
+      for (let i = 0; i < batch.length; i++) {
+        const endings = results[i].filter(e => e.words && e.words.length >= 2);
+        if (endings.length > 0) {
+          allEndingGroups.push({ key: batch[i].key, endings, srcWords: batch[i].words });
+        }
+      }
+    }
+
+    type PickTask = { candidates: TailDupItem[]; ending: string };
+    const pickTasks: PickTask[] = [];
+    for (const eg of allEndingGroups) {
+      for (const ending of eg.endings) {
+        const candidates = eg.srcWords.filter(w => ending.words.includes(w.word) && !toDelete.has(w.id));
+        if (candidates.length >= 2) {
+          send("check4", `「${ending.ending}」系 ${candidates.length}個検出`);
+          pickTasks.push({ candidates, ending: ending.ending });
+        }
+      }
+    }
+
+    for (let p = 0; p < pickTasks.length; p += PARALLEL) {
+      const pickBatch = pickTasks.slice(p, p + PARALLEL);
+      const pickResults = await Promise.all(pickBatch.map(async t => {
+        const prompt = `以下のワードから最も辛辣・強烈なパンチラインのワードを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${t.candidates.map(w => w.word).join("\n")}`;
+        try {
+          const result = await aiGenerate(prompt);
+          const best = (result.text || "").trim().replace(/^「/, "").replace(/」$/, "").trim();
+          const match = t.candidates.find(w => w.word === best);
+          return match ? match.id : t.candidates[0].id;
+        } catch { return t.candidates[0].id; }
+      }));
+      for (let j = 0; j < pickBatch.length; j++) {
+        const keepId = pickResults[j];
+        let anyDeleted = false;
+        for (const w of pickBatch[j].candidates) {
+          const isProtected = protectNone ? false : w.protected;
+          if (w.id !== keepId && !isProtected) { toDelete.add(w.id); tailDupCount++; anyDeleted = true; }
+        }
+        if (anyDeleted) {
+          ngSuffixes.add(pickBatch[j].ending);
+          const kept = pickBatch[j].candidates.find(w => w.id === keepId);
+          send("check4", `「${pickBatch[j].ending}」→「${kept?.word || "?"}」残し、${pickBatch[j].candidates.length - 1}個削除`);
+        }
+      }
+    }
+
+    return { deletedCount: tailDupCount, ngSuffixes };
+  }
+
+  app.post("/api/favorites/dedup-cleanup", async (req, res) => {
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    let disconnected = false;
+    res.on("close", () => { disconnected = true; if (heartbeat) clearInterval(heartbeat); });
+
+    try {
+      res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" });
+      heartbeat = setInterval(() => { if (!disconnected) res.write(": heartbeat\n\n"); }, 15000);
+      const startTime = Date.now();
+
+      const send = (step: string, detail: string) => {
+        if (disconnected) return;
+        const elapsed = `${((Date.now() - startTime) / 1000).toFixed(1)}s`;
+        res.write(`data: ${JSON.stringify({ type: "progress", step, detail, elapsed })}\n\n`);
+      };
+
+      send("dedup", "重複整理: 末尾単語一致を検出中...");
+      const allWords = await getAllWords();
+      const items = allWords.map(w => ({
+        id: w.id, word: w.word, reading: w.reading, romaji: w.romaji,
+        vowels: extractVowels(w.romaji), charCount: w.charCount
+      }));
+
+      const buckets: Record<string, typeof items> = {};
+      for (const item of items) {
+        const key = item.vowels.length >= 2 ? item.vowels.slice(-2) : item.vowels || "_";
+        (buckets[key] ??= []).push(item);
+      }
+
+      const toDelete = new Set<number>();
+      const result = await aiTailDedup(buckets, toDelete, send, true);
+
+      if (toDelete.size > 0) {
+        send("dedup", `${toDelete.size}個を削除中...`);
+        await deleteWords([...toDelete]);
+      }
+
+      if (result.ngSuffixes.size > 0) {
+        const existingNg = await getNgWordStrings();
+        const existingSet = new Set(existingNg);
+        const newNgs = [...result.ngSuffixes].filter(ng => !existingSet.has(ng));
+        if (newNgs.length > 0) {
+          await addNgWords(newNgs.map(ng => ({ word: ng, reading: "", romaji: "" })));
+        }
+        send("dedup", `NG単語追加: ${newNgs.length}個 (${newNgs.join(", ")})`);
+      }
+
+      const remaining = await getWordCount();
+      const elapsedMs = Date.now() - startTime;
+      res.write(`data: ${JSON.stringify({ type: "result", deleted: toDelete.size, total: remaining, elapsedMs, ngAdded: [...result.ngSuffixes] })}\n\n`);
+    } catch (error) {
+      console.error("Dedup cleanup error:", error);
+      if (!disconnected) res.write(`data: ${JSON.stringify({ type: "error", error: "重複整理に失敗しました" })}\n\n`);
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
+      if (!disconnected) res.end();
+    }
+  });
+
   app.post("/api/favorites/cleanup", async (req, res) => {
     let heartbeat: ReturnType<typeof setInterval> | null = null;
     let disconnected = false;
@@ -932,113 +1119,10 @@ ${wordList}
       }
       send("check3", `包含重複: ${containCount}個`);
 
-      send("check4", "チェック4: 末尾文字一致の重複を検出中...");
-      let tailDupCount = 0;
-
-      const SPECIAL_TAILS: Record<string, string[]> = {
-        "ao": ["顔", "がお", "gao"],
-        "ou": ["野郎", "やろう", "yarou", "やろ", "yaro"],
-      };
-
-      type AiPickTask = {
-        candidates: typeof items;
-        prompt: string;
-        groupKey: string;
-        label: string;
-      };
-
-      const aiPickWord = async (task: AiPickTask) => {
-        try {
-          const wordList = task.candidates.map(w => w.word).join("\n");
-          const pickResult = await aiGenerate(task.prompt);
-          const bestWord = (pickResult.text || "").trim().replace(/^「/, "").replace(/」$/, "").trim();
-          const bestMatch = task.candidates.find(w => w.word === bestWord);
-          return bestMatch ? bestMatch.id : task.candidates[0].id;
-        } catch {
-          return task.candidates[0].id;
-        }
-      };
-
-      const specialTasks: AiPickTask[] = [];
-      for (const [groupKey, groupWords] of Object.entries(buckets)) {
-        const specialTails = SPECIAL_TAILS[groupKey];
-        if (!specialTails) continue;
-        const alive = groupWords.filter(w => !toDelete.has(w.id));
-        if (alive.length < 2) continue;
-        const matchingWords = alive.filter(w =>
-          specialTails.some(tail => w.word.endsWith(tail) || w.reading.endsWith(tail) || w.romaji.endsWith(tail))
-        );
-        if (matchingWords.length <= 1) continue;
-        const tailLabel = specialTails[0];
-        send("check4", `[${groupKey}]「${tailLabel}」系 ${matchingWords.length}個 → AI選定中...`);
-        specialTasks.push({
-          candidates: matchingWords,
-          prompt: `以下のワードリストから最も強烈・インパクトがあるものを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${matchingWords.map(w => w.word).join("\n")}`,
-          groupKey,
-          label: tailLabel,
-        });
-      }
-
-      if (specialTasks.length > 0) {
-        const specialResults = await Promise.all(specialTasks.map(t => aiPickWord(t)));
-        for (let i = 0; i < specialTasks.length; i++) {
-          const keepId = specialResults[i];
-          let anyDeleted = false;
-          for (const w of specialTasks[i].candidates) {
-            if (w.id !== keepId && !w.protected) { toDelete.add(w.id); tailDupCount++; anyDeleted = true; }
-          }
-          if (anyDeleted) ngSuffixes.add(specialTasks[i].label);
-        }
-      }
-
-      const genericTasks: AiPickTask[] = [];
-      const genericFallbacks: { candidates: typeof items }[] = [];
-      for (const [groupKey, groupWords] of Object.entries(buckets)) {
-        const specialTails = SPECIAL_TAILS[groupKey];
-        const aliveAfterSpecial = groupWords.filter(w => !toDelete.has(w.id));
-        const tailMap = new Map<string, typeof items>();
-        for (const w of aliveAfterSpecial) {
-          const readingTail = w.reading.length >= 2 ? w.reading.slice(-2) : w.reading;
-          (tailMap.get(readingTail) ?? (tailMap.set(readingTail, []), tailMap.get(readingTail)!)).push(w);
-        }
-        for (const [tail, candidates] of tailMap.entries()) {
-          if (candidates.length <= 1) continue;
-          if (specialTails && specialTails.some(st => tail.endsWith(st.slice(-2)))) continue;
-          if (candidates.length <= 5) {
-            genericTasks.push({
-              candidates,
-              prompt: `以下の末尾「${tail}」で終わるワードから最も強烈・インパクトがあるものを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${candidates.map(w => w.word).join("\n")}`,
-              groupKey,
-              label: tail,
-            });
-          } else {
-            genericFallbacks.push({ candidates });
-          }
-        }
-      }
-
-      for (const fb of genericFallbacks) {
-        for (let k = 1; k < fb.candidates.length; k++) {
-          if (!fb.candidates[k].protected) { toDelete.add(fb.candidates[k].id); tailDupCount++; }
-        }
-      }
-
-      if (genericTasks.length > 0) {
-        send("check4", `末尾重複 ${genericTasks.length}グループをAI選定中...`);
-        const PICK_PARALLEL = 5;
-        for (let b = 0; b < genericTasks.length; b += PICK_PARALLEL) {
-          const batch = genericTasks.slice(b, b + PICK_PARALLEL);
-          const batchResults = await Promise.all(batch.map(t => aiPickWord(t)));
-          for (let i = 0; i < batch.length; i++) {
-            const keepId = batchResults[i];
-            for (const w of batch[i].candidates) {
-              if (w.id !== keepId && !w.protected) { toDelete.add(w.id); tailDupCount++; }
-            }
-          }
-        }
-      }
-
-      send("check4", `末尾重複: ${tailDupCount}個`);
+      send("check4", "チェック4: 末尾単語一致をAI検出中...");
+      const check4Result = await aiTailDedup(buckets, toDelete, send, false);
+      for (const ng of check4Result.ngSuffixes) ngSuffixes.add(ng);
+      send("check4", `末尾重複: ${check4Result.deletedCount}個`);
 
       send("check5", "チェック5: 意味的重複をAI検出中...");
       let semanticDupCount = 0;
@@ -1121,7 +1205,7 @@ ${wordList}`);
 
       if (heartbeat) clearInterval(heartbeat);
       const finalCount = await getWordCount();
-      const summary = `母音不一致${wrongVowelCount} + 表記重複${scriptDupCount} + 包含${containCount} + 末尾重複${tailDupCount} + 意味重複${semanticDupCount} = ${totalDeleted}個削除`;
+      const summary = `母音不一致${wrongVowelCount} + 表記重複${scriptDupCount} + 包含${containCount} + 末尾重複${check4Result.deletedCount} + 意味重複${semanticDupCount} = ${totalDeleted}個削除`;
       send("done", `整理完了: ${summary} (残り${finalCount}語, ${formatElapsed(Date.now() - startTime)})`);
 
       if (!disconnected) {

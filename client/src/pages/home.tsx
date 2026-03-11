@@ -11,13 +11,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
   Flame, Mic2, Sparkles, Zap, AlertTriangle, Loader2, Star,
-  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart, Plus, Wrench, Play, Search,
+  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart, Plus, Wrench, Play, Search, Filter,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
 interface WordEntry { word: string; reading: string; romaji: string; }
 interface FavWord { id: number; word: string; reading: string; romaji: string; vowels: string; charCount: number; }
-interface HardRhymeGroup { suffix: string; words: FavWord[]; tier: "hard" | "super" | "legendary"; }
+interface HardRhymeGroup { suffix: string; words: FavWord[]; tier: "hard" | "super" | "legendary" | "perfect"; }
 interface FavGroup { vowels: string; words: FavWord[]; hardRhymes?: HardRhymeGroup[]; }
 interface NgWord { id: number; word: string; reading: string; romaji: string; }
 interface ProgressLog { time: string; detail: string; elapsed: string; }
@@ -67,6 +67,19 @@ const LEVEL_BAR_COLORS: Record<number, string> = {
   9: "bg-red-500", 10: "bg-red-600",
 };
 
+function getRomajiHighlightIndex(romaji: string, suffixLen: number): number {
+  const r = romaji.toLowerCase();
+  const vowelPositions: number[] = [];
+  for (let i = 0; i < r.length; i++) {
+    if ("aeiou".includes(r[i])) vowelPositions.push(i);
+    else if (r[i] === "n" && (!r[i + 1] || !"aeiou".includes(r[i + 1]))) vowelPositions.push(i);
+  }
+  if (vowelPositions.length < suffixLen) return 0;
+  return vowelPositions[vowelPositions.length - suffixLen];
+}
+
+type RhymeFilter = "all" | "perfect" | "legendary" | "super" | "hard";
+
 function formatTimer(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
@@ -110,6 +123,8 @@ export default function Home() {
   const [prevGenTime, setPrevGenTime] = useState<number | null>(null);
   const [lastCleanupTime, setLastCleanupTime] = useState<number | null>(null);
   const [prevCleanupTime, setPrevCleanupTime] = useState<number | null>(null);
+  const [rhymeFilter, setRhymeFilter] = useState<RhymeFilter>("all");
+  const [isDedupRunning, setIsDedupRunning] = useState(false);
   const autoModeRef = useRef(false);
   const isCleaningUpRef = useRef(false);
   const cleanupPromiseRef = useRef<Promise<void> | null>(null);
@@ -484,6 +499,47 @@ export default function Home() {
     await cleanupPromiseRef.current;
   }, [toast, queryClient]);
 
+  const runDedupCleanup = useCallback(async () => {
+    if (isDedupRunning || isCleaningUp) return;
+    setIsDedupRunning(true);
+    setCleanupLogs([]);
+    try {
+      const response = await fetch("/api/favorites/dedup-cleanup", { method: "POST", headers: { "Content-Type": "application/json" } });
+      if (!response.ok) throw new Error("重複整理に失敗しました");
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("No reader");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.type === "progress") {
+              setCleanupLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
+            } else if (data.type === "result") {
+              toast({ title: "重複整理完了", description: `削除${data.deleted}個 (残り${data.total}語)` });
+              queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
+              queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
+              queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
+              queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
+            } else if (data.type === "error") {
+              toast({ title: "エラー", description: data.error, variant: "destructive" });
+            }
+          } catch {}
+        }
+      }
+    } catch {
+      toast({ title: "エラー", description: "重複整理に失敗しました", variant: "destructive" });
+    }
+    setIsDedupRunning(false);
+  }, [isDedupRunning, isCleaningUp, toast, queryClient]);
+
   const addWordsDirect = useCallback(async (words: WordEntry[]): Promise<{ added: number; total: number }> => {
     if (words.length === 0) return { added: 0, total: 0 };
     const response = await fetch("/api/favorites", {
@@ -827,13 +883,30 @@ export default function Home() {
                     {isScrutinizing ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Search className="w-3.5 h-3.5 mr-1" />}
                     精査
                   </Button>
-                  <Button variant="outline" size="sm" onClick={runCleanup} disabled={isCleaningUp || isScrutinizing || totalCount === 0} data-testid="button-cleanup-favorites">
+                  <Button variant="outline" size="sm" onClick={runCleanup} disabled={isCleaningUp || isDedupRunning || isScrutinizing || totalCount === 0} data-testid="button-cleanup-favorites">
                     {isCleaningUp ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Wrench className="w-3.5 h-3.5 mr-1" />}
                     整理
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={runDedupCleanup} disabled={isDedupRunning || isCleaningUp || isScrutinizing || totalCount === 0} data-testid="button-dedup-cleanup">
+                    {isDedupRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Filter className="w-3.5 h-3.5 mr-1" />}
+                    重複整理
                   </Button>
                   <Button variant="outline" size="sm" onClick={copyFavorites} data-testid="button-copy-favorites"><Copy className="w-3.5 h-3.5 mr-1" />エクスポート</Button>
                   <Button variant="outline" size="sm" onClick={() => clearFavMutation.mutate()} disabled={clearFavMutation.isPending} data-testid="button-clear-favorites"><Trash2 className="w-3.5 h-3.5 mr-1" />全削除</Button>
                 </div>
+              </div>
+
+              <div className="flex flex-wrap gap-1.5" data-testid="rhyme-filter-bar">
+                {([
+                  ["all", "すべて"],
+                  ["perfect", "Perfect Rhyme"],
+                  ["legendary", "伝説級"],
+                  ["super", "超硬い"],
+                  ["hard", "硬い"],
+                ] as [RhymeFilter, string][]).map(([key, label]) => (
+                  <Button key={key} variant={rhymeFilter === key ? "default" : "outline"} size="sm" className="text-xs h-7 px-2.5"
+                    onClick={() => setRhymeFilter(key)} data-testid={`filter-${key}`}>{label}</Button>
+                ))}
               </div>
 
               {selectedFavIds.size > 0 && (
@@ -847,14 +920,6 @@ export default function Home() {
                   <Button variant="ghost" size="sm" onClick={() => setSelectedFavIds(new Set())} data-testid="button-clear-selection"><X className="w-3.5 h-3.5 mr-1" />選択解除</Button>
                 </div>
               )}
-
-              <div className="space-y-2">
-                <Textarea placeholder="ワードを貼り付けて追加（形式: ワード/ひらがな(romaji) 改行区切り）" value={pasteTextFav} onChange={e => setPasteTextFav(e.target.value)} className="text-xs min-h-[60px]" data-testid="textarea-paste-fav" />
-                <Button variant="outline" size="sm" onClick={() => pasteFavMutation.mutate(pasteTextFav)} disabled={!pasteTextFav.trim() || pasteFavMutation.isPending} data-testid="button-paste-fav">
-                  {pasteFavMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Plus className="w-3.5 h-3.5 mr-1" />}
-                  貼り付けて追加
-                </Button>
-              </div>
 
               {scrutinyLogs.length > 0 && (
                 <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 space-y-1" data-testid="scrutiny-logs">
@@ -907,15 +972,48 @@ export default function Home() {
                 <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-16 w-full rounded-md" />)}</div>
               ) : !favQuery.data || favQuery.data.groups.length === 0 ? (
                 <div className="text-center py-8 text-muted-foreground text-sm" data-testid="text-empty-favorites">データベースは空です。生成タブでワードを生成して追加してください。</div>
-              ) : (
+              ) : (() => {
+                const tierConfig: Record<string, { label: string; border: string; bg: string; badge: string; wordBg: string; highlight: string }> = {
+                  perfect: { label: "Perfect Rhyme", border: "border-fuchsia-500/60", bg: "bg-fuchsia-500/10", badge: "border-fuchsia-500/70 text-fuchsia-500 dark:text-fuchsia-400", wordBg: "bg-fuchsia-500/15 border-fuchsia-500/30", highlight: "text-fuchsia-400" },
+                  legendary: { label: "伝説級硬い韻", border: "border-yellow-500/50", bg: "bg-yellow-500/10", badge: "border-yellow-500/60 text-yellow-600 dark:text-yellow-400", wordBg: "bg-yellow-500/15 border-yellow-500/30", highlight: "text-yellow-400" },
+                  super: { label: "超硬い韻", border: "border-orange-500/40", bg: "bg-orange-500/8", badge: "border-orange-500/50 text-orange-600 dark:text-orange-400", wordBg: "bg-orange-500/12 border-orange-500/25", highlight: "text-orange-400" },
+                  hard: { label: "固い韻", border: "border-primary/30", bg: "bg-primary/5", badge: "border-primary/40 text-primary", wordBg: "bg-primary/10 border-primary/20", highlight: "text-primary" },
+                };
+
+                const renderWord = (w: FavWord, tc: typeof tierConfig[string] | null, suffixLen?: number) => {
+                  const hlIdx = suffixLen ? getRomajiHighlightIndex(w.romaji, suffixLen) : -1;
+                  return (
+                    <button key={w.id} onClick={() => toggleFavSelection(w.id)}
+                      className={`inline-flex flex-col items-center text-xs rounded px-2 py-1 cursor-pointer transition-all ${selectedFavIds.has(w.id) ? "bg-primary text-primary-foreground border border-primary ring-2 ring-primary/30" : tc ? `${tc.wordBg} hover:opacity-80` : "bg-card border border-border/50 hover:bg-muted/50"}`}
+                      data-testid={`fav-word-${w.id}`}>
+                      <span className="font-medium">{w.word}</span>
+                      <span className="font-mono text-[9px] leading-tight mt-0.5">
+                        {hlIdx >= 0 ? (
+                          <>
+                            <span className={selectedFavIds.has(w.id) ? "opacity-60" : "text-muted-foreground"}>{w.romaji.slice(0, hlIdx)}</span>
+                            <span className={selectedFavIds.has(w.id) ? "opacity-90" : (tc?.highlight || "text-primary")}>{w.romaji.slice(hlIdx)}</span>
+                          </>
+                        ) : (
+                          <span className={selectedFavIds.has(w.id) ? "opacity-60" : "text-muted-foreground"}>{w.romaji}</span>
+                        )}
+                      </span>
+                    </button>
+                  );
+                };
+
+                const filteredGroups = favQuery.data.groups.map(group => {
+                  if (rhymeFilter === "all") return group;
+                  const filteredRhymes = (group.hardRhymes || []).filter(hr => hr.tier === rhymeFilter);
+                  return { ...group, hardRhymes: filteredRhymes, words: rhymeFilter === "all" ? group.words : [] };
+                }).filter(group => {
+                  const totalInGroup = group.words.length + (group.hardRhymes?.reduce((s, h) => s + h.words.length, 0) || 0);
+                  return totalInGroup > 0;
+                });
+
+                return (
                 <div className="space-y-3" data-testid="favorites-container">
-                  {favQuery.data.groups.map(group => {
+                  {filteredGroups.map(group => {
                     const totalInGroup = group.words.length + (group.hardRhymes?.reduce((s, h) => s + h.words.length, 0) || 0);
-                    const tierConfig = {
-                      legendary: { label: "伝説級硬い韻", border: "border-yellow-500/50", bg: "bg-yellow-500/10", badge: "border-yellow-500/60 text-yellow-600 dark:text-yellow-400", wordBg: "bg-yellow-500/15 border-yellow-500/30" },
-                      super: { label: "超硬い韻", border: "border-orange-500/40", bg: "bg-orange-500/8", badge: "border-orange-500/50 text-orange-600 dark:text-orange-400", wordBg: "bg-orange-500/12 border-orange-500/25" },
-                      hard: { label: "固い韻", border: "border-primary/30", bg: "bg-primary/5", badge: "border-primary/40 text-primary", wordBg: "bg-primary/10 border-primary/20" },
-                    };
                     return (
                     <div key={group.vowels} className="rounded-md border border-border/50 bg-muted/10 p-3">
                       <div className="flex items-center gap-2 mb-2">
@@ -933,14 +1031,7 @@ export default function Home() {
                                 <span className="text-[10px] text-muted-foreground">{hr.words.length}個</span>
                               </div>
                               <div className="flex flex-wrap gap-1.5">
-                                {hr.words.map(w => (
-                                  <button key={w.id} onClick={() => toggleFavSelection(w.id)}
-                                    className={`inline-flex items-center gap-1 text-xs rounded px-2 py-1 cursor-pointer transition-all ${selectedFavIds.has(w.id) ? "bg-primary text-primary-foreground border border-primary ring-2 ring-primary/30" : `${tc.wordBg} hover:opacity-80`}`}
-                                    data-testid={`fav-word-${w.id}`}>
-                                    <span className="font-medium">{w.word}</span>
-                                    <span className={selectedFavIds.has(w.id) ? "opacity-70" : "text-muted-foreground"}>({w.reading})</span>
-                                  </button>
-                                ))}
+                                {hr.words.map(w => renderWord(w, tc, hr.suffix.length))}
                               </div>
                             </div>
                             );
@@ -949,21 +1040,15 @@ export default function Home() {
                       )}
                       {group.words.length > 0 && (
                         <div className="flex flex-wrap gap-1.5">
-                          {group.words.map(w => (
-                            <button key={w.id} onClick={() => toggleFavSelection(w.id)}
-                              className={`inline-flex items-center gap-1 text-xs rounded px-2 py-1 cursor-pointer transition-all ${selectedFavIds.has(w.id) ? "bg-primary text-primary-foreground border border-primary ring-2 ring-primary/30" : "bg-card border border-border/50 hover:bg-muted/50"}`}
-                              data-testid={`fav-word-${w.id}`}>
-                              <span className="font-medium">{w.word}</span>
-                              <span className={selectedFavIds.has(w.id) ? "opacity-70" : "text-muted-foreground"}>({w.reading})</span>
-                            </button>
-                          ))}
+                          {group.words.map(w => renderWord(w, null))}
                         </div>
                       )}
                     </div>
                     );
                   })}
                 </div>
-              )}
+                );
+              })()}
             </CardContent>
           </Card>
         ) : (
@@ -976,7 +1061,7 @@ export default function Home() {
             </div>
             <Button onClick={() => targetMutation.mutate()} disabled={targetMutation.isPending || isAutoMode} size="sm" data-testid="button-generate-target">
               {targetMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Sparkles className="w-4 h-4 mr-1" />}
-              {target ? "やり直し" : "ターゲットを選ぶ"}
+              {target ? "ターゲット変更" : "ターゲットを選ぶ"}
             </Button>
             <AnimatePresence mode="wait">
               {target ? (
