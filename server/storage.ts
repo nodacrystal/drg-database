@@ -1,5 +1,5 @@
 import { drizzle } from "drizzle-orm/node-postgres";
-import { eq, sql } from "drizzle-orm";
+import { eq, sql, inArray } from "drizzle-orm";
 import { words, ngWords, type Word, type InsertWord, type InsertNgWord } from "@shared/schema";
 import pg from "pg";
 
@@ -33,6 +33,18 @@ export async function addWords(entries: InsertWord[]): Promise<number> {
     }
   }
   return added;
+}
+
+export async function getWordById(id: number): Promise<Word | null> {
+  const result = await db.select().from(words).where(eq(words.id, id));
+  return result[0] || null;
+}
+
+export async function getWordsByIds(ids: number[]): Promise<Word[]> {
+  if (ids.length === 0) return [];
+  const validIds = ids.filter(id => Number.isInteger(id) && id > 0);
+  if (validIds.length === 0) return [];
+  return db.select().from(words).where(inArray(words.id, validIds));
 }
 
 export async function deleteWord(id: number): Promise<void> {
@@ -99,8 +111,9 @@ export async function clearNgWords(): Promise<void> {
 
 export async function markWordsProtected(ids: number[]): Promise<void> {
   if (ids.length === 0) return;
-  const idList = ids.join(",");
-  await db.execute(sql`UPDATE words SET protected = true WHERE id IN (${sql.raw(idList)})`);
+  const validIds = ids.filter(id => Number.isInteger(id) && id > 0);
+  if (validIds.length === 0) return;
+  await db.update(words).set({ protected: true }).where(inArray(words.id, validIds));
 }
 
 export async function ensureProtectedColumn(): Promise<void> {

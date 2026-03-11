@@ -40,9 +40,15 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - `extractVowels()` extracts vowels + 'n' (when ん is not followed by a vowel)
   - e.g., "tennen" → "enen", "kansai" → "anai", "funben" → "unen"
 - Favorites grouped by last 2 vowels (including n) as bucket key
-- Within groups, words with 3+ matching vowel suffix sorted first
-- **固い韻 (Hard Rhymes)**: Within each vowel group, words sharing the same last 3 vowels (2+ words) are sub-grouped as "固い韻" with distinct visual styling (primary-colored border/background)
+- Within groups, words sorted by romaji length (shortest first)
+- **Tiered Rhyme System** (within each vowel group, words sharing vowel suffixes):
+  - **伝説級硬い韻 (Legendary)**: 5+ vowel suffix match, yellow/gold styling
+  - **超硬い韻 (Super Hard)**: 4 vowel suffix match, orange styling
+  - **固い韻 (Hard)**: 3 vowel suffix match, primary/blue styling
+  - Assignment: legendary first, then super (unassigned only), then hard (unassigned only)
+  - Sorted by tier (legendary → super → hard) then by word count within tier
 - **Auto-cleanup**: Adding words via "選択ワードをデータベースに追加" automatically triggers the database "整理" cleanup process
+- **Auto-save to NG**: All deleted words (manual, batch, cleanup) automatically saved to NG table
 
 ## Generation System (3-Step Pipeline)
 - **STEP 1: Bulk Generation** — 6 parallel AI calls, each generates 50 diss words (target: 300 total)
@@ -67,6 +73,8 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - **Target selection**: Random from ~130 hardcoded targets (comedians + athletes) with 3-field data (name/appearance/personality)
 - **NG word analysis**: When 5+ NG words exist, AI analyzes rejection patterns and avoids similar words
 - **Grouped results UI**: Words displayed in color-coded vowel pattern groups with per-group select/deselect
+- **Tap-to-select in DB tab**: Click words to select/deselect; action bar shows count + Copy/Delete buttons
+- **Vocabulary diversity**: 6 batch-specific approach angles (外見/性格/能力/比喩/方言/造語); NG reference expanded to 100 words
 - **Live timer**: Running timer with green=success, red=error states
 - **Timing diagnostics**: Server logs timing for each phase
 - NG words system: unchecked words saved to ng_words table
@@ -83,7 +91,8 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - `GET /api/favorites` - Get all words grouped by last-2-vowel pattern
 - `POST /api/favorites` - Add words to DB (bulk insert, skip duplicates)
 - `POST /api/favorites/paste` - Parse and add words from pasted text
-- `DELETE /api/favorites/:id` - Delete single word
+- `DELETE /api/favorites/:id` - Delete single word (auto-saves to NG)
+- `POST /api/favorites/batch-delete` - Batch delete words by IDs (auto-saves to NG)
 - `DELETE /api/favorites` - Clear all words
 - `GET /api/favorites/count` - Get total word count
 - `GET /api/favorites/export` - Export all words as text
@@ -124,6 +133,13 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - Dependency array only includes `toast` (stable) — not the functions themselves
 
 ## Recent Changes
+- 2026-03-11: Tiered rhyme system: legendary (5+), super (4), hard (3) vowel match with distinct styling
+- 2026-03-11: Tap-to-select in DB tab with action bar (bulk copy/delete)
+- 2026-03-11: Auto-save deleted words to NG (manual, batch, cleanup)
+- 2026-03-11: Batch delete endpoint with Zod validation (max 500 IDs)
+- 2026-03-11: Vocabulary diversity: 6 approach angles per generation batch
+- 2026-03-11: SQL injection fix: replaced raw SQL with Drizzle inArray
+- 2026-03-11: Words sorted by romaji length within all groups
 - 2026-03-11: Rate limit retry with exponential backoff added to all AI calls
 - 2026-03-11: Reduced parallelism across generation and cleanup to prevent rate limit cascading
 - 2026-03-11: Stale closure fix: auto mode uses refs for latest function versions

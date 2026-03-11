@@ -17,7 +17,7 @@ import { motion, AnimatePresence } from "framer-motion";
 
 interface WordEntry { word: string; reading: string; romaji: string; }
 interface FavWord { id: number; word: string; reading: string; romaji: string; vowels: string; charCount: number; }
-interface HardRhymeGroup { suffix: string; words: FavWord[]; }
+interface HardRhymeGroup { suffix: string; words: FavWord[]; tier: "hard" | "super" | "legendary"; }
 interface FavGroup { vowels: string; words: FavWord[]; hardRhymes?: HardRhymeGroup[]; }
 interface NgWord { id: number; word: string; reading: string; romaji: string; }
 interface ProgressLog { time: string; detail: string; elapsed: string; }
@@ -102,6 +102,7 @@ export default function Home() {
   const [cleanupLogs, setCleanupLogs] = useState<ProgressLog[]>([]);
   const [isAutoMode, setIsAutoMode] = useState(false);
   const [autoModeCount, setAutoModeCount] = useState(0);
+  const [selectedFavIds, setSelectedFavIds] = useState<Set<number>>(new Set());
   const autoModeRef = useRef(false);
   const isCleaningUpRef = useRef(false);
   const cleanupPromiseRef = useRef<Promise<void> | null>(null);
@@ -233,7 +234,29 @@ export default function Home() {
 
   const deleteFavMutation = useMutation({
     mutationFn: async (id: number) => { const res = await apiRequest("DELETE", `/api/favorites/${id}`); return res.json(); },
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["/api/favorites"] }); queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] }); },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
+    },
+  });
+
+  const batchDeleteFavMutation = useMutation({
+    mutationFn: async (ids: number[]) => {
+      const res = await fetch("/api/favorites/batch-delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }) });
+      if (!res.ok) throw new Error("一括削除に失敗しました");
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({ title: "削除完了", description: `${data.deleted}個を削除（NGに保存）` });
+      setSelectedFavIds(new Set());
+      queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
+    },
+    onError: () => { toast({ title: "エラー", description: "一括削除に失敗しました", variant: "destructive" }); },
   });
 
   const clearFavMutation = useMutation({
@@ -286,6 +309,34 @@ export default function Home() {
       toast({ title: "コピー完了", description: `${ngWordsQuery.data.words.length}個のNGワードをコピーしました` });
     } catch { toast({ title: "エラー", description: "コピーに失敗しました", variant: "destructive" }); }
   }, [ngWordsQuery.data, toast]);
+
+  const toggleFavSelection = useCallback((id: number) => {
+    setSelectedFavIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const copySelectedFavs = useCallback(async () => {
+    if (selectedFavIds.size === 0 || !favQuery.data) return;
+    const allWords: FavWord[] = [];
+    for (const g of favQuery.data.groups) {
+      allWords.push(...g.words);
+      if (g.hardRhymes) for (const hr of g.hardRhymes) allWords.push(...hr.words);
+    }
+    const selected = allWords.filter(w => selectedFavIds.has(w.id));
+    const text = selected.map(w => `${w.word}/${w.reading}(${w.romaji})`).join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      toast({ title: "コピー完了", description: `${selected.length}個のワードをコピーしました` });
+    } catch { toast({ title: "エラー", description: "コピーに失敗しました", variant: "destructive" }); }
+  }, [selectedFavIds, favQuery.data, toast]);
+
+  const deleteSelectedFavs = useCallback(() => {
+    if (selectedFavIds.size === 0) return;
+    batchDeleteFavMutation.mutate(Array.from(selectedFavIds));
+  }, [selectedFavIds, batchDeleteFavMutation]);
 
   const pasteFavMutation = useMutation({
     mutationFn: async (text: string) => { const res = await apiRequest("POST", "/api/favorites/paste", { text }); return res.json(); },
@@ -693,6 +744,18 @@ export default function Home() {
                 </div>
               </div>
 
+              {selectedFavIds.size > 0 && (
+                <div className="flex items-center gap-2 p-2 rounded-md bg-primary/10 border border-primary/30" data-testid="fav-selection-bar">
+                  <Badge variant="default" className="text-xs">{selectedFavIds.size}件選択中</Badge>
+                  <Button variant="outline" size="sm" onClick={copySelectedFavs} data-testid="button-copy-selected"><Copy className="w-3.5 h-3.5 mr-1" />コピー</Button>
+                  <Button variant="destructive" size="sm" onClick={deleteSelectedFavs} disabled={batchDeleteFavMutation.isPending} data-testid="button-delete-selected">
+                    {batchDeleteFavMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Trash2 className="w-3.5 h-3.5 mr-1" />}
+                    削除
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => setSelectedFavIds(new Set())} data-testid="button-clear-selection"><X className="w-3.5 h-3.5 mr-1" />選択解除</Button>
+                </div>
+              )}
+
               <div className="space-y-2">
                 <Textarea placeholder="ワードを貼り付けて追加（形式: ワード/ひらがな(romaji) 改行区切り）" value={pasteTextFav} onChange={e => setPasteTextFav(e.target.value)} className="text-xs min-h-[60px]" data-testid="textarea-paste-fav" />
                 <Button variant="outline" size="sm" onClick={() => pasteFavMutation.mutate(pasteTextFav)} disabled={!pasteTextFav.trim() || pasteFavMutation.isPending} data-testid="button-paste-fav">
@@ -727,6 +790,11 @@ export default function Home() {
                 <div className="space-y-3" data-testid="favorites-container">
                   {favQuery.data.groups.map(group => {
                     const totalInGroup = group.words.length + (group.hardRhymes?.reduce((s, h) => s + h.words.length, 0) || 0);
+                    const tierConfig = {
+                      legendary: { label: "伝説級硬い韻", border: "border-yellow-500/50", bg: "bg-yellow-500/10", badge: "border-yellow-500/60 text-yellow-600 dark:text-yellow-400", wordBg: "bg-yellow-500/15 border-yellow-500/30" },
+                      super: { label: "超硬い韻", border: "border-orange-500/40", bg: "bg-orange-500/8", badge: "border-orange-500/50 text-orange-600 dark:text-orange-400", wordBg: "bg-orange-500/12 border-orange-500/25" },
+                      hard: { label: "固い韻", border: "border-primary/30", bg: "bg-primary/5", badge: "border-primary/40 text-primary", wordBg: "bg-primary/10 border-primary/20" },
+                    };
                     return (
                     <div key={group.vowels} className="rounded-md border border-border/50 bg-muted/10 p-3">
                       <div className="flex items-center gap-2 mb-2">
@@ -735,33 +803,38 @@ export default function Home() {
                       </div>
                       {group.hardRhymes && group.hardRhymes.length > 0 && (
                         <div className="space-y-2 mb-2">
-                          {group.hardRhymes.map(hr => (
-                            <div key={hr.suffix} className="rounded border border-primary/30 bg-primary/5 p-2" data-testid={`hard-rhyme-${hr.suffix}`}>
+                          {group.hardRhymes.map(hr => {
+                            const tc = tierConfig[hr.tier];
+                            return (
+                            <div key={hr.suffix} className={`rounded border ${tc.border} ${tc.bg} p-2`} data-testid={`rhyme-${hr.tier}-${hr.suffix}`}>
                               <div className="flex items-center gap-1.5 mb-1.5">
-                                <Badge variant="outline" className="text-[10px] font-mono border-primary/40 text-primary">固い韻 *{hr.suffix}</Badge>
+                                <Badge variant="outline" className={`text-[10px] font-mono ${tc.badge}`}>{tc.label} *{hr.suffix}</Badge>
                                 <span className="text-[10px] text-muted-foreground">{hr.words.length}個</span>
                               </div>
                               <div className="flex flex-wrap gap-1.5">
                                 {hr.words.map(w => (
-                                  <div key={w.id} className="inline-flex items-center gap-1 text-xs bg-primary/10 border border-primary/20 rounded px-2 py-1" data-testid={`fav-word-${w.id}`}>
+                                  <button key={w.id} onClick={() => toggleFavSelection(w.id)}
+                                    className={`inline-flex items-center gap-1 text-xs rounded px-2 py-1 cursor-pointer transition-all ${selectedFavIds.has(w.id) ? "bg-primary text-primary-foreground border border-primary ring-2 ring-primary/30" : `${tc.wordBg} hover:opacity-80`}`}
+                                    data-testid={`fav-word-${w.id}`}>
                                     <span className="font-medium">{w.word}</span>
-                                    <span className="text-muted-foreground">({w.reading})</span>
-                                    <button onClick={() => deleteFavMutation.mutate(w.id)} className="text-muted-foreground hover:text-destructive ml-0.5" data-testid={`button-delete-fav-${w.id}`}><X className="w-3 h-3" /></button>
-                                  </div>
+                                    <span className={selectedFavIds.has(w.id) ? "opacity-70" : "text-muted-foreground"}>({w.reading})</span>
+                                  </button>
                                 ))}
                               </div>
                             </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                       {group.words.length > 0 && (
                         <div className="flex flex-wrap gap-1.5">
                           {group.words.map(w => (
-                            <div key={w.id} className="inline-flex items-center gap-1 text-xs bg-card border border-border/50 rounded px-2 py-1" data-testid={`fav-word-${w.id}`}>
+                            <button key={w.id} onClick={() => toggleFavSelection(w.id)}
+                              className={`inline-flex items-center gap-1 text-xs rounded px-2 py-1 cursor-pointer transition-all ${selectedFavIds.has(w.id) ? "bg-primary text-primary-foreground border border-primary ring-2 ring-primary/30" : "bg-card border border-border/50 hover:bg-muted/50"}`}
+                              data-testid={`fav-word-${w.id}`}>
                               <span className="font-medium">{w.word}</span>
-                              <span className="text-muted-foreground">({w.reading})</span>
-                              <button onClick={() => deleteFavMutation.mutate(w.id)} className="text-muted-foreground hover:text-destructive ml-0.5" data-testid={`button-delete-fav-${w.id}`}><X className="w-3 h-3" /></button>
-                            </div>
+                              <span className={selectedFavIds.has(w.id) ? "opacity-70" : "text-muted-foreground"}>({w.reading})</span>
+                            </button>
                           ))}
                         </div>
                       )}

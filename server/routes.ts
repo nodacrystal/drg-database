@@ -6,6 +6,7 @@ import {
   getAllWords, getWordCount, getWordStrings, addWords, deleteWord, deleteWords,
   clearAllWords, exportWords, getAllNgWords, getNgWordStrings,
   addNgWords, getNgWordCount, clearNgWords, markWordsProtected, ensureProtectedColumn,
+  getWordById, getWordsByIds,
 } from "./storage";
 import { TARGETS, type TargetData } from "./targets";
 
@@ -278,7 +279,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const ngSection = ngAnalysis ? `\n【NG傾向（避けよ）】${ngAnalysis}` : "";
       const seen = new Set<string>([...existingWords, ...ngWordList]);
       const shortHistory = existingWords.slice(-80).join(",") || "なし";
-      const shortNg = ngWordList.length > 0 ? ngWordList.slice(-50).join(",") : "";
+      const shortNg = ngWordList.length > 0 ? ngWordList.slice(-100).join(",") : "";
 
       const contentType = level <= 2 ? "リスペクト・称賛" : level === 3 ? "親しみ・愛あるイジり" : level === 4 ? "軽口・テレビ的イジり" : "ディスり・攻撃・挑発";
       const antiPraise = level >= 4 ? `\n全てのワードが攻撃・批判・挑発・煽りであること。褒め言葉・ポジティブ表現は絶対に禁止。` : "";
@@ -295,12 +296,33 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 - 挑発（相手を怒らせる言葉）
 - 弱点の指摘（痛い所を突く言葉）`;
 
+      const batchAngles = level <= 3
+        ? [
+          "外見・容姿を褒める（見た目の魅力を称える）",
+          "性格・人柄を称える（内面の良さ）",
+          "才能・能力を尊敬する（スキルへの敬意）",
+          "愛称・ニックネーム中心（親しみを込めた呼び名）",
+          "面白い・ユニークな褒め方（独創的表現）",
+          "比喩・例え話で褒める（スターや英雄に例える）",
+        ]
+        : [
+          "外見・容姿をディスる（見た目の欠点を誇張）",
+          "性格・内面を攻撃する（性格の弱点を突く）",
+          "能力・才能を否定する（無能さ・ダメさを指摘）",
+          "動物・物・食べ物に例える（比喩・例え系の悪口）",
+          "関西弁・方言・スラング混じり（口語的・ストリート表現）",
+          "造語・オリジナル・合成語（既存にない独創的な悪口）",
+        ];
+
       const step1Prompt = (batchIndex: number) => `【タスク】「${targetName}」に対する${contentType}ワードを50個生成せよ。
 
 【ターゲット情報】
 ${target}
 
 【Lv.${level} ${levelConfig.label}】${levelConfig.instruction}${antiPraise}
+
+【このバッチの切り口】★${batchAngles[batchIndex]}★
+この切り口に特化して50個全てを生成せよ。他の切り口のワードは絶対に混ぜるな。
 
 【生成するワードの種類】
 ${wordTypes}
@@ -311,9 +333,11 @@ ${wordTypes}
 - 同じ助詞・助動詞で終わるワードを重複させるな（例：〜だろ、〜だろ は禁止）
 - ターゲット「${targetName}」に特化した内容
 - 造語OK（ただし意味が通じること）
+- ありきたりな表現を避け、独自性のある言葉を生成せよ
+- 「〜野郎」「〜め」「〜だ」など同じ語尾パターンは最大2個まで
 ${shortNg ? `\n生成禁止ワード: ${shortNg}` : ""}${ngSection}
 既出（生成するな）: ${shortHistory}
-バッチ${batchIndex + 1}/6: 他バッチと重複しないよう多様な切り口で攻めろ
+バッチ${batchIndex + 1}/6
 
 【出力形式】50個。1行1個。番号不要。説明不要。即座に出力:
 ワード/よみ(romaji)
@@ -447,66 +471,77 @@ ${wordListForFilter}
         return { id: w.id, word: w.word, reading: w.reading, romaji: w.romaji, vowels, charCount: w.charCount };
       });
 
+      const sortByRomaji = (arr: typeof items) => arr.sort((a, b) => a.romaji.length - b.romaji.length || a.romaji.localeCompare(b.romaji));
+
       const buckets: Record<string, typeof items> = {};
       for (const item of items) {
         const key = item.vowels.length >= 2 ? item.vowels.slice(-2) : item.vowels || "_";
         (buckets[key] ??= []).push(item);
       }
 
-      const groups: { vowels: string; words: typeof items }[] = [];
+      type RhymeGroup = { suffix: string; words: typeof items; tier: "hard" | "super" | "legendary" };
+      const groups: { vowels: string; words: typeof items; hardRhymes: RhymeGroup[] }[] = [];
+
       for (const [suffix, words] of Object.entries(buckets)) {
         if (words.length === 0) continue;
 
-        const sorted = [...words].sort((a, b) => {
-          const aVowels = a.vowels;
-          const bVowels = b.vowels;
-          let aMaxMatch = 2, bMaxMatch = 2;
+        const legendaryBuckets: Record<string, typeof items> = {};
+        const superBuckets: Record<string, typeof items> = {};
+        const hardBuckets: Record<string, typeof items> = {};
+        const assigned = new Set<number>();
 
-          for (const other of words) {
-            if (other.id === a.id) continue;
-            let match = 0;
-            for (let i = 1; i <= Math.min(aVowels.length, other.vowels.length); i++) {
-              if (aVowels[aVowels.length - i] === other.vowels[other.vowels.length - i]) match = i;
-              else break;
-            }
-            aMaxMatch = Math.max(aMaxMatch, match);
-          }
-          for (const other of words) {
-            if (other.id === b.id) continue;
-            let match = 0;
-            for (let i = 1; i <= Math.min(bVowels.length, other.vowels.length); i++) {
-              if (bVowels[bVowels.length - i] === other.vowels[other.vowels.length - i]) match = i;
-              else break;
-            }
-            bMaxMatch = Math.max(bMaxMatch, match);
-          }
-
-          return bMaxMatch - aMaxMatch;
-        });
-
-        const hardRhymeBuckets: Record<string, typeof items> = {};
-        const hardRhymeAssigned = new Set<number>();
-        for (const w of sorted) {
-          if (w.vowels.length < 3) continue;
-          const suffix3 = w.vowels.slice(-3);
-          (hardRhymeBuckets[suffix3] ??= []).push(w);
-        }
-        const hardRhymes: { suffix: string; words: typeof items }[] = [];
-        for (const [s3, hrWords] of Object.entries(hardRhymeBuckets)) {
-          if (hrWords.length >= 2) {
-            hardRhymes.push({ suffix: s3, words: hrWords });
-            for (const w of hrWords) hardRhymeAssigned.add(w.id);
+        for (const w of words) {
+          if (w.vowels.length >= 5) {
+            const s5 = w.vowels.slice(-5);
+            (legendaryBuckets[s5] ??= []).push(w);
           }
         }
-        hardRhymes.sort((a, b) => b.words.length - a.words.length);
-        const remaining = sorted.filter(w => !hardRhymeAssigned.has(w.id));
+        const rhymeGroups: RhymeGroup[] = [];
+        for (const [s5, lWords] of Object.entries(legendaryBuckets)) {
+          if (lWords.length >= 2) {
+            rhymeGroups.push({ suffix: s5, words: sortByRomaji(lWords), tier: "legendary" });
+            for (const w of lWords) assigned.add(w.id);
+          }
+        }
 
-        groups.push({ vowels: `*${suffix}`, words: remaining, hardRhymes });
+        for (const w of words) {
+          if (assigned.has(w.id)) continue;
+          if (w.vowels.length >= 4) {
+            const s4 = w.vowels.slice(-4);
+            (superBuckets[s4] ??= []).push(w);
+          }
+        }
+        for (const [s4, sWords] of Object.entries(superBuckets)) {
+          if (sWords.length >= 2) {
+            rhymeGroups.push({ suffix: s4, words: sortByRomaji(sWords), tier: "super" });
+            for (const w of sWords) assigned.add(w.id);
+          }
+        }
+
+        for (const w of words) {
+          if (assigned.has(w.id)) continue;
+          if (w.vowels.length >= 3) {
+            const s3 = w.vowels.slice(-3);
+            (hardBuckets[s3] ??= []).push(w);
+          }
+        }
+        for (const [s3, hWords] of Object.entries(hardBuckets)) {
+          if (hWords.length >= 2) {
+            rhymeGroups.push({ suffix: s3, words: sortByRomaji(hWords), tier: "hard" });
+            for (const w of hWords) assigned.add(w.id);
+          }
+        }
+
+        const tierOrder = { legendary: 0, super: 1, hard: 2 };
+        rhymeGroups.sort((a, b) => tierOrder[a.tier] - tierOrder[b.tier] || b.words.length - a.words.length);
+
+        const remaining = sortByRomaji(words.filter(w => !assigned.has(w.id)));
+        groups.push({ vowels: `*${suffix}`, words: remaining, hardRhymes: rhymeGroups });
       }
 
       groups.sort((a, b) => {
-        const aTotal = a.words.length + (a.hardRhymes?.reduce((s: number, h: { words: { id: number }[] }) => s + h.words.length, 0) || 0);
-        const bTotal = b.words.length + (b.hardRhymes?.reduce((s: number, h: { words: { id: number }[] }) => s + h.words.length, 0) || 0);
+        const aTotal = a.words.length + a.hardRhymes.reduce((s, h) => s + h.words.length, 0);
+        const bTotal = b.words.length + b.hardRhymes.reduce((s, h) => s + h.words.length, 0);
         return bTotal - aTotal;
       });
       res.json({ groups, total: allWords.length });
@@ -523,8 +558,32 @@ ${wordListForFilter}
   });
 
   app.delete("/api/favorites/:id", async (req, res) => {
-    try { const id = parseInt(req.params.id); if (isNaN(id)) return res.status(400).json({ error: "不正なIDです" }); await deleteWord(id); res.json({ success: true, total: await getWordCount() }); }
-    catch { res.status(500).json({ error: "削除に失敗しました" }); }
+    try {
+      const id = parseInt(req.params.id);
+      if (isNaN(id)) return res.status(400).json({ error: "不正なIDです" });
+      const word = await getWordById(id);
+      await deleteWord(id);
+      if (word) {
+        await addNgWords([{ word: word.word, reading: word.reading, romaji: word.romaji }]);
+      }
+      res.json({ success: true, total: await getWordCount() });
+    } catch { res.status(500).json({ error: "削除に失敗しました" }); }
+  });
+
+  const batchDeleteSchema = z.object({ ids: z.array(z.number().int().positive()).min(1).max(500) });
+
+  app.post("/api/favorites/batch-delete", async (req, res) => {
+    try {
+      const parsed = batchDeleteSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: "不正なデータです" });
+      const { ids } = parsed.data;
+      const wordsToDelete = await getWordsByIds(ids);
+      const deleted = await deleteWords(ids);
+      if (wordsToDelete.length > 0) {
+        await addNgWords(wordsToDelete.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji })));
+      }
+      res.json({ deleted, total: await getWordCount() });
+    } catch { res.status(500).json({ error: "一括削除に失敗しました" }); }
   });
 
   app.delete("/api/favorites", async (_req, res) => {
@@ -868,8 +927,12 @@ ${wordList}`);
       const deleteArray = Array.from(toDelete);
       let totalDeleted = 0;
       if (deleteArray.length > 0) {
+        const wordsToNg = await getWordsByIds(deleteArray);
         totalDeleted = await deleteWords(deleteArray);
-        send("delete", `合計${totalDeleted}個を削除`);
+        if (wordsToNg.length > 0) {
+          await addNgWords(wordsToNg.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji })));
+        }
+        send("delete", `合計${totalDeleted}個を削除（NGに保存）`);
       }
 
       const survivingIds = items.filter(w => !toDelete.has(w.id)).map(w => w.id);
