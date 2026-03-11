@@ -383,10 +383,13 @@ export default function Home() {
 
     try {
       while (autoModeRef.current) {
-        // Step 1: ターゲット生成
+        // Step 1: ターゲット生成 + 前回データクリア
         const targetRes = await (await fetch("/api/target")).json();
         setTarget(targetRes.target);
         setGenResult(null);
+        setCheckedWords(new Set());
+        setProgressLogs([]);
+        setCleanupLogs([]);
 
         // Step 2: レベル設定（8〜10ランダム）
         const randomLvl = 8 + Math.floor(Math.random() * 3);
