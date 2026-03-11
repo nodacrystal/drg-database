@@ -127,6 +127,12 @@ export default function Home() {
   const [isDedupRunning, setIsDedupRunning] = useState(false);
   const [isGroupChecking, setIsGroupChecking] = useState(false);
   const [groupCheckLogs, setGroupCheckLogs] = useState<ProgressLog[]>([]);
+  const [isIntegrityChecking, setIsIntegrityChecking] = useState(false);
+  const [integrityResult, setIntegrityResult] = useState<{
+    total: number;
+    vowelIssues: { id: number; word: string; reading: string; romaji: string; expectedVowels: number; actualVowels: number }[];
+    romajiIssues: { id: number; word: string; romaji: string; storedVowels: string; computedVowels: string; hasInvalidChars: boolean }[];
+  } | null>(null);
   const autoModeRef = useRef(false);
   const isCleaningUpRef = useRef(false);
   const cleanupPromiseRef = useRef<Promise<void> | null>(null);
@@ -580,6 +586,23 @@ export default function Home() {
     setIsGroupChecking(false);
   }, [isGroupChecking, toast, queryClient]);
 
+  const runIntegrityCheck = useCallback(async () => {
+    if (isIntegrityChecking) return;
+    setIsIntegrityChecking(true);
+    setIntegrityResult(null);
+    try {
+      const response = await fetch("/api/favorites/integrity-check");
+      if (!response.ok) throw new Error("整合性チェックに失敗しました");
+      const data = await response.json();
+      setIntegrityResult(data);
+      const total = data.vowelIssues.length + data.romajiIssues.length;
+      toast({ title: "整合性チェック完了", description: total === 0 ? "問題は検出されませんでした" : `${total}件の問題を検出しました` });
+    } catch {
+      toast({ title: "エラー", description: "整合性チェックに失敗しました", variant: "destructive" });
+    }
+    setIsIntegrityChecking(false);
+  }, [isIntegrityChecking, toast]);
+
   const addWordsDirect = useCallback(async (words: WordEntry[]): Promise<{ added: number; total: number }> => {
     if (words.length === 0) return { added: 0, total: 0 };
     const response = await fetch("/api/favorites", {
@@ -931,9 +954,13 @@ export default function Home() {
                     {isDedupRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Filter className="w-3.5 h-3.5 mr-1" />}
                     重複整理
                   </Button>
-                  <Button variant="outline" size="sm" onClick={runGroupCheck} disabled={isGroupChecking || isCleaningUp || isDedupRunning || isScrutinizing || totalCount === 0} data-testid="button-group-check">
+                  <Button variant="outline" size="sm" onClick={runGroupCheck} disabled={isGroupChecking || isCleaningUp || isDedupRunning || isScrutinizing || isIntegrityChecking || totalCount === 0} data-testid="button-group-check">
                     {isGroupChecking ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <ScanLine className="w-3.5 h-3.5 mr-1" />}
                     グループ検査
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={runIntegrityCheck} disabled={isIntegrityChecking || isGroupChecking || isCleaningUp || isDedupRunning || isScrutinizing || totalCount === 0} data-testid="button-integrity-check">
+                    {isIntegrityChecking ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <CheckSquare className="w-3.5 h-3.5 mr-1" />}
+                    整合性チェック
                   </Button>
                   <Button variant="outline" size="sm" onClick={copyFavorites} data-testid="button-copy-favorites"><Copy className="w-3.5 h-3.5 mr-1" />エクスポート</Button>
                   <Button variant="outline" size="sm" onClick={() => clearFavMutation.mutate()} disabled={clearFavMutation.isPending} data-testid="button-clear-favorites"><Trash2 className="w-3.5 h-3.5 mr-1" />全削除</Button>
@@ -980,6 +1007,54 @@ export default function Home() {
                       </div>
                     ))}
                   </div>
+                </div>
+              )}
+
+              {integrityResult && (
+                <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 space-y-2" data-testid="integrity-result">
+                  <div className="flex items-center gap-2">
+                    <CheckSquare className="w-4 h-4 text-emerald-400" />
+                    <span className="text-xs font-semibold text-emerald-400">整合性チェック結果 ({integrityResult.total}語検査)</span>
+                    <Button variant="ghost" size="sm" className="h-5 px-1 text-xs ml-auto" onClick={() => setIntegrityResult(null)}><X className="w-3 h-3" /></Button>
+                  </div>
+
+                  {integrityResult.vowelIssues.length === 0 && integrityResult.romajiIssues.length === 0 ? (
+                    <p className="text-xs text-emerald-500">✓ 問題は検出されませんでした</p>
+                  ) : (
+                    <>
+                      {integrityResult.vowelIssues.length > 0 && (
+                        <div>
+                          <p className="text-xs font-semibold text-amber-400 mb-1">⚠ 母音不足 ({integrityResult.vowelIssues.length}件)</p>
+                          <div className="max-h-32 overflow-y-auto space-y-0.5">
+                            {integrityResult.vowelIssues.map(issue => (
+                              <div key={issue.id} className="text-xs flex gap-1.5 items-baseline">
+                                <span className="font-medium shrink-0">「{issue.word}」</span>
+                                <span className="text-muted-foreground font-mono">{issue.romaji}</span>
+                                <span className="text-amber-400 shrink-0">母音{issue.actualVowels}/{issue.expectedVowels}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {integrityResult.romajiIssues.length > 0 && (
+                        <div>
+                          <p className="text-xs font-semibold text-red-400 mb-1">✗ ローマ字不整合 ({integrityResult.romajiIssues.length}件)</p>
+                          <div className="max-h-32 overflow-y-auto space-y-0.5">
+                            {integrityResult.romajiIssues.map(issue => (
+                              <div key={issue.id} className="text-xs flex gap-1.5 items-baseline flex-wrap">
+                                <span className="font-medium shrink-0">「{issue.word}」</span>
+                                <span className="text-muted-foreground font-mono">{issue.romaji}</span>
+                                {issue.hasInvalidChars && <span className="text-red-400 shrink-0">不正文字</span>}
+                                {issue.storedVowels !== issue.computedVowels && (
+                                  <span className="text-red-400 shrink-0 font-mono">{issue.storedVowels}→{issue.computedVowels}</span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
                 </div>
               )}
 
@@ -1046,9 +1121,9 @@ export default function Home() {
                 const renderRomajiChars = (romaji: string, hlIdx: number, hlColor: string, isSelected: boolean) => (
                   <span className="font-mono text-[9px] leading-tight mt-0.5 inline-flex flex-wrap justify-center">
                     {romaji.split("").map((ch, i) => {
-                      const isVowel = "aeiou".includes(ch.toLowerCase());
+                      const isVowelOrN = "aeioun".includes(ch.toLowerCase());
                       const inHL = hlIdx >= 0 && i >= hlIdx;
-                      if (inHL && isVowel) {
+                      if (inHL && isVowelOrN) {
                         return <span key={i} style={{ fontSize: "11px" }} className={`font-bold ${isSelected ? "opacity-90" : hlColor}`}>{ch}</span>;
                       }
                       return <span key={i} className={isSelected ? "opacity-60" : "text-muted-foreground"}>{ch}</span>;

@@ -898,6 +898,65 @@ ${wordList}
     }
   });
 
+  app.get("/api/favorites/integrity-check", async (req, res) => {
+    try {
+      const allWords = await getAllWords();
+
+      function countVowelKana(reading: string): number {
+        const skipSet = new Set(["ん","っ","ゃ","ゅ","ょ","ぁ","ぃ","ぅ","ぇ","ぉ","ャ","ュ","ョ","ァ","ィ","ゥ","ェ","ォ","ッ","ン","ー","・"," ","　"]);
+        let count = 0;
+        for (const ch of reading) {
+          if (!skipSet.has(ch) && /[\u3040-\u30ff]/.test(ch)) count++;
+        }
+        return count;
+      }
+
+      function countVowelsInRomaji(romaji: string): number {
+        return (romaji.toLowerCase().match(/[aeiou]/g) || []).length;
+      }
+
+      function reExtractVowels(romaji: string): string {
+        const r = romaji.toLowerCase();
+        let result = "";
+        for (let i = 0; i < r.length; i++) {
+          if ("aeiou".includes(r[i])) {
+            result += r[i];
+          } else if (r[i] === "n") {
+            const next = r[i + 1];
+            if (!next || !"aeiou".includes(next)) result += "n";
+          }
+        }
+        return result;
+      }
+
+      function hasInvalidRomajiChars(romaji: string): boolean {
+        return /[^a-z\-_']/.test(romaji.toLowerCase());
+      }
+
+      const vowelIssues: { id: number; word: string; reading: string; romaji: string; expectedVowels: number; actualVowels: number }[] = [];
+      const romajiIssues: { id: number; word: string; romaji: string; storedVowels: string; computedVowels: string; hasInvalidChars: boolean }[] = [];
+
+      for (const w of allWords) {
+        const expectedVowelCount = countVowelKana(w.reading);
+        const actualVowelCount = countVowelsInRomaji(w.romaji);
+        if (actualVowelCount < expectedVowelCount) {
+          vowelIssues.push({ id: w.id, word: w.word, reading: w.reading, romaji: w.romaji, expectedVowels: expectedVowelCount, actualVowels: actualVowelCount });
+        }
+
+        const computedVowels = reExtractVowels(w.romaji);
+        const invalidChars = hasInvalidRomajiChars(w.romaji);
+        if (computedVowels !== w.vowels || invalidChars) {
+          romajiIssues.push({ id: w.id, word: w.word, romaji: w.romaji, storedVowels: w.vowels, computedVowels, hasInvalidChars: invalidChars });
+        }
+      }
+
+      res.json({ total: allWords.length, vowelIssues, romajiIssues });
+    } catch (error) {
+      console.error("Integrity check error:", error);
+      res.status(500).json({ error: "整合性チェックに失敗しました" });
+    }
+  });
+
   type TailDupItem = { id: number; word: string; reading: string; romaji: string; vowels: string; charCount: number; protected?: boolean };
 
   async function aiTailDedup(
