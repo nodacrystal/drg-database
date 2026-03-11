@@ -367,20 +367,41 @@ export default function Home() {
     setAutoModeCount(0);
     setActiveTab("gen");
 
+    const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
+    let emptyStreak = 0;
+
     try {
-      const targetRes = await (await fetch("/api/target")).json();
-      setTarget(targetRes.target);
-      setGenResult(null);
-
-      let randomLvl = 8 + Math.floor(Math.random() * 3);
-      setLevel(randomLvl);
-      setAgeConfirmed(true);
-
-      let result = await generateDissSSE(targetRes.target, randomLvl);
-      if (!autoModeRef.current || !result) { setIsAutoMode(false); autoModeRef.current = false; return; }
-
       while (autoModeRef.current) {
-        const allWords = getWordsFromResult(result!);
+        const cycleStart = Date.now();
+
+        const targetRes = await (await fetch("/api/target")).json();
+        setTarget(targetRes.target);
+        setGenResult(null);
+
+        const randomLvl = 8 + Math.floor(Math.random() * 3);
+        setLevel(randomLvl);
+        setAgeConfirmed(true);
+
+        if (!autoModeRef.current) break;
+
+        const result = await generateDissSSE(targetRes.target, randomLvl);
+
+        if (!autoModeRef.current) break;
+
+        if (!result || result.total === 0) {
+          emptyStreak++;
+          if (emptyStreak >= 3) {
+            toast({ title: "オートモード停止", description: "3回連続で生成結果が空のため停止しました。APIレート制限の可能性があります。", variant: "destructive" });
+            break;
+          }
+          toast({ title: "生成結果なし", description: `ワードが0個でした（${emptyStreak}/3）。10秒後にリトライ...`, variant: "destructive" });
+          await delay(10000);
+          continue;
+        }
+
+        emptyStreak = 0;
+        const allWords = getWordsFromResult(result);
+
         try {
           const addResult = await addWordsDirect(allWords);
           toast({ title: "DB追加完了", description: `${addResult.added}個追加（合計 ${addResult.total}個）` });
@@ -393,20 +414,10 @@ export default function Home() {
 
         const cleanupPromise = isCleaningUpRef.current ? Promise.resolve() : runCleanup();
 
-        const nextTargetRes = await (await fetch("/api/target")).json();
-        setTarget(nextTargetRes.target);
-        setGenResult(null);
-
-        randomLvl = 8 + Math.floor(Math.random() * 3);
-        setLevel(randomLvl);
-
-        if (!autoModeRef.current) { await cleanupPromise; break; }
-
-        result = await generateDissSSE(nextTargetRes.target, randomLvl);
+        const elapsed = Date.now() - cycleStart;
+        if (elapsed < 3000) await delay(3000 - elapsed);
 
         await cleanupPromise;
-
-        if (!autoModeRef.current || !result) break;
       }
     } catch (err) {
       toast({ title: "オートモードエラー", description: err instanceof Error ? err.message : "エラーが発生しました", variant: "destructive" });
