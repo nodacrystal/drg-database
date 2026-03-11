@@ -72,6 +72,7 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - **Manual paste-to-add**: Both DB and NG tabs have textarea to paste words in `word/reading(romaji)` format
 - Progress bar: shows count / 10,000 target
 - Age confirmation for level 8+
+- **DB Cleanup (4-step)**: (1) Wrong vowel pattern removal, (2) Script-variant dedup (hiragana/katakana/kanji same word), (3) Containment dedup (word A inside word B → delete B), (4) Tail-character dedup with AI selection of strongest word. Special handling for 顔(ao) and 野郎(ou) — keeps only the most impactful one.
 - SSE streaming with `res.flushHeaders()` + `X-Accel-Buffering: no` for proxy compatibility
 
 ## API Routes

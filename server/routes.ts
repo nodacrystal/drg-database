@@ -570,36 +570,181 @@ ${wordListForFilter}
 
       send("init", `${Object.keys(buckets).length}グループ, ${items.length}語を分析`);
 
-      send("dedup", "グループ内ライム重複チェック中...");
-      const toDelete: number[] = [];
-      for (const [clusterKey, clusterWords] of Object.entries(buckets)) {
-        if (clusterWords.length < 2) continue;
+      const toDelete = new Set<number>();
 
-        const rhymeSeen = new Map<string, typeof clusterWords[0]>();
-        for (const w of clusterWords) {
-          const vowelLen = clusterKey.length;
-          const rhymePart = w.reading.slice(-vowelLen);
-
-          if (rhymeSeen.has(rhymePart)) {
-            toDelete.push(w.id);
-            console.log(`[DEDUP] 韻かぶり削除: "${w.word}"(${w.reading}) ← 韻部分「${rhymePart}」が「${rhymeSeen.get(rhymePart)!.word}」と一致 [${clusterKey}]`);
-          } else {
-            rhymeSeen.set(rhymePart, w);
+      send("check1", "チェック1: グループ内の母音パターン不一致を検出中...");
+      let wrongVowelCount = 0;
+      for (const [groupKey, groupWords] of Object.entries(buckets)) {
+        for (const w of groupWords) {
+          const suffix = w.vowels.length >= 2 ? w.vowels.slice(-2) : w.vowels;
+          if (suffix !== groupKey) {
+            toDelete.add(w.id);
+            wrongVowelCount++;
+            console.log(`[CLEANUP:vowel] "${w.word}" vowels=${w.vowels} suffix=${suffix} ≠ group=${groupKey}`);
           }
         }
       }
+      send("check1", `母音不一致: ${wrongVowelCount}個`);
 
+      send("check2", "チェック2: 表記違い重複を検出中...");
+      let scriptDupCount = 0;
+      for (const [groupKey, groupWords] of Object.entries(buckets)) {
+        const alive = groupWords.filter(w => !toDelete.has(w.id));
+        const readingMap = new Map<string, typeof alive[0]>();
+        for (const w of alive) {
+          const normalized = w.reading.replace(/[ー・\s]/g, "").toLowerCase();
+          if (readingMap.has(normalized)) {
+            toDelete.add(w.id);
+            scriptDupCount++;
+            console.log(`[CLEANUP:script] "${w.word}" ≈ "${readingMap.get(normalized)!.word}" (reading: ${normalized}) [${groupKey}]`);
+          } else {
+            readingMap.set(normalized, w);
+          }
+        }
+
+        const aliveAfter = groupWords.filter(w => !toDelete.has(w.id));
+        const romajiMap = new Map<string, typeof aliveAfter[0]>();
+        for (const w of aliveAfter) {
+          if (romajiMap.has(w.romaji)) {
+            toDelete.add(w.id);
+            scriptDupCount++;
+            console.log(`[CLEANUP:romaji] "${w.word}" ≈ "${romajiMap.get(w.romaji)!.word}" (romaji: ${w.romaji}) [${groupKey}]`);
+          } else {
+            romajiMap.set(w.romaji, w);
+          }
+        }
+      }
+      send("check2", `表記違い重複: ${scriptDupCount}個`);
+
+      send("check3", "チェック3: 包含関係の重複を検出中...");
+      let containCount = 0;
+      for (const [groupKey, groupWords] of Object.entries(buckets)) {
+        const alive = groupWords.filter(w => !toDelete.has(w.id));
+        for (let i = 0; i < alive.length; i++) {
+          if (toDelete.has(alive[i].id)) continue;
+          for (let j = 0; j < alive.length; j++) {
+            if (i === j || toDelete.has(alive[j].id)) continue;
+            const shorter = alive[i].reading;
+            const longer = alive[j].reading;
+            if (shorter.length < longer.length && longer.includes(shorter)) {
+              toDelete.add(alive[j].id);
+              containCount++;
+              console.log(`[CLEANUP:contain] "${alive[j].word}" contains "${alive[i].word}" → 長い方を削除 [${groupKey}]`);
+            }
+          }
+        }
+      }
+      send("check3", `包含重複: ${containCount}個`);
+
+      send("check4", "チェック4: 末尾文字一致の重複を検出中...");
+      let tailDupCount = 0;
+
+      const SPECIAL_TAILS: Record<string, string[]> = {
+        "ao": ["顔", "がお", "gao"],
+        "ou": ["野郎", "やろう", "yarou", "やろ", "yaro"],
+      };
+
+      for (const [groupKey, groupWords] of Object.entries(buckets)) {
+        const alive = groupWords.filter(w => !toDelete.has(w.id));
+
+        const specialTails = SPECIAL_TAILS[groupKey];
+        if (specialTails && alive.length >= 2) {
+          const matchingWords = alive.filter(w => {
+            return specialTails.some(tail =>
+              w.word.endsWith(tail) || w.reading.endsWith(tail) || w.romaji.endsWith(tail)
+            );
+          });
+
+          if (matchingWords.length > 1) {
+            const tailLabel = specialTails[0];
+            send("check4", `[${groupKey}]「${tailLabel}」系 ${matchingWords.length}個 → AI選定中...`);
+            try {
+              const wordList = matchingWords.map(w => w.word).join("\n");
+              const pickResult = await ai.models.generateContent({
+                model: "gemini-2.5-flash",
+                contents: `以下のワードリストから最も強烈・インパクトがあるものを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${wordList}`,
+                config: geminiConfig,
+              });
+              const bestWord = (pickResult.text || "").trim().replace(/^「/, "").replace(/」$/, "").trim();
+              const bestMatch = matchingWords.find(w => w.word === bestWord);
+              const keepId = bestMatch ? bestMatch.id : matchingWords[0].id;
+              for (const w of matchingWords) {
+                if (w.id !== keepId) {
+                  toDelete.add(w.id);
+                  tailDupCount++;
+                  console.log(`[CLEANUP:special] "${w.word}" → 「${tailLabel}」系重複削除 (残す: "${matchingWords.find(m => m.id === keepId)?.word}") [${groupKey}]`);
+                }
+              }
+            } catch {
+              for (let k = 1; k < matchingWords.length; k++) {
+                toDelete.add(matchingWords[k].id);
+                tailDupCount++;
+              }
+            }
+          }
+        }
+
+        const aliveAfterSpecial = groupWords.filter(w => !toDelete.has(w.id));
+        const tailMap = new Map<string, { word: typeof aliveAfterSpecial[0]; candidates: typeof aliveAfterSpecial }>();
+
+        for (const w of aliveAfterSpecial) {
+          const readingTail = w.reading.length >= 2 ? w.reading.slice(-2) : w.reading;
+          if (!tailMap.has(readingTail)) {
+            tailMap.set(readingTail, { word: w, candidates: [w] });
+          } else {
+            tailMap.get(readingTail)!.candidates.push(w);
+          }
+        }
+
+        for (const [tail, { candidates }] of tailMap.entries()) {
+          if (candidates.length <= 1) continue;
+          if (specialTails && specialTails.some(st => tail.endsWith(st.slice(-2)))) continue;
+
+          if (candidates.length <= 5) {
+            try {
+              const wordList = candidates.map(w => w.word).join("\n");
+              const pickResult = await ai.models.generateContent({
+                model: "gemini-2.5-flash",
+                contents: `以下の末尾「${tail}」で終わるワードから最も強烈・インパクトがあるものを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${wordList}`,
+                config: geminiConfig,
+              });
+              const bestWord = (pickResult.text || "").trim().replace(/^「/, "").replace(/」$/, "").trim();
+              const bestMatch = candidates.find(w => w.word === bestWord);
+              const keepId = bestMatch ? bestMatch.id : candidates[0].id;
+              for (const w of candidates) {
+                if (w.id !== keepId) {
+                  toDelete.add(w.id);
+                  tailDupCount++;
+                  console.log(`[CLEANUP:tail] "${w.word}" → 末尾「${tail}」重複削除 (残す: "${candidates.find(m => m.id === keepId)?.word}") [${groupKey}]`);
+                }
+              }
+            } catch {
+              for (let k = 1; k < candidates.length; k++) {
+                toDelete.add(candidates[k].id);
+                tailDupCount++;
+              }
+            }
+          } else {
+            for (let k = 1; k < candidates.length; k++) {
+              toDelete.add(candidates[k].id);
+              tailDupCount++;
+            }
+          }
+        }
+      }
+      send("check4", `末尾重複: ${tailDupCount}個`);
+
+      const deleteArray = Array.from(toDelete);
       let totalDeleted = 0;
-      if (toDelete.length > 0) {
-        totalDeleted = await deleteWords(toDelete);
-        send("dedup", `韻かぶり${totalDeleted}個を削除`);
-      } else {
-        send("dedup", "韻かぶりなし");
+      if (deleteArray.length > 0) {
+        totalDeleted = await deleteWords(deleteArray);
+        send("delete", `合計${totalDeleted}個を削除`);
       }
 
       if (heartbeat) clearInterval(heartbeat);
       const finalCount = await getWordCount();
-      send("done", `整理完了: 重複削除${totalDeleted}個 (残り${finalCount}語, ${formatElapsed(Date.now() - startTime)})`);
+      const summary = `母音不一致${wrongVowelCount} + 表記重複${scriptDupCount} + 包含${containCount} + 末尾重複${tailDupCount} = ${totalDeleted}個削除`;
+      send("done", `整理完了: ${summary} (残り${finalCount}語, ${formatElapsed(Date.now() - startTime)})`);
 
       if (!disconnected) {
         res.write(`data: ${JSON.stringify({ type: "result", deleted: totalDeleted, merged: 0, total: finalCount })}\n\n`);
