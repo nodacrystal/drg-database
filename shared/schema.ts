@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, serial, text, integer, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, timestamp, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -10,6 +10,7 @@ export const words = pgTable("words", {
   romaji: text("romaji").notNull(),
   vowels: text("vowels").notNull(),
   charCount: integer("char_count").notNull(),
+  protected: boolean("protected").default(false),
   createdAt: timestamp("created_at").defaultNow(),
 });
 

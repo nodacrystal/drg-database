@@ -96,3 +96,15 @@ export async function getNgWordCount(): Promise<number> {
 export async function clearNgWords(): Promise<void> {
   await db.delete(ngWords);
 }
+
+export async function markWordsProtected(ids: number[]): Promise<void> {
+  if (ids.length === 0) return;
+  const idList = ids.join(",");
+  await db.execute(sql`UPDATE words SET protected = true WHERE id IN (${sql.raw(idList)})`);
+}
+
+export async function ensureProtectedColumn(): Promise<void> {
+  try {
+    await db.execute(sql`ALTER TABLE words ADD COLUMN IF NOT EXISTS protected boolean DEFAULT false`);
+  } catch {}
+}

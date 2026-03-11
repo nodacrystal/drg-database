@@ -105,6 +105,9 @@ export default function Home() {
   const autoModeRef = useRef(false);
   const isCleaningUpRef = useRef(false);
   const cleanupPromiseRef = useRef<Promise<void> | null>(null);
+  const generateDissSSERef = useRef<typeof generateDissSSE | null>(null);
+  const addWordsDirectRef = useRef<typeof addWordsDirect | null>(null);
+  const runCleanupRef = useRef<typeof runCleanup | null>(null);
 
   useEffect(() => { if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: "smooth" }); }, [progressLogs]);
   useEffect(() => { return () => { if (timerRef.current) clearInterval(timerRef.current); }; }, []);
@@ -371,6 +374,10 @@ export default function Home() {
     return data;
   }, [queryClient]);
 
+  useEffect(() => { generateDissSSERef.current = generateDissSSE; }, [generateDissSSE]);
+  useEffect(() => { addWordsDirectRef.current = addWordsDirect; }, [addWordsDirect]);
+  useEffect(() => { runCleanupRef.current = runCleanup; }, [runCleanup]);
+
   const startAutoMode = useCallback(async () => {
     if (autoModeRef.current) return;
     autoModeRef.current = true;
@@ -411,8 +418,9 @@ export default function Home() {
 
         // === Step 3: 生成（完了まで待機）===
         setActiveTab("gen");
-        toast({ title: "Step 3: 生成開始", description: `${targetRes.target.name} Lv.${randomLvl} で生成中...` });
-        const result = await generateDissSSE(targetRes.target, randomLvl);
+        toast({ title: "Step 3: 生成開始", description: `Lv.${randomLvl} で生成中...` });
+        if (!generateDissSSERef.current) break;
+        const result = await generateDissSSERef.current(targetRes.target, randomLvl);
         if (!autoModeRef.current) break;
 
         if (!result || result.total === 0) {
@@ -435,7 +443,8 @@ export default function Home() {
         await delay(500);
         const allWords = getWordsFromResult(result);
         try {
-          const addResult = await addWordsDirect(allWords);
+          if (!addWordsDirectRef.current) break;
+          const addResult = await addWordsDirectRef.current(allWords);
           toast({ title: "Step 4: DB追加完了", description: `${addResult.added}個追加（合計 ${addResult.total}個）` });
           setAutoModeCount(prev => prev + 1);
         } catch (err) {
@@ -446,14 +455,15 @@ export default function Home() {
 
         // === Step 5: 整理（完了まで待機）===
         toast({ title: "Step 5: 整理開始", description: "データベースの整理を実行中..." });
-        await runCleanup();
+        if (!runCleanupRef.current) break;
+        await runCleanupRef.current();
         toast({ title: "Step 5: 整理完了", description: "整理が完了しました" });
         await delay(2000);
         if (!autoModeRef.current) break;
 
         // === Step 6: 次のサイクルへ ===
-        toast({ title: "Step 6: 次のサイクルへ", description: "2秒後に次のサイクルを開始します..." });
-        await delay(2000);
+        toast({ title: "Step 6: 次のサイクルへ", description: "5秒後に次のサイクルを開始します..." });
+        await delay(5000);
       }
     } catch (err) {
       toast({ title: "オートモードエラー", description: err instanceof Error ? err.message : "エラーが発生しました", variant: "destructive" });
@@ -461,7 +471,7 @@ export default function Home() {
 
     setIsAutoMode(false);
     autoModeRef.current = false;
-  }, [generateDissSSE, addWordsDirect, runCleanup, toast]);
+  }, [toast]);
 
   const stopAutoMode = useCallback(() => {
     autoModeRef.current = false;

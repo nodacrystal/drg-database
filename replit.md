@@ -107,17 +107,29 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - During auto mode, manual controls (slider, checkboxes, generate button) are disabled
 - Empty result detection: 3 consecutive empty results → auto-stop with toast
 
+## Rate Limit Management
+- `aiGenerate()` wrapper: All Gemini API calls go through this with exponential backoff retry (max 3 retries)
+- Retry delays: 2s → 4s → 8s (with jitter) on 429 rate limit errors
+- Reduced parallelism: STEP1 generation uses 3 sequential batches of 2 (instead of 6 parallel), check4 picks in batches of 3, check5 semantic in batches of 3
+- Auto mode cooldown: 5 seconds between cycles for rate limit recovery
+
 ## Cleanup Optimization
-- Check4 (tail dedup) AI calls are parallelized in 2 phases:
-  - Phase 1: All special tail tasks (顔, 野郎) run in parallel via Promise.all
-  - Phase 2: All generic tail tasks run in parallel via Promise.all
-- Previously sequential AI calls now run concurrently for significant speedup
+- Check4 (tail dedup) AI calls run in batches of 3 with `aiGenerate` retry
+- Check5 (semantic dedup) AI calls run in batches of 3 with `aiGenerate` retry
+- Protected word system: `protected` boolean column; words surviving cleanup get marked protected; check4/check5 skip protected words
+
+## Stale Closure Fix
+- `generateDissSSERef`, `addWordsDirectRef`, `runCleanupRef` refs kept in sync via useEffect
+- `startAutoMode` uses refs instead of direct function references to avoid stale closures
+- Dependency array only includes `toast` (stable) — not the functions themselves
 
 ## Recent Changes
-- 2026-03-11: Full Auto Mode implemented with concurrent cleanup + generation
-- 2026-03-11: Cleanup check4 AI calls parallelized for speed
-- 2026-03-11: Code refactored: extracted getWordsFromResult, added isCleaningUpRef, removed unnecessary auto-trigger on add
+- 2026-03-11: Rate limit retry with exponential backoff added to all AI calls
+- 2026-03-11: Reduced parallelism across generation and cleanup to prevent rate limit cascading
+- 2026-03-11: Stale closure fix: auto mode uses refs for latest function versions
+- 2026-03-11: Full Auto Mode implemented with strict sequential flow
+- 2026-03-11: Cleanup check4/check5 AI calls batched for rate limit management
+- 2026-03-11: Protected word system added to prevent DB shrinkage
 - 2026-03-10: Generation rebuilt to 3-step pipeline (300 words → quality filter → vowel grouping)
 - 2026-03-10: Target data simplified: removed career/evaluation, kept name/appearance/personality
 - 2026-03-10: Results UI redesigned: color-coded vowel pattern groups with chip-style word display
-- 2026-03-10: Code refactored: removed PATTERN_DATA, PUNCHLINE_REFERENCE, old 6-pattern generation

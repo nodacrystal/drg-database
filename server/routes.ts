@@ -5,7 +5,7 @@ import { z } from "zod";
 import {
   getAllWords, getWordCount, getWordStrings, addWords, deleteWord, deleteWords,
   clearAllWords, exportWords, getAllNgWords, getNgWordStrings,
-  addNgWords, getNgWordCount, clearNgWords,
+  addNgWords, getNgWordCount, clearNgWords, markWordsProtected, ensureProtectedColumn,
 } from "./storage";
 import { TARGETS, type TargetData } from "./targets";
 
@@ -35,6 +35,26 @@ const safetySettings = [
 ];
 
 const geminiConfig = { maxOutputTokens: 8192, safetySettings, thinkingConfig: { thinkingBudget: 0 } };
+
+async function aiGenerate(contents: string, config?: any, maxRetries = 3): Promise<any> {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents,
+        config: config || geminiConfig,
+      });
+    } catch (err: any) {
+      if (err?.status === 429 && attempt < maxRetries) {
+        const delay = Math.pow(2, attempt + 1) * 1000 + Math.random() * 1000;
+        console.log(`[RATE_LIMIT] Retry ${attempt + 1}/${maxRetries} after ${Math.round(delay)}ms`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
 
 interface WordEntry { word: string; reading: string; romaji: string; }
 
@@ -186,6 +206,7 @@ const LEVEL_CONFIGS: Record<number, { label: string; wordType: string; instructi
 };
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
+  await ensureProtectedColumn();
 
   app.get("/api/target", (_req, res) => {
     const t = TARGETS[Math.floor(Math.random() * TARGETS.length)];
@@ -248,11 +269,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (ngWordList.length >= 5) {
         send("init", "NGワード傾向分析中...");
         try {
-          const r = await ai.models.generateContent({
-            model: "gemini-2.5-flash",
-            contents: `以下はユーザーが拒否した日本語ワード一覧。避けるべきパターンを3行以内で簡潔に述べよ:\n${ngWordList.slice(-80).join("、")}`,
-            config: geminiConfig,
-          });
+          const r = await aiGenerate(`以下はユーザーが拒否した日本語ワード一覧。避けるべきパターンを3行以内で簡潔に述べよ:\n${ngWordList.slice(-80).join("、")}`);
           ngAnalysis = r.text || "";
         } catch {}
         logTiming("ng-analysis");
@@ -266,7 +283,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const contentType = level <= 2 ? "リスペクト・称賛" : level === 3 ? "親しみ・愛あるイジり" : level === 4 ? "軽口・テレビ的イジり" : "ディスり・攻撃・挑発";
       const antiPraise = level >= 4 ? `\n全てのワードが攻撃・批判・挑発・煽りであること。褒め言葉・ポジティブ表現は絶対に禁止。` : "";
 
-      send("step1", `STEP1: ディスワード300個を生成中... (6並列×50個)`);
+      send("step1", `STEP1: ディスワード300個を生成中... (3バッチ×2並列×50個)`);
 
       const wordTypes = level <= 3
         ? `- 褒め言葉・称賛（ターゲットの長所を称える）
@@ -303,15 +320,15 @@ ${shortNg ? `\n生成禁止ワード: ${shortNg}` : ""}${ngSection}
 例: ポンコツ野郎/ぽんこつやろう(ponkotsuyarou)
 ※必ず「/」の後にひらがな読みを書き、(romaji)を付けること`;
 
-      const step1Results = await Promise.allSettled(
-        Array.from({ length: 6 }, (_, i) =>
-          ai.models.generateContent({
-            model: "gemini-2.5-flash",
-            contents: step1Prompt(i),
-            config: { ...geminiConfig, maxOutputTokens: 4096 },
-          })
-        )
-      );
+      const step1Results: PromiseSettledResult<any>[] = [];
+      for (let batch = 0; batch < 3; batch++) {
+        const batchResults = await Promise.allSettled(
+          [batch * 2, batch * 2 + 1].map(i =>
+            aiGenerate(step1Prompt(i), { ...geminiConfig, maxOutputTokens: 4096 })
+          )
+        );
+        step1Results.push(...batchResults);
+      }
       logTiming("step1-generate");
 
       const rawWords: WordEntry[] = [];
@@ -358,11 +375,7 @@ ${wordListForFilter}
       let filteredWordSet: Set<string>;
       const rawWordSet = new Set(rawWords.map(w => w.word));
       try {
-        const filterResult = await ai.models.generateContent({
-          model: "gemini-2.5-flash",
-          contents: step2Prompt,
-          config: { ...geminiConfig, maxOutputTokens: 8192 },
-        });
+        const filterResult = await aiGenerate(step2Prompt, { ...geminiConfig, maxOutputTokens: 8192 });
         const filterText = filterResult.text || "";
         const passedWords = filterText.split("\n")
           .map(l => l.trim().replace(/^\d+[\.\)）、]\s*/, "").replace(/^[・●▸►\-]\s*/, "").replace(/^「/, "").replace(/」$/, "").trim())
@@ -581,6 +594,7 @@ ${wordListForFilter}
       const items = allDbWords.map(w => ({
         id: w.id, word: w.word, reading: w.reading, romaji: w.romaji,
         vowels: extractVowels(w.romaji), charCount: w.charCount,
+        protected: w.protected ?? false,
       }));
 
       const buckets: Record<string, typeof items> = {};
@@ -703,11 +717,7 @@ ${wordListForFilter}
       const aiPickWord = async (task: AiPickTask) => {
         try {
           const wordList = task.candidates.map(w => w.word).join("\n");
-          const pickResult = await ai.models.generateContent({
-            model: "gemini-2.5-flash",
-            contents: task.prompt,
-            config: geminiConfig,
-          });
+          const pickResult = await aiGenerate(task.prompt);
           const bestWord = (pickResult.text || "").trim().replace(/^「/, "").replace(/」$/, "").trim();
           const bestMatch = task.candidates.find(w => w.word === bestWord);
           return bestMatch ? bestMatch.id : task.candidates[0].id;
@@ -741,7 +751,7 @@ ${wordListForFilter}
         for (let i = 0; i < specialTasks.length; i++) {
           const keepId = specialResults[i];
           for (const w of specialTasks[i].candidates) {
-            if (w.id !== keepId) { toDelete.add(w.id); tailDupCount++; }
+            if (w.id !== keepId && !w.protected) { toDelete.add(w.id); tailDupCount++; }
           }
         }
       }
@@ -773,16 +783,22 @@ ${wordListForFilter}
       }
 
       for (const fb of genericFallbacks) {
-        for (let k = 1; k < fb.candidates.length; k++) { toDelete.add(fb.candidates[k].id); tailDupCount++; }
+        for (let k = 1; k < fb.candidates.length; k++) {
+          if (!fb.candidates[k].protected) { toDelete.add(fb.candidates[k].id); tailDupCount++; }
+        }
       }
 
       if (genericTasks.length > 0) {
-        send("check4", `末尾重複 ${genericTasks.length}グループをAI並列選定中...`);
-        const genericResults = await Promise.all(genericTasks.map(t => aiPickWord(t)));
-        for (let i = 0; i < genericTasks.length; i++) {
-          const keepId = genericResults[i];
-          for (const w of genericTasks[i].candidates) {
-            if (w.id !== keepId) { toDelete.add(w.id); tailDupCount++; }
+        send("check4", `末尾重複 ${genericTasks.length}グループをAI選定中...`);
+        const PICK_PARALLEL = 3;
+        for (let b = 0; b < genericTasks.length; b += PICK_PARALLEL) {
+          const batch = genericTasks.slice(b, b + PICK_PARALLEL);
+          const batchResults = await Promise.all(batch.map(t => aiPickWord(t)));
+          for (let i = 0; i < batch.length; i++) {
+            const keepId = batchResults[i];
+            for (const w of batch[i].candidates) {
+              if (w.id !== keepId && !w.protected) { toDelete.add(w.id); tailDupCount++; }
+            }
           }
         }
       }
@@ -795,40 +811,44 @@ ${wordListForFilter}
         .map(([key, words]) => ({ key, words: words.filter(w => !toDelete.has(w.id)) }))
         .filter(g => g.words.length >= 2);
 
-      const SEMANTIC_PARALLEL = 5;
-      for (let b = 0; b < groupsToCheck.length; b += SEMANTIC_PARALLEL) {
-        const batch = groupsToCheck.slice(b, b + SEMANTIC_PARALLEL);
+      const groupsWithNewWords = groupsToCheck.filter(g => g.words.some(w => !w.protected));
+      send("check5", `${groupsWithNewWords.length}/${groupsToCheck.length}グループに新規ワードあり`);
+
+      const SEMANTIC_PARALLEL = 3;
+      for (let b = 0; b < groupsWithNewWords.length; b += SEMANTIC_PARALLEL) {
+        const batch = groupsWithNewWords.slice(b, b + SEMANTIC_PARALLEL);
         await Promise.all(batch.map(async (g) => {
           try {
-            const wordList = g.words.map(w => w.word).join("\n");
-            const semResult = await ai.models.generateContent({
-              model: "gemini-2.5-flash",
-              contents: `以下の日本語悪口ワード一覧から「意味がほぼ同じ」「表現違いだけの重複」ペアを全て見つけよ。
-各重複グループから最もインパクトがある1個を残し、残りを削除対象とせよ。
+            const newWords = g.words.filter(w => !w.protected);
+            const protectedWords = g.words.filter(w => w.protected);
+
+            const wordList = g.words.map(w => `${w.word}${w.protected ? " [確定]" : ""}`).join("\n");
+            const semResult = await aiGenerate(`以下の日本語悪口ワード一覧から「意味がほぼ同じ」「表現違いだけの重複」ペアを全て見つけよ。
+[確定]マークが付いたワードは削除禁止。重複ペアが見つかった場合は[確定]でない方を削除せよ。
+両方[確定]なら両方残せ。両方[確定]でなければインパクトがある方を残せ。
 
 検出すべき重複の例:
 - 「うっせーよ」と「うるせえよ」→ 同じ意味の別表現→片方削除
 - 「生きてる価値なし」と「生きる価値なし」→ 活用違いの同義語→片方削除
 - 「存在価値なし」と「生きる価値なし」→ 同じ概念の別表現→片方削除
-- 「影薄いなあ」と「かげうすいなあ」→ 漢字とひらがなの表記違い→片方削除
+- 漢字とひらがなの表記違い→片方削除
 
 重複が無ければ「なし」とだけ出力。重複があれば以下の形式で出力（1グループ1行）:
 残す:ワード / 削除:ワード,ワード
 
 ワード一覧:
-${wordList}`,
-              config: geminiConfig,
-            });
+${wordList}`);
             const text = (semResult.text || "").trim();
             if (text === "なし" || !text.includes("削除")) return;
 
+            const protectedIds = new Set(protectedWords.map(w => w.id));
             for (const line of text.split("\n")) {
               const deleteMatch = line.match(/削除[:：]\s*(.+)/);
               if (!deleteMatch) continue;
-              const deleteWords = deleteMatch[1].split(/[,、，]/).map(w => w.trim().replace(/^「/, "").replace(/」$/, "").trim());
-              for (const dw of deleteWords) {
+              const deleteWordsList = deleteMatch[1].split(/[,、，]/).map(w => w.trim().replace(/^「/, "").replace(/」$/, "").replace(/\s*\[確定\]/, "").trim());
+              for (const dw of deleteWordsList) {
                 const match = g.words.find(w => w.word === dw);
-                if (match && !toDelete.has(match.id)) {
+                if (match && !toDelete.has(match.id) && !protectedIds.has(match.id)) {
                   toDelete.add(match.id);
                   semanticDupCount++;
                   console.log(`[CLEANUP:semantic] "${match.word}" → 意味的重複削除 [${g.key}]`);
@@ -839,8 +859,8 @@ ${wordList}`,
             console.log(`[CLEANUP:semantic] AI failed for group ${g.key}:`, err);
           }
         }));
-        if (b + SEMANTIC_PARALLEL < groupsToCheck.length) {
-          send("check5", `意味的重複検出中... (${Math.min(b + SEMANTIC_PARALLEL, groupsToCheck.length)}/${groupsToCheck.length}グループ完了)`);
+        if (b + SEMANTIC_PARALLEL < groupsWithNewWords.length) {
+          send("check5", `意味的重複検出中... (${Math.min(b + SEMANTIC_PARALLEL, groupsWithNewWords.length)}/${groupsWithNewWords.length}グループ完了)`);
         }
       }
       send("check5", `意味的重複: ${semanticDupCount}個`);
@@ -850,6 +870,12 @@ ${wordList}`,
       if (deleteArray.length > 0) {
         totalDeleted = await deleteWords(deleteArray);
         send("delete", `合計${totalDeleted}個を削除`);
+      }
+
+      const survivingIds = items.filter(w => !toDelete.has(w.id)).map(w => w.id);
+      if (survivingIds.length > 0) {
+        await markWordsProtected(survivingIds);
+        send("protect", `${survivingIds.length}語を確定済みにマーク`);
       }
 
       if (heartbeat) clearInterval(heartbeat);
