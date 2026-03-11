@@ -32,7 +32,7 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 
 ## Data Model
 - Words table: `{ id, word UNIQUE, reading, romaji, vowels, char_count, created_at }`
-- NG Words table: `{ id, word UNIQUE, reading, romaji, created_at }` — user-rejected words
+- NG Words table: `{ id, word UNIQUE, reading, romaji, created_at }` — banned suffix/ending terms (e.g. 顔, 野郎, 存在)
 - `reading` = hiragana reading, `romaji` = romanized, `vowels` = extracted vowels (includes 'n' for ん)
 - `char_count` = `reading.length` (hiragana character count)
 
@@ -48,7 +48,7 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
   - Assignment: legendary first, then super (unassigned only), then hard (unassigned only)
   - Sorted by tier (legendary → super → hard) then by word count within tier
 - **Auto-cleanup**: Adding words via "選択ワードをデータベースに追加" automatically triggers the database "整理" cleanup process
-- **Auto-save to NG**: All deleted words (manual, batch, cleanup) automatically saved to NG table
+- **NG単語リスト (NG Word List)**: Stores banned suffix/ending terms. Words ending with any NG term are blocked from generation and addition. Cleanup saves only the shared suffix (not full word) to NG. Multi-select + batch delete supported.
 
 ## Generation System (3-Step Pipeline)
 - **STEP 1: Bulk Generation** — 6 parallel AI calls, each generates 50 diss words (target: 300 total)
@@ -77,9 +77,7 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - **Vocabulary diversity**: 6 batch-specific approach angles (外見/性格/能力/比喩/方言/造語); NG reference expanded to 100 words
 - **Live timer**: Running timer with green=success, red=error states
 - **Timing diagnostics**: Server logs timing for each phase
-- NG words system: unchecked words saved to ng_words table
-- **NG bulk copy**: Copy all NG words to clipboard
-- **Manual paste-to-add**: Both DB and NG tabs have textarea to paste words in `word/reading(romaji)` format
+- **Manual paste-to-add**: DB tab uses `word/reading(romaji)` format; NG tab uses simple word list (改行/カンマ区切り)
 - Progress bar: shows count / 10,000 target
 - Age confirmation for level 8+
 - **DB Cleanup (5-step)**: (1) Wrong vowel pattern removal, (2) Script-variant dedup with enhanced normalization (っ removal, ー removal, を→お, small kana, word↔reading cross-match), (3) Containment dedup (word A inside word B → delete B), (4) Tail-character dedup with AI selection of strongest word. Special handling for 顔(ao) and 野郎(ou), (5) AI semantic dedup — Gemini detects meaning-similar duplicates within each vowel group (e.g. うっせーよ↔うるせえよ, 生きてる価値なし↔存在価値なし, kanji↔hiragana variants). 5 groups processed in parallel.
@@ -97,17 +95,18 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - `GET /api/favorites` - Get all words grouped by last-2-vowel pattern
 - `POST /api/favorites` - Add words to DB (bulk insert, skip duplicates)
 - `POST /api/favorites/paste` - Parse and add words from pasted text
-- `DELETE /api/favorites/:id` - Delete single word (auto-saves to NG)
-- `POST /api/favorites/batch-delete` - Batch delete words by IDs (auto-saves to NG)
+- `DELETE /api/favorites/:id` - Delete single word
+- `POST /api/favorites/batch-delete` - Batch delete words by IDs
 - `DELETE /api/favorites` - Clear all words
 - `GET /api/favorites/count` - Get total word count
 - `GET /api/favorites/export` - Export all words as text
-- `POST /api/ng-words` - Save rejected words as NG words
-- `POST /api/ng-words/paste` - Parse and add NG words from pasted text
-- `GET /api/ng-words` - Get all NG words
-- `GET /api/ng-words/count` - Get NG word count
-- `DELETE /api/ng-words` - Clear all NG words
-- `POST /api/favorites/cleanup` - DB cleanup via SSE (rhyme dedup within groups only)
+- `POST /api/ng-words` - Add NG terms (accepts `{terms:[...]}` or `{words:[...]}`)
+- `POST /api/ng-words/paste` - Parse and add NG terms from text (simple word list)
+- `POST /api/ng-words/batch-delete` - Batch delete NG terms by IDs
+- `GET /api/ng-words` - Get all NG terms
+- `GET /api/ng-words/count` - Get NG term count
+- `DELETE /api/ng-words` - Clear all NG terms
+- `POST /api/favorites/cleanup` - DB cleanup via SSE (saves shared suffixes to NG)
 - `POST /api/favorites/scrutinize` - DB精査 via SSE (vowel check, duplicate endings, AI content check)
 
 ## Full Auto Mode
@@ -140,11 +139,11 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - Dependency array only includes `toast` (stable) — not the functions themselves
 
 ## Recent Changes
+- 2026-03-11: NG system overhaul: renamed to "NG単語リスト", stores suffix/ending terms instead of full words, blocks generation/addition of words ending with NG terms, cleanup saves only shared suffixes to NG, multi-select + batch delete for NG tab
 - 2026-03-11: 精査 (Scrutiny) feature: AI-powered DB scan for vowel mismatch, duplicate endings, prohibited/discriminatory/trademark words
 - 2026-03-11: Fixed 8 words with wrong romaji, deleted 13 duplicate/incomplete words, saved user feedback as reference
 - 2026-03-11: Tiered rhyme system: legendary (5+), super (4), hard (3) vowel match with distinct styling
 - 2026-03-11: Tap-to-select in DB tab with action bar (bulk copy/delete)
-- 2026-03-11: Auto-save deleted words to NG (manual, batch, cleanup)
 - 2026-03-11: Batch delete endpoint with Zod validation (max 500 IDs)
 - 2026-03-11: Vocabulary diversity: 6 approach angles per generation batch
 - 2026-03-11: SQL injection fix: replaced raw SQL with Drizzle inArray

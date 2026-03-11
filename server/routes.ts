@@ -5,7 +5,7 @@ import { z } from "zod";
 import {
   getAllWords, getWordCount, getWordStrings, addWords, deleteWord, deleteWords,
   clearAllWords, exportWords, getAllNgWords, getNgWordStrings,
-  addNgWords, getNgWordCount, clearNgWords, markWordsProtected, ensureProtectedColumn,
+  addNgWords, getNgWordCount, clearNgWords, deleteNgWords, markWordsProtected, ensureProtectedColumn,
   getWordById, getWordsByIds,
 } from "./storage";
 import { TARGETS, type TargetData } from "./targets";
@@ -267,20 +267,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       logTiming("db");
       send("init", `準備完了 (DB: ${existingWords.length}語, NG: ${ngWordList.length}語)`);
 
-      let ngAnalysis = "";
-      if (ngWordList.length >= 5) {
-        send("init", "NGワード傾向分析中...");
-        try {
-          const r = await aiGenerate(`以下はユーザーが拒否した日本語ワード一覧。避けるべきパターンを3行以内で簡潔に述べよ:\n${ngWordList.slice(-80).join("、")}`);
-          ngAnalysis = r.text || "";
-        } catch {}
-        logTiming("ng-analysis");
-      }
-
-      const ngSection = ngAnalysis ? `\n【NG傾向（避けよ）】${ngAnalysis}` : "";
-      const seen = new Set<string>([...existingWords, ...ngWordList]);
+      const seen = new Set<string>(existingWords);
       const shortHistory = existingWords.slice(-80).join(",") || "なし";
-      const shortNg = ngWordList.length > 0 ? ngWordList.slice(-100).join(",") : "";
+      const ngEndingNote = ngWordList.length > 0 ? `\n【末尾禁止単語】以下の単語で終わるワードは生成禁止: ${ngWordList.join("、")}` : "";
 
       const contentType = level <= 2 ? "リスペクト・称賛" : level === 3 ? "親しみ・愛あるイジり" : level === 4 ? "軽口・テレビ的イジり" : "ディスり・攻撃・挑発";
       const antiPraise = level >= 4 ? `\n全てのワードが攻撃・批判・挑発・煽りであること。褒め言葉・ポジティブ表現は絶対に禁止。` : "";
@@ -336,7 +325,7 @@ ${wordTypes}
 - 造語OK（ただし意味が通じること）
 - ありきたりな表現を避け、独自性のある言葉を生成せよ
 - 「〜野郎」「〜め」「〜だ」など同じ語尾パターンは最大2個まで
-${shortNg ? `\n生成禁止ワード: ${shortNg}` : ""}${ngSection}
+${ngEndingNote}
 既出（生成するな）: ${shortHistory}
 バッチ${batchIndex + 1}/6
 
@@ -369,6 +358,7 @@ ${shortNg ? `\n生成禁止ワード: ${shortNg}` : ""}${ngSection}
         for (const e of entries) {
           if (seen.has(e.word)) continue;
           if (rawWords.some(w => w.word === e.word)) continue;
+          if (ngWordList.length > 0 && ngWordList.some(ng => e.word.endsWith(ng))) continue;
           const isHiragana = /^[ぁ-ゟー]+$/.test(e.reading);
           const len = isHiragana ? e.reading.length : countMoraFromRomaji(e.romaji);
           if (len < 3 || len > 10) continue;
@@ -553,7 +543,9 @@ ${wordListForFilter}
     try {
       const parsed = wordArraySchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: "不正なデータです" });
-      const added = await addWords(parsed.data.words.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji, vowels: extractVowels(w.romaji), charCount: w.reading.length })));
+      const ngList = await getNgWordStrings();
+      const filtered = parsed.data.words.filter(w => !ngList.some(ng => w.word.endsWith(ng)));
+      const added = await addWords(filtered.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji, vowels: extractVowels(w.romaji), charCount: w.reading.length })));
       res.json({ added, total: await getWordCount() });
     } catch (error) { res.status(500).json({ error: "お気に入りの追加に失敗しました" }); }
   });
@@ -562,11 +554,7 @@ ${wordListForFilter}
     try {
       const id = parseInt(req.params.id);
       if (isNaN(id)) return res.status(400).json({ error: "不正なIDです" });
-      const word = await getWordById(id);
       await deleteWord(id);
-      if (word) {
-        await addNgWords([{ word: word.word, reading: word.reading, romaji: word.romaji }]);
-      }
       res.json({ success: true, total: await getWordCount() });
     } catch { res.status(500).json({ error: "削除に失敗しました" }); }
   });
@@ -578,11 +566,7 @@ ${wordListForFilter}
       const parsed = batchDeleteSchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: "不正なデータです" });
       const { ids } = parsed.data;
-      const wordsToDelete = await getWordsByIds(ids);
       const deleted = await deleteWords(ids);
-      if (wordsToDelete.length > 0) {
-        await addNgWords(wordsToDelete.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji })));
-      }
       res.json({ deleted, total: await getWordCount() });
     } catch { res.status(500).json({ error: "一括削除に失敗しました" }); }
   });
@@ -769,12 +753,21 @@ ${wordList}
     try { res.setHeader("Content-Type", "text/plain; charset=utf-8"); res.send(await exportWords()); } catch { res.status(500).json({ error: "エクスポートに失敗しました" }); }
   });
 
+  const ngTermsSchema = z.object({ terms: z.array(z.string().min(1)).min(1).max(500) });
+
   app.post("/api/ng-words", async (req, res) => {
     try {
-      const parsed = wordArraySchema.safeParse(req.body);
-      if (!parsed.success) return res.status(400).json({ error: "不正なデータです" });
-      const added = await addNgWords(parsed.data.words.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji })));
-      res.json({ added, total: await getNgWordCount() });
+      if (req.body.terms) {
+        const parsed = ngTermsSchema.safeParse(req.body);
+        if (!parsed.success) return res.status(400).json({ error: "不正なデータです" });
+        const added = await addNgWords(parsed.data.terms.map(t => ({ word: t, reading: "", romaji: "" })));
+        res.json({ added, total: await getNgWordCount() });
+      } else {
+        const parsed = wordArraySchema.safeParse(req.body);
+        if (!parsed.success) return res.status(400).json({ error: "不正なデータです" });
+        const added = await addNgWords(parsed.data.words.map(w => ({ word: w.word, reading: w.reading || "", romaji: w.romaji || "" })));
+        res.json({ added, total: await getNgWordCount() });
+      }
     } catch { res.status(500).json({ error: "NGワードの追加に失敗しました" }); }
   });
 
@@ -788,6 +781,15 @@ ${wordList}
 
   app.delete("/api/ng-words", async (_req, res) => {
     try { await clearNgWords(); res.json({ success: true, total: 0 }); } catch { res.status(500).json({ error: "NGワードの全削除に失敗しました" }); }
+  });
+
+  app.post("/api/ng-words/batch-delete", async (req, res) => {
+    try {
+      const parsed = batchDeleteSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: "不正なデータです" });
+      const deleted = await deleteNgWords(parsed.data.ids);
+      res.json({ deleted, total: await getNgWordCount() });
+    } catch { res.status(500).json({ error: "一括削除に失敗しました" }); }
   });
 
   app.post("/api/favorites/cleanup", async (req, res) => {
@@ -836,6 +838,7 @@ ${wordList}
       send("init", `${Object.keys(buckets).length}グループ, ${items.length}語を分析`);
 
       const toDelete = new Set<number>();
+      const ngSuffixes = new Set<string>();
 
       send("check1", "チェック1: グループ内の母音パターン不一致を検出中...");
       let wrongVowelCount = 0;
@@ -980,9 +983,11 @@ ${wordList}
         const specialResults = await Promise.all(specialTasks.map(t => aiPickWord(t)));
         for (let i = 0; i < specialTasks.length; i++) {
           const keepId = specialResults[i];
+          let anyDeleted = false;
           for (const w of specialTasks[i].candidates) {
-            if (w.id !== keepId && !w.protected) { toDelete.add(w.id); tailDupCount++; }
+            if (w.id !== keepId && !w.protected) { toDelete.add(w.id); tailDupCount++; anyDeleted = true; }
           }
+          if (anyDeleted) ngSuffixes.add(specialTasks[i].label);
         }
       }
 
@@ -1013,9 +1018,12 @@ ${wordList}
       }
 
       for (const fb of genericFallbacks) {
+        const tail = fb.candidates[0]?.reading.slice(-2) || "";
+        let anyDeleted = false;
         for (let k = 1; k < fb.candidates.length; k++) {
-          if (!fb.candidates[k].protected) { toDelete.add(fb.candidates[k].id); tailDupCount++; }
+          if (!fb.candidates[k].protected) { toDelete.add(fb.candidates[k].id); tailDupCount++; anyDeleted = true; }
         }
+        if (anyDeleted && tail) ngSuffixes.add(tail);
       }
 
       if (genericTasks.length > 0) {
@@ -1026,9 +1034,11 @@ ${wordList}
           const batchResults = await Promise.all(batch.map(t => aiPickWord(t)));
           for (let i = 0; i < batch.length; i++) {
             const keepId = batchResults[i];
+            let anyDeleted = false;
             for (const w of batch[i].candidates) {
-              if (w.id !== keepId && !w.protected) { toDelete.add(w.id); tailDupCount++; }
+              if (w.id !== keepId && !w.protected) { toDelete.add(w.id); anyDeleted = true; tailDupCount++; }
             }
+            if (anyDeleted) ngSuffixes.add(batch[i].label);
           }
         }
       }
@@ -1098,12 +1108,14 @@ ${wordList}`);
       const deleteArray = Array.from(toDelete);
       let totalDeleted = 0;
       if (deleteArray.length > 0) {
-        const wordsToNg = await getWordsByIds(deleteArray);
         totalDeleted = await deleteWords(deleteArray);
-        if (wordsToNg.length > 0) {
-          await addNgWords(wordsToNg.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji })));
+        if (ngSuffixes.size > 0) {
+          const suffixEntries = Array.from(ngSuffixes).map(s => ({ word: s, reading: "", romaji: "" }));
+          const addedNg = await addNgWords(suffixEntries);
+          send("delete", `合計${totalDeleted}個を削除（NG単語${addedNg}個追加: ${Array.from(ngSuffixes).join("、")}）`);
+        } else {
+          send("delete", `合計${totalDeleted}個を削除`);
         }
-        send("delete", `合計${totalDeleted}個を削除（NGに保存）`);
       }
 
       const survivingIds = items.filter(w => !toDelete.has(w.id)).map(w => w.id);
@@ -1138,7 +1150,9 @@ ${wordList}`);
       if (!text || typeof text !== "string") return res.status(400).json({ error: "テキストが必要です" });
       const entries = parseWordEntries(text);
       if (entries.length === 0) return res.status(400).json({ error: "有効なワードが見つかりません。形式: ワード/ひらがな(romaji)" });
-      const added = await addWords(entries.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji, vowels: extractVowels(w.romaji), charCount: w.reading.length })));
+      const ngList = await getNgWordStrings();
+      const filtered = entries.filter(w => !ngList.some(ng => w.word.endsWith(ng)));
+      const added = await addWords(filtered.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji, vowels: extractVowels(w.romaji), charCount: w.reading.length })));
       res.json({ added, total: await getWordCount() });
     } catch { res.status(500).json({ error: "追加に失敗しました" }); }
   });
@@ -1147,9 +1161,9 @@ ${wordList}`);
     try {
       const { text } = req.body;
       if (!text || typeof text !== "string") return res.status(400).json({ error: "テキストが必要です" });
-      const entries = parseWordEntries(text);
-      if (entries.length === 0) return res.status(400).json({ error: "有効なワードが見つかりません。形式: ワード/ひらがな(romaji)" });
-      const added = await addNgWords(entries.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji })));
+      const terms = text.split(/[\n,、，\s]+/).map(s => s.trim()).filter(s => s.length > 0);
+      if (terms.length === 0) return res.status(400).json({ error: "有効な単語が見つかりません" });
+      const added = await addNgWords(terms.map(w => ({ word: w, reading: "", romaji: "" })));
       res.json({ added, total: await getNgWordCount() });
     } catch { res.status(500).json({ error: "追加に失敗しました" }); }
   });

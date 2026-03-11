@@ -103,6 +103,7 @@ export default function Home() {
   const [isAutoMode, setIsAutoMode] = useState(false);
   const [autoModeCount, setAutoModeCount] = useState(0);
   const [selectedFavIds, setSelectedFavIds] = useState<Set<number>>(new Set());
+  const [selectedNgIds, setSelectedNgIds] = useState<Set<number>>(new Set());
   const [isScrutinizing, setIsScrutinizing] = useState(false);
   const [scrutinyLogs, setScrutinyLogs] = useState<ProgressLog[]>([]);
   const autoModeRef = useRef(false);
@@ -239,8 +240,6 @@ export default function Home() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
       queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
     },
   });
 
@@ -251,10 +250,23 @@ export default function Home() {
       return res.json();
     },
     onSuccess: (data) => {
-      toast({ title: "削除完了", description: `${data.deleted}個を削除（NGに保存）` });
+      toast({ title: "削除完了", description: `${data.deleted}個を削除しました` });
       setSelectedFavIds(new Set());
       queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
       queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
+    },
+    onError: () => { toast({ title: "エラー", description: "一括削除に失敗しました", variant: "destructive" }); },
+  });
+
+  const batchDeleteNgMutation = useMutation({
+    mutationFn: async (ids: number[]) => {
+      const res = await fetch("/api/ng-words/batch-delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }) });
+      if (!res.ok) throw new Error("一括削除に失敗しました");
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({ title: "削除完了", description: `${data.deleted}個のNG単語を削除しました` });
+      setSelectedNgIds(new Set());
       queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
       queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
     },
@@ -273,7 +285,7 @@ export default function Home() {
   const clearNgMutation = useMutation({
     mutationFn: async () => { const res = await apiRequest("DELETE", "/api/ng-words"); return res.json(); },
     onSuccess: () => {
-      toast({ title: "削除完了", description: "NGワードをすべて削除しました" });
+      toast({ title: "削除完了", description: "NG単語をすべて削除しました" });
       queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
       queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
     },
@@ -283,17 +295,9 @@ export default function Home() {
     if (checkedWords.size === 0) { toast({ title: "未選択", description: "ワードを選択してください" }); return; }
     const allEntries = getAllEntries();
     const selected = allEntries.filter(e => checkedWords.has(e.word));
-    const unchecked = allEntries.filter(e => !checkedWords.has(e.word));
     addFavMutation.mutate(selected);
-    if (unchecked.length > 0) {
-      try {
-        await fetch("/api/ng-words", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ words: unchecked.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji })) }) });
-        queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
-        queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
-      } catch {}
-    }
     setCheckedWords(new Set());
-  }, [checkedWords, getAllEntries, toast, addFavMutation, queryClient]);
+  }, [checkedWords, getAllEntries, toast, addFavMutation]);
 
   const copyFavorites = useCallback(async () => {
     try {
@@ -305,12 +309,25 @@ export default function Home() {
 
   const copyNgWords = useCallback(async () => {
     if (!ngWordsQuery.data?.words.length) return;
-    const text = ngWordsQuery.data.words.map(w => `${w.word}/${w.reading}(${w.romaji})`).join("\n");
+    const text = ngWordsQuery.data.words.map(w => w.word).join("\n");
     try {
       await navigator.clipboard.writeText(text);
-      toast({ title: "コピー完了", description: `${ngWordsQuery.data.words.length}個のNGワードをコピーしました` });
+      toast({ title: "コピー完了", description: `${ngWordsQuery.data.words.length}個のNG単語をコピーしました` });
     } catch { toast({ title: "エラー", description: "コピーに失敗しました", variant: "destructive" }); }
   }, [ngWordsQuery.data, toast]);
+
+  const toggleNgSelection = useCallback((id: number) => {
+    setSelectedNgIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const deleteSelectedNg = useCallback(() => {
+    if (selectedNgIds.size === 0) return;
+    batchDeleteNgMutation.mutate(Array.from(selectedNgIds));
+  }, [selectedNgIds, batchDeleteNgMutation]);
 
   const toggleFavSelection = useCallback((id: number) => {
     setSelectedFavIds(prev => {
@@ -722,8 +739,8 @@ export default function Home() {
             <Star className="w-4 h-4" />DB
             {totalCount > 0 && <Badge variant="secondary" className="ml-1 text-xs px-1.5 py-0">{totalCount.toLocaleString()}</Badge>}
           </button>
-          <button onClick={() => { setActiveTab("ng"); queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] }); }} className={`flex-1 py-2.5 text-sm font-medium transition-colors flex items-center justify-center gap-1.5 ${activeTab === "ng" ? "bg-primary text-primary-foreground" : "bg-muted/40 text-muted-foreground hover:bg-muted/60"}`} data-testid="tab-ng">
-            <Ban className="w-4 h-4" />NG
+          <button onClick={() => { setActiveTab("ng"); setSelectedNgIds(new Set()); queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] }); }} className={`flex-1 py-2.5 text-sm font-medium transition-colors flex items-center justify-center gap-1.5 ${activeTab === "ng" ? "bg-primary text-primary-foreground" : "bg-muted/40 text-muted-foreground hover:bg-muted/60"}`} data-testid="tab-ng">
+            <Ban className="w-4 h-4" />NG単語リスト
             {ngCount > 0 && <Badge variant="secondary" className="ml-1 text-xs px-1.5 py-0">{ngCount.toLocaleString()}</Badge>}
           </button>
         </div>
@@ -734,7 +751,7 @@ export default function Home() {
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <div className="flex items-center gap-2">
                   <Ban className="w-5 h-5 text-destructive" />
-                  <h2 className="text-base font-semibold">NGワード</h2>
+                  <h2 className="text-base font-semibold">NG単語リスト</h2>
                   <Badge variant="secondary">{ngCount.toLocaleString()}件</Badge>
                 </div>
                 <div className="flex gap-2">
@@ -742,27 +759,42 @@ export default function Home() {
                   <Button variant="outline" size="sm" onClick={() => clearNgMutation.mutate()} disabled={clearNgMutation.isPending || ngCount === 0} data-testid="button-clear-ng"><Trash2 className="w-3.5 h-3.5 mr-1" />全削除</Button>
                 </div>
               </div>
-              <p className="text-xs text-muted-foreground">お気に入りに選ばれなかったワードが蓄積されます。次回の生成時にこれらのワードは除外されます。</p>
+              <p className="text-xs text-muted-foreground">ワードの末尾がNG単語と一致する場合、生成・追加されません。整理や精査で検出された末尾単語が自動追加されます。</p>
+
+              {selectedNgIds.size > 0 && (
+                <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}
+                  className="flex items-center gap-2 bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2">
+                  <span className="text-sm font-medium">{selectedNgIds.size}個選択中</span>
+                  <div className="flex gap-1.5 ml-auto">
+                    <Button variant="ghost" size="sm" onClick={() => setSelectedNgIds(new Set())} data-testid="button-deselect-ng"><X className="w-3.5 h-3.5 mr-1" />解除</Button>
+                    <Button variant="destructive" size="sm" onClick={deleteSelectedNg} disabled={batchDeleteNgMutation.isPending} data-testid="button-delete-selected-ng">
+                      {batchDeleteNgMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Trash2 className="w-3.5 h-3.5 mr-1" />}
+                      削除
+                    </Button>
+                  </div>
+                </motion.div>
+              )}
 
               <div className="space-y-2">
-                <Textarea placeholder="ワードを貼り付けて追加（形式: ワード/ひらがな(romaji) 改行区切り）" value={pasteTextNg} onChange={e => setPasteTextNg(e.target.value)} className="text-xs min-h-[60px]" data-testid="textarea-paste-ng" />
+                <Textarea placeholder="NG単語を入力（改行・カンマ区切り）&#10;例: 野郎、顔、存在" value={pasteTextNg} onChange={e => setPasteTextNg(e.target.value)} className="text-xs min-h-[60px]" data-testid="textarea-paste-ng" />
                 <Button variant="outline" size="sm" onClick={() => pasteNgMutation.mutate(pasteTextNg)} disabled={!pasteTextNg.trim() || pasteNgMutation.isPending} data-testid="button-paste-ng">
                   {pasteNgMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Plus className="w-3.5 h-3.5 mr-1" />}
-                  貼り付けて追加
+                  追加
                 </Button>
               </div>
 
               {ngWordsQuery.isLoading ? (
                 <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-8 w-full rounded-md" />)}</div>
               ) : !ngWordsQuery.data || ngWordsQuery.data.words.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground text-sm" data-testid="text-empty-ng">NGワードはまだありません。</div>
+                <div className="text-center py-8 text-muted-foreground text-sm" data-testid="text-empty-ng">NG単語はまだありません。</div>
               ) : (
                 <div className="flex flex-wrap gap-1.5 max-h-96 overflow-y-auto" data-testid="ng-words-container">
                   {ngWordsQuery.data.words.map(w => (
-                    <div key={w.id} className="inline-flex items-center gap-1 text-xs bg-destructive/10 border border-destructive/20 rounded px-2 py-1" data-testid={`ng-word-${w.id}`}>
+                    <button key={w.id} onClick={() => toggleNgSelection(w.id)}
+                      className={`inline-flex items-center gap-1 text-xs rounded px-2 py-1 cursor-pointer transition-all ${selectedNgIds.has(w.id) ? "bg-primary text-primary-foreground border border-primary ring-2 ring-primary/30" : "bg-destructive/10 border border-destructive/20 hover:bg-destructive/20"}`}
+                      data-testid={`ng-word-${w.id}`}>
                       <span className="font-medium">{w.word}</span>
-                      <span className="text-muted-foreground">({w.reading})</span>
-                    </div>
+                    </button>
                   ))}
                 </div>
               )}

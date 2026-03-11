@@ -109,6 +109,18 @@ export async function clearNgWords(): Promise<void> {
   await db.delete(ngWords);
 }
 
+export async function deleteNgWord(id: number): Promise<void> {
+  await db.delete(ngWords).where(eq(ngWords.id, id));
+}
+
+export async function deleteNgWords(ids: number[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  const validIds = ids.filter(id => Number.isInteger(id) && id > 0);
+  if (validIds.length === 0) return 0;
+  const result = await db.delete(ngWords).where(inArray(ngWords.id, validIds)).returning({ id: ngWords.id });
+  return result.length;
+}
+
 export async function markWordsProtected(ids: number[]): Promise<void> {
   if (ids.length === 0) return;
   const validIds = ids.filter(id => Number.isInteger(id) && id > 0);
