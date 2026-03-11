@@ -665,94 +665,100 @@ ${wordListForFilter}
         "ou": ["野郎", "やろう", "yarou", "やろ", "yaro"],
       };
 
-      for (const [groupKey, groupWords] of Object.entries(buckets)) {
-        const alive = groupWords.filter(w => !toDelete.has(w.id));
+      type AiPickTask = {
+        candidates: typeof items;
+        prompt: string;
+        groupKey: string;
+        label: string;
+      };
 
-        const specialTails = SPECIAL_TAILS[groupKey];
-        if (specialTails && alive.length >= 2) {
-          const matchingWords = alive.filter(w => {
-            return specialTails.some(tail =>
-              w.word.endsWith(tail) || w.reading.endsWith(tail) || w.romaji.endsWith(tail)
-            );
+      const aiPickWord = async (task: AiPickTask) => {
+        try {
+          const wordList = task.candidates.map(w => w.word).join("\n");
+          const pickResult = await ai.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents: task.prompt,
+            config: geminiConfig,
           });
-
-          if (matchingWords.length > 1) {
-            const tailLabel = specialTails[0];
-            send("check4", `[${groupKey}]「${tailLabel}」系 ${matchingWords.length}個 → AI選定中...`);
-            try {
-              const wordList = matchingWords.map(w => w.word).join("\n");
-              const pickResult = await ai.models.generateContent({
-                model: "gemini-2.5-flash",
-                contents: `以下のワードリストから最も強烈・インパクトがあるものを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${wordList}`,
-                config: geminiConfig,
-              });
-              const bestWord = (pickResult.text || "").trim().replace(/^「/, "").replace(/」$/, "").trim();
-              const bestMatch = matchingWords.find(w => w.word === bestWord);
-              const keepId = bestMatch ? bestMatch.id : matchingWords[0].id;
-              for (const w of matchingWords) {
-                if (w.id !== keepId) {
-                  toDelete.add(w.id);
-                  tailDupCount++;
-                  console.log(`[CLEANUP:special] "${w.word}" → 「${tailLabel}」系重複削除 (残す: "${matchingWords.find(m => m.id === keepId)?.word}") [${groupKey}]`);
-                }
-              }
-            } catch {
-              for (let k = 1; k < matchingWords.length; k++) {
-                toDelete.add(matchingWords[k].id);
-                tailDupCount++;
-              }
-            }
-          }
+          const bestWord = (pickResult.text || "").trim().replace(/^「/, "").replace(/」$/, "").trim();
+          const bestMatch = task.candidates.find(w => w.word === bestWord);
+          return bestMatch ? bestMatch.id : task.candidates[0].id;
+        } catch {
+          return task.candidates[0].id;
         }
+      };
 
-        const aliveAfterSpecial = groupWords.filter(w => !toDelete.has(w.id));
-        const tailMap = new Map<string, { word: typeof aliveAfterSpecial[0]; candidates: typeof aliveAfterSpecial }>();
+      const specialTasks: AiPickTask[] = [];
+      for (const [groupKey, groupWords] of Object.entries(buckets)) {
+        const specialTails = SPECIAL_TAILS[groupKey];
+        if (!specialTails) continue;
+        const alive = groupWords.filter(w => !toDelete.has(w.id));
+        if (alive.length < 2) continue;
+        const matchingWords = alive.filter(w =>
+          specialTails.some(tail => w.word.endsWith(tail) || w.reading.endsWith(tail) || w.romaji.endsWith(tail))
+        );
+        if (matchingWords.length <= 1) continue;
+        const tailLabel = specialTails[0];
+        send("check4", `[${groupKey}]「${tailLabel}」系 ${matchingWords.length}個 → AI選定中...`);
+        specialTasks.push({
+          candidates: matchingWords,
+          prompt: `以下のワードリストから最も強烈・インパクトがあるものを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${matchingWords.map(w => w.word).join("\n")}`,
+          groupKey,
+          label: tailLabel,
+        });
+      }
 
-        for (const w of aliveAfterSpecial) {
-          const readingTail = w.reading.length >= 2 ? w.reading.slice(-2) : w.reading;
-          if (!tailMap.has(readingTail)) {
-            tailMap.set(readingTail, { word: w, candidates: [w] });
-          } else {
-            tailMap.get(readingTail)!.candidates.push(w);
-          }
-        }
-
-        for (const [tail, { candidates }] of tailMap.entries()) {
-          if (candidates.length <= 1) continue;
-          if (specialTails && specialTails.some(st => tail.endsWith(st.slice(-2)))) continue;
-
-          if (candidates.length <= 5) {
-            try {
-              const wordList = candidates.map(w => w.word).join("\n");
-              const pickResult = await ai.models.generateContent({
-                model: "gemini-2.5-flash",
-                contents: `以下の末尾「${tail}」で終わるワードから最も強烈・インパクトがあるものを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${wordList}`,
-                config: geminiConfig,
-              });
-              const bestWord = (pickResult.text || "").trim().replace(/^「/, "").replace(/」$/, "").trim();
-              const bestMatch = candidates.find(w => w.word === bestWord);
-              const keepId = bestMatch ? bestMatch.id : candidates[0].id;
-              for (const w of candidates) {
-                if (w.id !== keepId) {
-                  toDelete.add(w.id);
-                  tailDupCount++;
-                  console.log(`[CLEANUP:tail] "${w.word}" → 末尾「${tail}」重複削除 (残す: "${candidates.find(m => m.id === keepId)?.word}") [${groupKey}]`);
-                }
-              }
-            } catch {
-              for (let k = 1; k < candidates.length; k++) {
-                toDelete.add(candidates[k].id);
-                tailDupCount++;
-              }
-            }
-          } else {
-            for (let k = 1; k < candidates.length; k++) {
-              toDelete.add(candidates[k].id);
-              tailDupCount++;
-            }
+      if (specialTasks.length > 0) {
+        const specialResults = await Promise.all(specialTasks.map(t => aiPickWord(t)));
+        for (let i = 0; i < specialTasks.length; i++) {
+          const keepId = specialResults[i];
+          for (const w of specialTasks[i].candidates) {
+            if (w.id !== keepId) { toDelete.add(w.id); tailDupCount++; }
           }
         }
       }
+
+      const genericTasks: AiPickTask[] = [];
+      const genericFallbacks: { candidates: typeof items }[] = [];
+      for (const [groupKey, groupWords] of Object.entries(buckets)) {
+        const specialTails = SPECIAL_TAILS[groupKey];
+        const aliveAfterSpecial = groupWords.filter(w => !toDelete.has(w.id));
+        const tailMap = new Map<string, typeof items>();
+        for (const w of aliveAfterSpecial) {
+          const readingTail = w.reading.length >= 2 ? w.reading.slice(-2) : w.reading;
+          (tailMap.get(readingTail) ?? (tailMap.set(readingTail, []), tailMap.get(readingTail)!)).push(w);
+        }
+        for (const [tail, candidates] of tailMap.entries()) {
+          if (candidates.length <= 1) continue;
+          if (specialTails && specialTails.some(st => tail.endsWith(st.slice(-2)))) continue;
+          if (candidates.length <= 5) {
+            genericTasks.push({
+              candidates,
+              prompt: `以下の末尾「${tail}」で終わるワードから最も強烈・インパクトがあるものを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${candidates.map(w => w.word).join("\n")}`,
+              groupKey,
+              label: tail,
+            });
+          } else {
+            genericFallbacks.push({ candidates });
+          }
+        }
+      }
+
+      for (const fb of genericFallbacks) {
+        for (let k = 1; k < fb.candidates.length; k++) { toDelete.add(fb.candidates[k].id); tailDupCount++; }
+      }
+
+      if (genericTasks.length > 0) {
+        send("check4", `末尾重複 ${genericTasks.length}グループをAI並列選定中...`);
+        const genericResults = await Promise.all(genericTasks.map(t => aiPickWord(t)));
+        for (let i = 0; i < genericTasks.length; i++) {
+          const keepId = genericResults[i];
+          for (const w of genericTasks[i].candidates) {
+            if (w.id !== keepId) { toDelete.add(w.id); tailDupCount++; }
+          }
+        }
+      }
+
       send("check4", `末尾重複: ${tailDupCount}個`);
 
       const deleteArray = Array.from(toDelete);

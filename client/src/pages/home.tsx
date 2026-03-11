@@ -11,7 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
   Flame, Mic2, Sparkles, Zap, AlertTriangle, Loader2, Star,
-  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart, Plus, Wrench,
+  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart, Plus, Wrench, Play,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -31,14 +31,8 @@ function extractVowels(romaji: string): string {
   const r = romaji.toLowerCase();
   let result = "";
   for (let i = 0; i < r.length; i++) {
-    if ("aeiou".includes(r[i])) {
-      result += r[i];
-    } else if (r[i] === "n") {
-      const next = r[i + 1];
-      if (!next || !"aeiou".includes(next)) {
-        result += "n";
-      }
-    }
+    if ("aeiou".includes(r[i])) result += r[i];
+    else if (r[i] === "n" && (!r[i + 1] || !"aeiou".includes(r[i + 1]))) result += "n";
   }
   return result;
 }
@@ -55,15 +49,15 @@ const PATTERN_COLORS: Record<string, string> = {
 };
 
 const LEVEL_INFO: Record<number, { label: string; color: string }> = {
-  1:  { label: "リスペクト", color: "text-blue-400" },
-  2:  { label: "称賛", color: "text-cyan-400" },
-  3:  { label: "親しみ", color: "text-green-400" },
-  4:  { label: "軽口", color: "text-lime-400" },
-  5:  { label: "毒舌", color: "text-yellow-400" },
-  6:  { label: "辛辣", color: "text-amber-400" },
-  7:  { label: "攻撃", color: "text-orange-400" },
-  8:  { label: "過激", color: "text-red-400" },
-  9:  { label: "暴言", color: "text-red-500" },
+  1: { label: "リスペクト", color: "text-blue-400" },
+  2: { label: "称賛", color: "text-cyan-400" },
+  3: { label: "親しみ", color: "text-green-400" },
+  4: { label: "軽口", color: "text-lime-400" },
+  5: { label: "毒舌", color: "text-yellow-400" },
+  6: { label: "辛辣", color: "text-amber-400" },
+  7: { label: "攻撃", color: "text-orange-400" },
+  8: { label: "過激", color: "text-red-400" },
+  9: { label: "暴言", color: "text-red-500" },
   10: { label: "放禁", color: "text-red-600" },
 };
 
@@ -77,6 +71,13 @@ function formatTimer(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return m > 0 ? `${m}:${s.toString().padStart(2, "0")}` : `${s}秒`;
+}
+
+function getWordsFromResult(result: GenerationResult): WordEntry[] {
+  const all: WordEntry[] = [];
+  for (const p of VOWEL_PATTERNS) { if (result.groups[p]) all.push(...result.groups[p]); }
+  all.push(...result.ungrouped);
+  return all;
 }
 
 export default function Home() {
@@ -97,6 +98,12 @@ export default function Home() {
   const logEndRef = useRef<HTMLDivElement>(null);
   const [pasteTextFav, setPasteTextFav] = useState("");
   const [pasteTextNg, setPasteTextNg] = useState("");
+  const [isCleaningUp, setIsCleaningUp] = useState(false);
+  const [cleanupLogs, setCleanupLogs] = useState<ProgressLog[]>([]);
+  const [isAutoMode, setIsAutoMode] = useState(false);
+  const [autoModeCount, setAutoModeCount] = useState(0);
+  const autoModeRef = useRef(false);
+  const isCleaningUpRef = useRef(false);
 
   useEffect(() => { if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: "smooth" }); }, [progressLogs]);
   useEffect(() => { return () => { if (timerRef.current) clearInterval(timerRef.current); }; }, []);
@@ -111,12 +118,7 @@ export default function Home() {
 
   const getAllEntries = useCallback((): WordEntry[] => {
     if (!genResult) return [];
-    const all: WordEntry[] = [];
-    for (const p of VOWEL_PATTERNS) {
-      if (genResult.groups[p]) all.push(...genResult.groups[p]);
-    }
-    all.push(...genResult.ungrouped);
-    return all;
+    return getWordsFromResult(genResult);
   }, [genResult]);
 
   const hasResults = genResult !== null && genResult.total > 0;
@@ -134,7 +136,10 @@ export default function Home() {
     onError: () => { toast({ title: "エラー", description: "ターゲット生成に失敗しました", variant: "destructive" }); },
   });
 
-  const generateDissSSE = useCallback(async () => {
+  const generateDissSSE = useCallback(async (overrideTarget?: string, overrideLevel?: number): Promise<GenerationResult | null> => {
+    const effectiveTarget = overrideTarget ?? target;
+    const effectiveLevel = overrideLevel ?? level;
+
     setIsGenerating(true);
     setProgressLogs([]);
     setGenResult(null);
@@ -151,13 +156,15 @@ export default function Home() {
       setProgressLogs(prev => [...prev, { time, detail, elapsed }]);
     };
 
-    addLog(`生成開始... (Lv.${level} ${LEVEL_INFO[level].label})`, "0秒");
+    addLog(`生成開始... (Lv.${effectiveLevel} ${LEVEL_INFO[effectiveLevel].label})`, "0秒");
+
+    let finalResult: GenerationResult | null = null;
 
     try {
       const response = await fetch("/api/diss", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ target, level }),
+        body: JSON.stringify({ target: effectiveTarget, level: effectiveLevel }),
       });
 
       if (!response.ok) {
@@ -167,7 +174,6 @@ export default function Home() {
 
       const reader = response.body?.getReader();
       if (!reader) throw new Error("No reader");
-
       const decoder = new TextDecoder();
       let buffer = "";
 
@@ -187,17 +193,9 @@ export default function Home() {
               addLog(data.detail, data.elapsed || "");
             } else if (data.type === "result") {
               setGenStatus("success");
-              const result: GenerationResult = {
-                groups: data.groups || {},
-                ungrouped: data.ungrouped || [],
-                total: data.total || 0,
-              };
-              setGenResult(result);
-              const allWords: WordEntry[] = [];
-              for (const p of VOWEL_PATTERNS) {
-                if (result.groups[p]) allWords.push(...result.groups[p]);
-              }
-              allWords.push(...result.ungrouped);
+              finalResult = { groups: data.groups || {}, ungrouped: data.ungrouped || [], total: data.total || 0 };
+              setGenResult(finalResult);
+              const allWords = getWordsFromResult(finalResult);
               setCheckedWords(new Set(allWords.map(e => e.word)));
             } else if (data.type === "error") {
               setGenStatus("error");
@@ -215,17 +213,16 @@ export default function Home() {
       setTimerSeconds(Math.floor((Date.now() - genStartTime) / 1000));
       setIsGenerating(false);
     }
-  }, [target, level, toast]);
 
-  const runCleanupRef = useRef<(() => void) | null>(null);
+    return finalResult;
+  }, [target, level, toast]);
 
   const addFavMutation = useMutation({
     mutationFn: async (words: WordEntry[]) => { const res = await apiRequest("POST", "/api/favorites", { words }); return res.json(); },
     onSuccess: (data: { added: number; total: number }) => {
-      toast({ title: "追加完了", description: `${data.added}個追加（合計 ${data.total}個）→ 自動整理を開始...` });
+      toast({ title: "追加完了", description: `${data.added}個追加（合計 ${data.total}個）` });
       queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
       queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
-      setTimeout(() => { runCleanupRef.current?.(); }, 500);
     },
     onError: () => { toast({ title: "エラー", description: "お気に入りの追加に失敗しました", variant: "destructive" }); },
   });
@@ -256,8 +253,9 @@ export default function Home() {
   const addToFavorites = useCallback(async () => {
     if (checkedWords.size === 0) { toast({ title: "未選択", description: "ワードを選択してください" }); return; }
     const allEntries = getAllEntries();
-    addFavMutation.mutate(allEntries.filter(e => checkedWords.has(e.word)));
+    const selected = allEntries.filter(e => checkedWords.has(e.word));
     const unchecked = allEntries.filter(e => !checkedWords.has(e.word));
+    addFavMutation.mutate(selected);
     if (unchecked.length > 0) {
       try {
         await fetch("/api/ng-words", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ words: unchecked.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji })) }) });
@@ -307,19 +305,14 @@ export default function Home() {
     onError: (err: Error) => { toast({ title: "エラー", description: err.message || "追加に失敗しました", variant: "destructive" }); },
   });
 
-  const [isCleaningUp, setIsCleaningUp] = useState(false);
-  const [cleanupLogs, setCleanupLogs] = useState<ProgressLog[]>([]);
-
   const runCleanup = useCallback(async () => {
-    if (isCleaningUp) return;
+    if (isCleaningUpRef.current) return;
+    isCleaningUpRef.current = true;
     setIsCleaningUp(true);
     setCleanupLogs([]);
     try {
       const response = await fetch("/api/favorites/cleanup", { method: "POST", headers: { "Content-Type": "application/json" } });
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({ error: "整理に失敗しました" }));
-        throw new Error(errData.error || "整理に失敗しました");
-      }
+      if (!response.ok) throw new Error("整理に失敗しました");
       const reader = response.body?.getReader();
       if (!reader) throw new Error("No reader");
       const decoder = new TextDecoder();
@@ -346,13 +339,87 @@ export default function Home() {
           } catch {}
         }
       }
-    } catch (err) {
+    } catch {
       toast({ title: "エラー", description: "整理に失敗しました", variant: "destructive" });
     }
+    isCleaningUpRef.current = false;
     setIsCleaningUp(false);
-  }, [toast, queryClient, isCleaningUp]);
+  }, [toast, queryClient]);
 
-  runCleanupRef.current = runCleanup;
+  const addWordsDirect = useCallback(async (words: WordEntry[]): Promise<{ added: number; total: number }> => {
+    if (words.length === 0) return { added: 0, total: 0 };
+    const response = await fetch("/api/favorites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ words }),
+    });
+    if (!response.ok) throw new Error("DB追加に失敗しました");
+    const data = await response.json();
+    queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
+    queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
+    return data;
+  }, [queryClient]);
+
+  const startAutoMode = useCallback(async () => {
+    if (autoModeRef.current) return;
+    autoModeRef.current = true;
+    setIsAutoMode(true);
+    setAutoModeCount(0);
+    setActiveTab("gen");
+
+    try {
+      const targetRes = await (await fetch("/api/target")).json();
+      setTarget(targetRes.target);
+      setGenResult(null);
+
+      let randomLvl = 8 + Math.floor(Math.random() * 3);
+      setLevel(randomLvl);
+      setAgeConfirmed(true);
+
+      let result = await generateDissSSE(targetRes.target, randomLvl);
+      if (!autoModeRef.current || !result) { setIsAutoMode(false); autoModeRef.current = false; return; }
+
+      while (autoModeRef.current) {
+        const allWords = getWordsFromResult(result!);
+        try {
+          const addResult = await addWordsDirect(allWords);
+          toast({ title: "DB追加完了", description: `${addResult.added}個追加（合計 ${addResult.total}個）` });
+          setAutoModeCount(prev => prev + 1);
+        } catch (err) {
+          toast({ title: "DB追加エラー", description: err instanceof Error ? err.message : "追加に失敗", variant: "destructive" });
+        }
+
+        if (!autoModeRef.current) break;
+
+        const cleanupPromise = isCleaningUpRef.current ? Promise.resolve() : runCleanup();
+
+        const nextTargetRes = await (await fetch("/api/target")).json();
+        setTarget(nextTargetRes.target);
+        setGenResult(null);
+
+        randomLvl = 8 + Math.floor(Math.random() * 3);
+        setLevel(randomLvl);
+
+        if (!autoModeRef.current) { await cleanupPromise; break; }
+
+        result = await generateDissSSE(nextTargetRes.target, randomLvl);
+
+        await cleanupPromise;
+
+        if (!autoModeRef.current || !result) break;
+      }
+    } catch (err) {
+      toast({ title: "オートモードエラー", description: err instanceof Error ? err.message : "エラーが発生しました", variant: "destructive" });
+    }
+
+    setIsAutoMode(false);
+    autoModeRef.current = false;
+  }, [generateDissSSE, addWordsDirect, runCleanup, toast]);
+
+  const stopAutoMode = useCallback(() => {
+    autoModeRef.current = false;
+    toast({ title: "停止中", description: "現在の処理が完了後に停止します" });
+  }, [toast]);
 
   const handleGenerateDiss = useCallback(() => {
     if (!target) { toast({ title: "ターゲット未設定", description: "先にターゲットを選んでください" }); return; }
@@ -387,11 +454,7 @@ export default function Home() {
               <div className="flex items-center gap-2 px-3 py-2 bg-muted/20 border-b border-border/30">
                 <Badge className={`font-mono text-xs px-2 py-0.5 border ${PATTERN_COLORS[pattern]}`}>*{pattern}</Badge>
                 <span className="text-xs text-muted-foreground font-medium">{words.length}個</span>
-                <button
-                  onClick={() => toggleGroupWords(words)}
-                  className="text-xs text-primary hover:underline ml-auto"
-                  data-testid={`button-toggle-group-${pattern}`}
-                >
+                <button onClick={() => toggleGroupWords(words)} className="text-xs text-primary hover:underline ml-auto" data-testid={`button-toggle-group-${pattern}`}>
                   {allChecked ? "選択解除" : "全選択"}
                 </button>
               </div>
@@ -404,19 +467,11 @@ export default function Home() {
                     transition={{ delay: Math.min(i * 0.02, 0.3) }}
                     onClick={() => toggleChecked(entry.word)}
                     className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border cursor-pointer select-none transition-all ${
-                      checkedWords.has(entry.word)
-                        ? "bg-primary/15 border-primary/40 text-foreground"
-                        : "bg-card border-border/40 text-muted-foreground hover:border-border"
+                      checkedWords.has(entry.word) ? "bg-primary/15 border-primary/40 text-foreground" : "bg-card border-border/40 text-muted-foreground hover:border-border"
                     }`}
                     data-testid={`word-chip-${pattern}-${i}`}
                   >
-                    <Checkbox
-                      checked={checkedWords.has(entry.word)}
-                      onCheckedChange={() => toggleChecked(entry.word)}
-                      onClick={(e: React.MouseEvent) => e.stopPropagation()}
-                      className="w-3.5 h-3.5"
-                      data-testid={`checkbox-word-${pattern}-${i}`}
-                    />
+                    <Checkbox checked={checkedWords.has(entry.word)} onCheckedChange={() => toggleChecked(entry.word)} onClick={(e: React.MouseEvent) => e.stopPropagation()} className="w-3.5 h-3.5" data-testid={`checkbox-word-${pattern}-${i}`} />
                     <span className="text-sm font-medium">{entry.word}</span>
                     <span className="text-xs text-muted-foreground">({entry.reading})</span>
                   </motion.div>
@@ -431,11 +486,7 @@ export default function Home() {
             <div className="flex items-center gap-2 px-3 py-2 bg-muted/20 border-b border-border/30">
               <Badge variant="outline" className="font-mono text-xs px-2 py-0.5">未分類</Badge>
               <span className="text-xs text-muted-foreground font-medium">{genResult.ungrouped.length}個</span>
-              <button
-                onClick={() => toggleGroupWords(genResult.ungrouped)}
-                className="text-xs text-primary hover:underline ml-auto"
-                data-testid="button-toggle-group-ungrouped"
-              >
+              <button onClick={() => toggleGroupWords(genResult.ungrouped)} className="text-xs text-primary hover:underline ml-auto" data-testid="button-toggle-group-ungrouped">
                 {genResult.ungrouped.every(w => checkedWords.has(w.word)) ? "選択解除" : "全選択"}
               </button>
             </div>
@@ -448,18 +499,11 @@ export default function Home() {
                   transition={{ delay: Math.min(i * 0.02, 0.3) }}
                   onClick={() => toggleChecked(entry.word)}
                   className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border cursor-pointer select-none transition-all ${
-                    checkedWords.has(entry.word)
-                      ? "bg-primary/15 border-primary/40 text-foreground"
-                      : "bg-card border-border/40 text-muted-foreground hover:border-border"
+                    checkedWords.has(entry.word) ? "bg-primary/15 border-primary/40 text-foreground" : "bg-card border-border/40 text-muted-foreground hover:border-border"
                   }`}
                   data-testid={`word-chip-ungrouped-${i}`}
                 >
-                  <Checkbox
-                    checked={checkedWords.has(entry.word)}
-                    onCheckedChange={() => toggleChecked(entry.word)}
-                    onClick={(e: React.MouseEvent) => e.stopPropagation()}
-                    className="w-3.5 h-3.5"
-                  />
+                  <Checkbox checked={checkedWords.has(entry.word)} onCheckedChange={() => toggleChecked(entry.word)} onClick={(e: React.MouseEvent) => e.stopPropagation()} className="w-3.5 h-3.5" />
                   <span className="text-sm font-medium">{entry.word}</span>
                   <span className="text-xs text-muted-foreground">({entry.reading})</span>
                 </motion.div>
@@ -482,7 +526,7 @@ export default function Home() {
             <Database className="w-6 h-6 text-primary" />
           </div>
           <p className="text-muted-foreground text-xs mb-3">目標1万ワード！AIでワードを量産してデータベースに蓄積</p>
-          <div className="max-w-xs mx-auto">
+          <div className="max-w-xs mx-auto mb-3">
             <div className="flex items-center justify-between text-xs mb-1">
               <span className="text-muted-foreground">{totalCount.toLocaleString()} / 10,000</span>
               <span className="font-mono text-primary">{progressPercent.toFixed(1)}%</span>
@@ -491,6 +535,30 @@ export default function Home() {
               <div className="h-full bg-primary rounded-full transition-all duration-500" style={{ width: `${progressPercent}%` }} />
             </div>
           </div>
+
+          {isAutoMode ? (
+            <div className="flex items-center justify-center gap-3">
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-500/20 border border-red-500/40">
+                <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                <span className="text-xs font-medium text-red-400">完全オートモード稼働中</span>
+                <Badge variant="secondary" className="text-xs px-1.5 py-0">{autoModeCount}回完了</Badge>
+              </div>
+              <Button variant="destructive" size="sm" onClick={stopAutoMode} data-testid="button-stop-auto">
+                <Square className="w-3.5 h-3.5 mr-1" />停止
+              </Button>
+            </div>
+          ) : (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={startAutoMode}
+              disabled={isGenerating || isCleaningUp}
+              className="border-primary/40 text-primary hover:bg-primary/10"
+              data-testid="button-start-auto"
+            >
+              <Play className="w-3.5 h-3.5 mr-1" />完全オートモード
+            </Button>
+          )}
         </div>
       </div>
 
@@ -519,31 +587,15 @@ export default function Home() {
                   <Badge variant="secondary">{ngCount.toLocaleString()}件</Badge>
                 </div>
                 <div className="flex gap-2">
-                  <Button variant="outline" size="sm" onClick={copyNgWords} disabled={ngCount === 0} data-testid="button-copy-ng">
-                    <Copy className="w-3.5 h-3.5 mr-1" />コピー
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={() => clearNgMutation.mutate()} disabled={clearNgMutation.isPending || ngCount === 0} data-testid="button-clear-ng">
-                    <Trash2 className="w-3.5 h-3.5 mr-1" />全削除
-                  </Button>
+                  <Button variant="outline" size="sm" onClick={copyNgWords} disabled={ngCount === 0} data-testid="button-copy-ng"><Copy className="w-3.5 h-3.5 mr-1" />コピー</Button>
+                  <Button variant="outline" size="sm" onClick={() => clearNgMutation.mutate()} disabled={clearNgMutation.isPending || ngCount === 0} data-testid="button-clear-ng"><Trash2 className="w-3.5 h-3.5 mr-1" />全削除</Button>
                 </div>
               </div>
               <p className="text-xs text-muted-foreground">お気に入りに選ばれなかったワードが蓄積されます。次回の生成時にこれらのワードは除外されます。</p>
 
               <div className="space-y-2">
-                <Textarea
-                  placeholder="ワードを貼り付けて追加（形式: ワード/ひらがな(romaji) 改行区切り）"
-                  value={pasteTextNg}
-                  onChange={e => setPasteTextNg(e.target.value)}
-                  className="text-xs min-h-[60px]"
-                  data-testid="textarea-paste-ng"
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => pasteNgMutation.mutate(pasteTextNg)}
-                  disabled={!pasteTextNg.trim() || pasteNgMutation.isPending}
-                  data-testid="button-paste-ng"
-                >
+                <Textarea placeholder="ワードを貼り付けて追加（形式: ワード/ひらがな(romaji) 改行区切り）" value={pasteTextNg} onChange={e => setPasteTextNg(e.target.value)} className="text-xs min-h-[60px]" data-testid="textarea-paste-ng" />
+                <Button variant="outline" size="sm" onClick={() => pasteNgMutation.mutate(pasteTextNg)} disabled={!pasteTextNg.trim() || pasteNgMutation.isPending} data-testid="button-paste-ng">
                   {pasteNgMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Plus className="w-3.5 h-3.5 mr-1" />}
                   貼り付けて追加
                 </Button>
@@ -585,20 +637,8 @@ export default function Home() {
               </div>
 
               <div className="space-y-2">
-                <Textarea
-                  placeholder="ワードを貼り付けて追加（形式: ワード/ひらがな(romaji) 改行区切り）"
-                  value={pasteTextFav}
-                  onChange={e => setPasteTextFav(e.target.value)}
-                  className="text-xs min-h-[60px]"
-                  data-testid="textarea-paste-fav"
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => pasteFavMutation.mutate(pasteTextFav)}
-                  disabled={!pasteTextFav.trim() || pasteFavMutation.isPending}
-                  data-testid="button-paste-fav"
-                >
+                <Textarea placeholder="ワードを貼り付けて追加（形式: ワード/ひらがな(romaji) 改行区切り）" value={pasteTextFav} onChange={e => setPasteTextFav(e.target.value)} className="text-xs min-h-[60px]" data-testid="textarea-paste-fav" />
+                <Button variant="outline" size="sm" onClick={() => pasteFavMutation.mutate(pasteTextFav)} disabled={!pasteTextFav.trim() || pasteFavMutation.isPending} data-testid="button-paste-fav">
                   {pasteFavMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Plus className="w-3.5 h-3.5 mr-1" />}
                   貼り付けて追加
                 </Button>
@@ -683,7 +723,7 @@ export default function Home() {
               <Target className="w-5 h-5 text-primary" />
               <h2 className="text-base font-semibold">ターゲット設定</h2>
             </div>
-            <Button onClick={() => targetMutation.mutate()} disabled={targetMutation.isPending} size="sm" data-testid="button-generate-target">
+            <Button onClick={() => targetMutation.mutate()} disabled={targetMutation.isPending || isAutoMode} size="sm" data-testid="button-generate-target">
               {targetMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Sparkles className="w-4 h-4 mr-1" />}
               {target ? "やり直し" : "ターゲットを選ぶ"}
             </Button>
@@ -712,7 +752,7 @@ export default function Home() {
                 <Badge variant="secondary" className={`text-xs ${levelInfo.color}`} data-testid="text-level-label">{levelInfo.label}</Badge>
               </div>
             </div>
-            <Slider value={[level]} min={1} max={10} step={1} onValueChange={val => setLevel(val[0])} data-testid="slider-level" />
+            <Slider value={[level]} min={1} max={10} step={1} onValueChange={val => setLevel(val[0])} disabled={isAutoMode} data-testid="slider-level" />
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                 <Heart className="w-3 h-3 text-blue-400" />
@@ -734,7 +774,7 @@ export default function Home() {
                   <div className="flex items-start gap-2 rounded-md bg-destructive/10 border border-destructive/20 p-2.5">
                     <AlertTriangle className="w-4 h-4 text-destructive shrink-0 mt-0.5" />
                     <label className="flex items-center gap-2 cursor-pointer">
-                      <Checkbox checked={ageConfirmed} onCheckedChange={v => setAgeConfirmed(!!v)} data-testid="checkbox-age-confirm" />
+                      <Checkbox checked={ageConfirmed} onCheckedChange={v => setAgeConfirmed(!!v)} disabled={isAutoMode} data-testid="checkbox-age-confirm" />
                       <span className="text-xs">18歳以上・過激な表現を許可</span>
                     </label>
                   </div>
@@ -749,7 +789,7 @@ export default function Home() {
               <div>STEP3: 母音パターン別にグルーピング（ae/oe/ua/an/ao/iu）</div>
             </div>
 
-            <Button onClick={handleGenerateDiss} disabled={isGenerating || !target} className="w-full" data-testid="button-generate-diss">
+            <Button onClick={handleGenerateDiss} disabled={isGenerating || !target || isAutoMode} className="w-full" data-testid="button-generate-diss">
               {isGenerating ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Zap className="w-4 h-4 mr-2" />}
               生成 (Lv.{level} {levelInfo.label})
             </Button>
@@ -765,6 +805,7 @@ export default function Home() {
                     <ScrollText className="w-5 h-5 text-primary" />
                     <h2 className="text-base font-semibold">進捗ログ</h2>
                     {isGenerating && <Loader2 className="w-4 h-4 animate-spin text-primary" />}
+                    {isAutoMode && <Badge variant="secondary" className="text-xs">オート {autoModeCount}回完了</Badge>}
                     <div className="ml-auto flex items-center gap-2">
                       <span className={`text-lg font-bold font-mono tabular-nums ${genStatus === "success" ? "text-green-400" : genStatus === "error" ? "text-red-400" : "text-yellow-400"}`} data-testid="text-timer">
                         {formatTimer(timerSeconds)}
@@ -800,7 +841,7 @@ export default function Home() {
                       <h2 className="text-base font-semibold">生成結果</h2>
                       <Badge variant="secondary" className="text-xs">{genResult?.total || 0}個</Badge>
                     </div>
-                    {getAllEntries().length > 0 && (
+                    {getAllEntries().length > 0 && !isAutoMode && (
                       <Button variant="ghost" size="sm" onClick={isAllSelected ? deselectAll : selectAll} data-testid="button-select-all">
                         {isAllSelected ? <><Square className="w-4 h-4 mr-1" />全解除</> : <><CheckSquare className="w-4 h-4 mr-1" />全て選択</>}
                       </Button>
@@ -829,12 +870,14 @@ export default function Home() {
 
                   {renderGroupedResults()}
 
-                  <div className="mt-4">
-                    <Button onClick={addToFavorites} disabled={checkedWords.size === 0 || addFavMutation.isPending} variant="destructive" className="w-full" data-testid="button-add-favorites">
-                      {addFavMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Star className="w-4 h-4 mr-2" />}
-                      選択ワードをデータベースに追加 {checkedWords.size > 0 && `(${checkedWords.size}個)`}
-                    </Button>
-                  </div>
+                  {!isAutoMode && (
+                    <div className="mt-4">
+                      <Button onClick={addToFavorites} disabled={checkedWords.size === 0 || addFavMutation.isPending} variant="destructive" className="w-full" data-testid="button-add-favorites">
+                        {addFavMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Star className="w-4 h-4 mr-2" />}
+                        選択ワードをデータベースに追加 {checkedWords.size > 0 && `(${checkedWords.size}個)`}
+                      </Button>
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             </motion.div>

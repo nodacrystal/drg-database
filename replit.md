@@ -94,7 +94,23 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - `DELETE /api/ng-words` - Clear all NG words
 - `POST /api/favorites/cleanup` - DB cleanup via SSE (rhyme dedup within groups only)
 
+## Full Auto Mode
+- **完全オートモード**: Automated loop that runs continuously until user presses "停止"
+- Flow: Target → Level 8-10 random + age confirm → Generate → Add all words to DB → Cleanup + Next generation in parallel → Repeat
+- Uses `autoModeRef` for cancellation, `addWordsDirect` for non-mutation favorites adding
+- During auto mode, manual controls (slider, checkboxes, generate button) are disabled
+- Cleanup runs concurrently with next generation for maximum throughput
+
+## Cleanup Optimization
+- Check4 (tail dedup) AI calls are parallelized in 2 phases:
+  - Phase 1: All special tail tasks (顔, 野郎) run in parallel via Promise.all
+  - Phase 2: All generic tail tasks run in parallel via Promise.all
+- Previously sequential AI calls now run concurrently for significant speedup
+
 ## Recent Changes
+- 2026-03-11: Full Auto Mode implemented with concurrent cleanup + generation
+- 2026-03-11: Cleanup check4 AI calls parallelized for speed
+- 2026-03-11: Code refactored: extracted getWordsFromResult, added isCleaningUpRef, removed unnecessary auto-trigger on add
 - 2026-03-10: Generation rebuilt to 3-step pipeline (300 words → quality filter → vowel grouping)
 - 2026-03-10: Target data simplified: removed career/evaluation, kept name/appearance/personality
 - 2026-03-10: Results UI redesigned: color-coded vowel pattern groups with chip-style word display
