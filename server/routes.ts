@@ -609,11 +609,21 @@ ${wordListForFilter}
 
       send("check2", "チェック2: 表記違い重複を検出中...");
       let scriptDupCount = 0;
+
+      function normalizeReading(s: string): string {
+        return s
+          .replace(/[ー・\s\-]/g, "")
+          .replace(/っ/g, "")
+          .replace(/を/g, "お")
+          .replace(/[ぁぃぅぇぉ]/g, c => ({ "ぁ": "あ", "ぃ": "い", "ぅ": "う", "ぇ": "え", "ぉ": "お" }[c] || c))
+          .toLowerCase();
+      }
+
       for (const [groupKey, groupWords] of Object.entries(buckets)) {
         const alive = groupWords.filter(w => !toDelete.has(w.id));
         const readingMap = new Map<string, typeof alive[0]>();
         for (const w of alive) {
-          const normalized = w.reading.replace(/[ー・\s]/g, "").toLowerCase();
+          const normalized = normalizeReading(w.reading);
           if (readingMap.has(normalized)) {
             toDelete.add(w.id);
             scriptDupCount++;
@@ -626,12 +636,30 @@ ${wordListForFilter}
         const aliveAfter = groupWords.filter(w => !toDelete.has(w.id));
         const romajiMap = new Map<string, typeof aliveAfter[0]>();
         for (const w of aliveAfter) {
-          if (romajiMap.has(w.romaji)) {
+          const normRomaji = w.romaji.replace(/[\-\s]/g, "").toLowerCase();
+          if (romajiMap.has(normRomaji)) {
             toDelete.add(w.id);
             scriptDupCount++;
-            console.log(`[CLEANUP:romaji] "${w.word}" ≈ "${romajiMap.get(w.romaji)!.word}" (romaji: ${w.romaji}) [${groupKey}]`);
+            console.log(`[CLEANUP:romaji] "${w.word}" ≈ "${romajiMap.get(normRomaji)!.word}" (romaji: ${normRomaji}) [${groupKey}]`);
           } else {
-            romajiMap.set(w.romaji, w);
+            romajiMap.set(normRomaji, w);
+          }
+        }
+
+        const aliveAfterRomaji = groupWords.filter(w => !toDelete.has(w.id));
+        for (let i = 0; i < aliveAfterRomaji.length; i++) {
+          if (toDelete.has(aliveAfterRomaji[i].id)) continue;
+          const w1wordNorm = normalizeReading(aliveAfterRomaji[i].word);
+          const w1readNorm = normalizeReading(aliveAfterRomaji[i].reading);
+          for (let j = i + 1; j < aliveAfterRomaji.length; j++) {
+            if (toDelete.has(aliveAfterRomaji[j].id)) continue;
+            const w2wordNorm = normalizeReading(aliveAfterRomaji[j].word);
+            const w2readNorm = normalizeReading(aliveAfterRomaji[j].reading);
+            if (w1wordNorm === w2readNorm || w1readNorm === w2wordNorm) {
+              toDelete.add(aliveAfterRomaji[j].id);
+              scriptDupCount++;
+              console.log(`[CLEANUP:cross] "${aliveAfterRomaji[j].word}" ≈ "${aliveAfterRomaji[i].word}" [${groupKey}]`);
+            }
           }
         }
       }
@@ -761,6 +789,62 @@ ${wordListForFilter}
 
       send("check4", `末尾重複: ${tailDupCount}個`);
 
+      send("check5", "チェック5: 意味的重複をAI検出中...");
+      let semanticDupCount = 0;
+      const groupsToCheck = Object.entries(buckets)
+        .map(([key, words]) => ({ key, words: words.filter(w => !toDelete.has(w.id)) }))
+        .filter(g => g.words.length >= 2);
+
+      const SEMANTIC_PARALLEL = 5;
+      for (let b = 0; b < groupsToCheck.length; b += SEMANTIC_PARALLEL) {
+        const batch = groupsToCheck.slice(b, b + SEMANTIC_PARALLEL);
+        await Promise.all(batch.map(async (g) => {
+          try {
+            const wordList = g.words.map(w => w.word).join("\n");
+            const semResult = await ai.models.generateContent({
+              model: "gemini-2.5-flash",
+              contents: `以下の日本語悪口ワード一覧から「意味がほぼ同じ」「表現違いだけの重複」ペアを全て見つけよ。
+各重複グループから最もインパクトがある1個を残し、残りを削除対象とせよ。
+
+検出すべき重複の例:
+- 「うっせーよ」と「うるせえよ」→ 同じ意味の別表現→片方削除
+- 「生きてる価値なし」と「生きる価値なし」→ 活用違いの同義語→片方削除
+- 「存在価値なし」と「生きる価値なし」→ 同じ概念の別表現→片方削除
+- 「影薄いなあ」と「かげうすいなあ」→ 漢字とひらがなの表記違い→片方削除
+
+重複が無ければ「なし」とだけ出力。重複があれば以下の形式で出力（1グループ1行）:
+残す:ワード / 削除:ワード,ワード
+
+ワード一覧:
+${wordList}`,
+              config: geminiConfig,
+            });
+            const text = (semResult.text || "").trim();
+            if (text === "なし" || !text.includes("削除")) return;
+
+            for (const line of text.split("\n")) {
+              const deleteMatch = line.match(/削除[:：]\s*(.+)/);
+              if (!deleteMatch) continue;
+              const deleteWords = deleteMatch[1].split(/[,、，]/).map(w => w.trim().replace(/^「/, "").replace(/」$/, "").trim());
+              for (const dw of deleteWords) {
+                const match = g.words.find(w => w.word === dw);
+                if (match && !toDelete.has(match.id)) {
+                  toDelete.add(match.id);
+                  semanticDupCount++;
+                  console.log(`[CLEANUP:semantic] "${match.word}" → 意味的重複削除 [${g.key}]`);
+                }
+              }
+            }
+          } catch (err) {
+            console.log(`[CLEANUP:semantic] AI failed for group ${g.key}:`, err);
+          }
+        }));
+        if (b + SEMANTIC_PARALLEL < groupsToCheck.length) {
+          send("check5", `意味的重複検出中... (${Math.min(b + SEMANTIC_PARALLEL, groupsToCheck.length)}/${groupsToCheck.length}グループ完了)`);
+        }
+      }
+      send("check5", `意味的重複: ${semanticDupCount}個`);
+
       const deleteArray = Array.from(toDelete);
       let totalDeleted = 0;
       if (deleteArray.length > 0) {
@@ -770,7 +854,7 @@ ${wordListForFilter}
 
       if (heartbeat) clearInterval(heartbeat);
       const finalCount = await getWordCount();
-      const summary = `母音不一致${wrongVowelCount} + 表記重複${scriptDupCount} + 包含${containCount} + 末尾重複${tailDupCount} = ${totalDeleted}個削除`;
+      const summary = `母音不一致${wrongVowelCount} + 表記重複${scriptDupCount} + 包含${containCount} + 末尾重複${tailDupCount} + 意味重複${semanticDupCount} = ${totalDeleted}個削除`;
       send("done", `整理完了: ${summary} (残り${finalCount}語, ${formatElapsed(Date.now() - startTime)})`);
 
       if (!disconnected) {

@@ -104,6 +104,7 @@ export default function Home() {
   const [autoModeCount, setAutoModeCount] = useState(0);
   const autoModeRef = useRef(false);
   const isCleaningUpRef = useRef(false);
+  const cleanupPromiseRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => { if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: "smooth" }); }, [progressLogs]);
   useEffect(() => { return () => { if (timerRef.current) clearInterval(timerRef.current); }; }, []);
@@ -306,44 +307,54 @@ export default function Home() {
   });
 
   const runCleanup = useCallback(async () => {
-    if (isCleaningUpRef.current) return;
+    if (isCleaningUpRef.current) {
+      if (cleanupPromiseRef.current) await cleanupPromiseRef.current;
+      return;
+    }
     isCleaningUpRef.current = true;
     setIsCleaningUp(true);
     setCleanupLogs([]);
-    try {
-      const response = await fetch("/api/favorites/cleanup", { method: "POST", headers: { "Content-Type": "application/json" } });
-      if (!response.ok) throw new Error("整理に失敗しました");
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error("No reader");
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const data = JSON.parse(line.slice(6));
-            if (data.type === "progress") {
-              setCleanupLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
-            } else if (data.type === "result") {
-              toast({ title: "整理完了", description: `重複削除${data.deleted}個 (残り${data.total}語)` });
-              queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
-              queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
-            } else if (data.type === "error") {
-              toast({ title: "エラー", description: data.error, variant: "destructive" });
-            }
-          } catch {}
+
+    const doCleanup = async () => {
+      try {
+        const response = await fetch("/api/favorites/cleanup", { method: "POST", headers: { "Content-Type": "application/json" } });
+        if (!response.ok) throw new Error("整理に失敗しました");
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error("No reader");
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            try {
+              const data = JSON.parse(line.slice(6));
+              if (data.type === "progress") {
+                setCleanupLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
+              } else if (data.type === "result") {
+                toast({ title: "整理完了", description: `重複削除${data.deleted}個 (残り${data.total}語)` });
+                queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
+                queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
+              } else if (data.type === "error") {
+                toast({ title: "エラー", description: data.error, variant: "destructive" });
+              }
+            } catch {}
+          }
         }
+      } catch {
+        toast({ title: "エラー", description: "整理に失敗しました", variant: "destructive" });
       }
-    } catch {
-      toast({ title: "エラー", description: "整理に失敗しました", variant: "destructive" });
-    }
-    isCleaningUpRef.current = false;
-    setIsCleaningUp(false);
+      isCleaningUpRef.current = false;
+      setIsCleaningUp(false);
+      cleanupPromiseRef.current = null;
+    };
+
+    cleanupPromiseRef.current = doCleanup();
+    await cleanupPromiseRef.current;
   }, [toast, queryClient]);
 
   const addWordsDirect = useCallback(async (words: WordEntry[]): Promise<{ added: number; total: number }> => {
@@ -372,20 +383,20 @@ export default function Home() {
 
     try {
       while (autoModeRef.current) {
-        const cycleStart = Date.now();
-
+        // Step 1: ターゲット生成
         const targetRes = await (await fetch("/api/target")).json();
         setTarget(targetRes.target);
         setGenResult(null);
 
+        // Step 2: レベル設定（8〜10ランダム）
         const randomLvl = 8 + Math.floor(Math.random() * 3);
         setLevel(randomLvl);
         setAgeConfirmed(true);
 
         if (!autoModeRef.current) break;
 
+        // Step 3: 生成（完了まで待機）
         const result = await generateDissSSE(targetRes.target, randomLvl);
-
         if (!autoModeRef.current) break;
 
         if (!result || result.total === 0) {
@@ -398,10 +409,10 @@ export default function Home() {
           await delay(10000);
           continue;
         }
-
         emptyStreak = 0;
-        const allWords = getWordsFromResult(result);
 
+        // Step 4: データベースに送信（完了まで待機）
+        const allWords = getWordsFromResult(result);
         try {
           const addResult = await addWordsDirect(allWords);
           toast({ title: "DB追加完了", description: `${addResult.added}個追加（合計 ${addResult.total}個）` });
@@ -412,12 +423,13 @@ export default function Home() {
 
         if (!autoModeRef.current) break;
 
-        const cleanupPromise = isCleaningUpRef.current ? Promise.resolve() : runCleanup();
+        // Step 5: 整理（完了まで待機）
+        await runCleanup();
 
-        const elapsed = Date.now() - cycleStart;
-        if (elapsed < 3000) await delay(3000 - elapsed);
+        if (!autoModeRef.current) break;
 
-        await cleanupPromise;
+        // Step 6: 次のサイクルへ（2秒クールダウン）
+        await delay(2000);
       }
     } catch (err) {
       toast({ title: "オートモードエラー", description: err instanceof Error ? err.message : "エラーが発生しました", variant: "destructive" });

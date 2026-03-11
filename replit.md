@@ -74,7 +74,7 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - **Manual paste-to-add**: Both DB and NG tabs have textarea to paste words in `word/reading(romaji)` format
 - Progress bar: shows count / 10,000 target
 - Age confirmation for level 8+
-- **DB Cleanup (4-step)**: (1) Wrong vowel pattern removal, (2) Script-variant dedup (hiragana/katakana/kanji same word), (3) Containment dedup (word A inside word B → delete B), (4) Tail-character dedup with AI selection of strongest word. Special handling for 顔(ao) and 野郎(ou) — keeps only the most impactful one.
+- **DB Cleanup (5-step)**: (1) Wrong vowel pattern removal, (2) Script-variant dedup with enhanced normalization (っ removal, ー removal, を→お, small kana, word↔reading cross-match), (3) Containment dedup (word A inside word B → delete B), (4) Tail-character dedup with AI selection of strongest word. Special handling for 顔(ao) and 野郎(ou), (5) AI semantic dedup — Gemini detects meaning-similar duplicates within each vowel group (e.g. うっせーよ↔うるせえよ, 生きてる価値なし↔存在価値なし, kanji↔hiragana variants). 5 groups processed in parallel.
 - SSE streaming with `res.flushHeaders()` + `X-Accel-Buffering: no` for proxy compatibility
 
 ## API Routes
@@ -96,10 +96,16 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 
 ## Full Auto Mode
 - **完全オートモード**: Automated loop that runs continuously until user presses "停止"
-- Flow: Target → Level 8-10 random + age confirm → Generate → Add all words to DB → Cleanup + Next generation in parallel → Repeat
+- **Strict sequential flow** — each step fully completes before the next begins:
+  1. ターゲット生成
+  2. レベル設定（8〜10ランダム）
+  3. 生成（完了まで待機）
+  4. データベースに送信（完了まで待機）
+  5. 整理（完了まで待機）
+  6. 2秒クールダウン → 1に戻る
 - Uses `autoModeRef` for cancellation, `addWordsDirect` for non-mutation favorites adding
 - During auto mode, manual controls (slider, checkboxes, generate button) are disabled
-- Cleanup runs concurrently with next generation for maximum throughput
+- Empty result detection: 3 consecutive empty results → auto-stop with toast
 
 ## Cleanup Optimization
 - Check4 (tail dedup) AI calls are parallelized in 2 phases:
