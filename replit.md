@@ -83,6 +83,12 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - Progress bar: shows count / 10,000 target
 - Age confirmation for level 8+
 - **DB Cleanup (5-step)**: (1) Wrong vowel pattern removal, (2) Script-variant dedup with enhanced normalization (っ removal, ー removal, を→お, small kana, word↔reading cross-match), (3) Containment dedup (word A inside word B → delete B), (4) Tail-character dedup with AI selection of strongest word. Special handling for 顔(ao) and 野郎(ou), (5) AI semantic dedup — Gemini detects meaning-similar duplicates within each vowel group (e.g. うっせーよ↔うるせえよ, 生きてる価値なし↔存在価値なし, kanji↔hiragana variants). 5 groups processed in parallel.
+- **DB精査 (Scrutiny)**: AI-powered quality scan of all DB words via SSE:
+  - Check 1: Vowel group mismatch (stored vs recalculated from romaji)
+  - Check 2: Duplicate rhyme endings (shared kanji/katakana word suffix 2+ chars, or shared reading suffix 4+ chars within same vowel bucket)
+  - Check 3: AI detection of 放送禁止用語, 差別用語, 商標名(IP) via Gemini
+  - Results auto-select flagged words for user review/deletion
+- **Scrutiny Reference** (`server/scrutiny_reference.ts`): User feedback on past errors stored as reference for AI prompts
 - SSE streaming with `res.flushHeaders()` + `X-Accel-Buffering: no` for proxy compatibility
 
 ## API Routes
@@ -102,6 +108,7 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - `GET /api/ng-words/count` - Get NG word count
 - `DELETE /api/ng-words` - Clear all NG words
 - `POST /api/favorites/cleanup` - DB cleanup via SSE (rhyme dedup within groups only)
+- `POST /api/favorites/scrutinize` - DB精査 via SSE (vowel check, duplicate endings, AI content check)
 
 ## Full Auto Mode
 - **完全オートモード**: Automated loop that runs continuously until user presses "停止"
@@ -133,6 +140,8 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - Dependency array only includes `toast` (stable) — not the functions themselves
 
 ## Recent Changes
+- 2026-03-11: 精査 (Scrutiny) feature: AI-powered DB scan for vowel mismatch, duplicate endings, prohibited/discriminatory/trademark words
+- 2026-03-11: Fixed 8 words with wrong romaji, deleted 13 duplicate/incomplete words, saved user feedback as reference
 - 2026-03-11: Tiered rhyme system: legendary (5+), super (4), hard (3) vowel match with distinct styling
 - 2026-03-11: Tap-to-select in DB tab with action bar (bulk copy/delete)
 - 2026-03-11: Auto-save deleted words to NG (manual, batch, cleanup)

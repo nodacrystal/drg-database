@@ -11,7 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
   Flame, Mic2, Sparkles, Zap, AlertTriangle, Loader2, Star,
-  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart, Plus, Wrench, Play,
+  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart, Plus, Wrench, Play, Search,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -103,6 +103,8 @@ export default function Home() {
   const [isAutoMode, setIsAutoMode] = useState(false);
   const [autoModeCount, setAutoModeCount] = useState(0);
   const [selectedFavIds, setSelectedFavIds] = useState<Set<number>>(new Set());
+  const [isScrutinizing, setIsScrutinizing] = useState(false);
+  const [scrutinyLogs, setScrutinyLogs] = useState<ProgressLog[]>([]);
   const autoModeRef = useRef(false);
   const isCleaningUpRef = useRef(false);
   const cleanupPromiseRef = useRef<Promise<void> | null>(null);
@@ -337,6 +339,47 @@ export default function Home() {
     if (selectedFavIds.size === 0) return;
     batchDeleteFavMutation.mutate(Array.from(selectedFavIds));
   }, [selectedFavIds, batchDeleteFavMutation]);
+
+  const runScrutiny = useCallback(async () => {
+    if (isScrutinizing) return;
+    setIsScrutinizing(true);
+    setScrutinyLogs([]);
+    setSelectedFavIds(new Set());
+    try {
+      const response = await fetch("/api/favorites/scrutinize", { method: "POST", headers: { "Content-Type": "application/json" } });
+      if (!response.ok) throw new Error("精査に失敗しました");
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("No reader");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.type === "progress") {
+              setScrutinyLogs(prev => [...prev, { time: "", detail: data.detail, elapsed: data.elapsed || "" }]);
+            } else if (data.type === "result") {
+              const ids = new Set<number>(data.flagged.map((f: { id: number }) => f.id));
+              setSelectedFavIds(ids);
+              const s = data.summary;
+              toast({ title: "精査完了", description: `${ids.size}件を検出（母音${s.vowelMismatch}・重複${s.duplicateEndings}・AI${s.aiDetected}）` });
+            } else if (data.type === "error") {
+              toast({ title: "エラー", description: data.error, variant: "destructive" });
+            }
+          } catch {}
+        }
+      }
+    } catch {
+      toast({ title: "エラー", description: "精査に失敗しました", variant: "destructive" });
+    }
+    setIsScrutinizing(false);
+  }, [isScrutinizing, toast]);
 
   const pasteFavMutation = useMutation({
     mutationFn: async (text: string) => { const res = await apiRequest("POST", "/api/favorites/paste", { text }); return res.json(); },
@@ -735,7 +778,11 @@ export default function Home() {
                   <Badge variant="secondary">{totalCount.toLocaleString()}件</Badge>
                 </div>
                 <div className="flex gap-2">
-                  <Button variant="outline" size="sm" onClick={runCleanup} disabled={isCleaningUp || totalCount === 0} data-testid="button-cleanup-favorites">
+                  <Button variant="outline" size="sm" onClick={runScrutiny} disabled={isScrutinizing || isCleaningUp || totalCount === 0} data-testid="button-scrutinize-favorites">
+                    {isScrutinizing ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Search className="w-3.5 h-3.5 mr-1" />}
+                    精査
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={runCleanup} disabled={isCleaningUp || isScrutinizing || totalCount === 0} data-testid="button-cleanup-favorites">
                     {isCleaningUp ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Wrench className="w-3.5 h-3.5 mr-1" />}
                     整理
                   </Button>
@@ -763,6 +810,24 @@ export default function Home() {
                   貼り付けて追加
                 </Button>
               </div>
+
+              {scrutinyLogs.length > 0 && (
+                <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 space-y-1" data-testid="scrutiny-logs">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Search className="w-4 h-4 text-amber-500" />
+                    <span className="text-xs font-semibold text-amber-600 dark:text-amber-400">精査ログ</span>
+                    {!isScrutinizing && <Button variant="ghost" size="sm" className="h-5 px-1 text-xs" onClick={() => setScrutinyLogs([])}><X className="w-3 h-3" /></Button>}
+                  </div>
+                  <div className="max-h-32 overflow-y-auto space-y-0.5">
+                    {scrutinyLogs.map((log, i) => (
+                      <div key={i} className="text-xs flex gap-2">
+                        <span className="text-muted-foreground font-mono shrink-0">[{log.elapsed}]</span>
+                        <span>{log.detail}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {cleanupLogs.length > 0 && (
                 <div className="rounded-md border border-border/50 bg-muted/20 p-3 space-y-1" data-testid="cleanup-logs">

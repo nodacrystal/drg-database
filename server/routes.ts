@@ -9,6 +9,7 @@ import {
   getWordById, getWordsByIds,
 } from "./storage";
 import { TARGETS, type TargetData } from "./targets";
+import { SCRUTINY_REFERENCE } from "./scrutiny_reference";
 
 const dissRequestSchema = z.object({
   target: z.string().min(1),
@@ -584,6 +585,176 @@ ${wordListForFilter}
       }
       res.json({ deleted, total: await getWordCount() });
     } catch { res.status(500).json({ error: "一括削除に失敗しました" }); }
+  });
+
+  app.post("/api/favorites/scrutinize", async (req, res) => {
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    let disconnected = false;
+    res.on("close", () => { disconnected = true; if (heartbeat) clearInterval(heartbeat); });
+
+    try {
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders();
+      heartbeat = setInterval(() => { if (!disconnected) try { res.write(": heartbeat\n\n"); } catch {} }, 15000);
+
+      const send = (data: any) => { if (!disconnected) try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {} };
+      const startTime = Date.now();
+      const elapsed = () => `${((Date.now() - startTime) / 1000).toFixed(1)}s`;
+
+      const allWords = await getAllWords();
+      send({ type: "progress", detail: `全${allWords.length}ワードを精査中...`, elapsed: elapsed() });
+
+      const flagged: { id: number; reasons: string[] }[] = [];
+      const flagMap = new Map<number, string[]>();
+      const addFlag = (id: number, reason: string) => {
+        if (!flagMap.has(id)) flagMap.set(id, []);
+        flagMap.get(id)!.push(reason);
+      };
+
+      send({ type: "progress", detail: "チェック1: 母音グループの整合性確認...", elapsed: elapsed() });
+      for (const w of allWords) {
+        const recalcVowels = extractVowels(w.romaji);
+        const storedVowels = w.vowels || "";
+        const recalcKey = recalcVowels.length >= 2 ? recalcVowels.slice(-2) : recalcVowels;
+        const storedKey = storedVowels.length >= 2 ? storedVowels.slice(-2) : storedVowels;
+        if (recalcKey !== storedKey) {
+          addFlag(w.id, `母音不一致: stored=${storedKey}, calculated=${recalcKey}`);
+        }
+      }
+      const vowelMismatchCount = [...flagMap.values()].filter(rs => rs.some(r => r.startsWith("母音不一致"))).length;
+      send({ type: "progress", detail: `チェック1完了: ${vowelMismatchCount}件の母音不一致`, elapsed: elapsed() });
+
+      send({ type: "progress", detail: "チェック2: 一致箇所の重複確認...", elapsed: elapsed() });
+      const wordsByBucket: Record<string, typeof allWords> = {};
+      for (const w of allWords) {
+        const v = extractVowels(w.romaji);
+        const key = v.length >= 2 ? v.slice(-2) : v || "_";
+        (wordsByBucket[key] ??= []).push(w);
+      }
+
+      for (const [, bucket] of Object.entries(wordsByBucket)) {
+        if (bucket.length < 2) continue;
+        const suffixGroups: Record<string, typeof allWords> = {};
+        for (const w of bucket) {
+          const reading = w.reading;
+          for (let len = 4; len <= Math.min(8, reading.length - 1); len++) {
+            const suffix = reading.slice(-len);
+            (suffixGroups[`r:${suffix}`] ??= []).push(w);
+          }
+          const word = w.word;
+          for (let len = 2; len <= Math.min(6, word.length - 1); len++) {
+            const suffix = word.slice(-len);
+            if (/[\u4E00-\u9FFF\u30A0-\u30FF]/.test(suffix)) {
+              (suffixGroups[`w:${suffix}`] ??= []).push(w);
+            }
+          }
+        }
+        const flaggedInBucket = new Set<number>();
+        const bestSuffixes: { suffix: string; ids: number[] }[] = [];
+        for (const [rawSuffix, group] of Object.entries(suffixGroups)) {
+          const uniqueIds = [...new Set(group.map(w => w.id))];
+          if (uniqueIds.length >= 2) {
+            const suffix = rawSuffix.startsWith("w:") || rawSuffix.startsWith("r:") ? rawSuffix.slice(2) : rawSuffix;
+            bestSuffixes.push({ suffix, ids: uniqueIds });
+          }
+        }
+        bestSuffixes.sort((a, b) => b.suffix.length - a.suffix.length);
+        for (const { suffix, ids } of bestSuffixes) {
+          const unflagged = ids.filter(id => !flaggedInBucket.has(id));
+          if (unflagged.length >= 2 || (unflagged.length >= 1 && ids.some(id => flaggedInBucket.has(id)))) {
+            for (const id of ids) {
+              if (!flaggedInBucket.has(id)) {
+                flaggedInBucket.add(id);
+                addFlag(id, `韻の一致箇所が同じ「${suffix}」(${ids.length}件)`);
+              }
+            }
+          }
+        }
+      }
+      const dupEndingCount = new Set([...flagMap.entries()].filter(([, rs]) => rs.some(r => r.startsWith("韻の一致箇所"))).map(([id]) => id)).size;
+      send({ type: "progress", detail: `チェック2完了: ${dupEndingCount}件の一致箇所重複`, elapsed: elapsed() });
+
+      if (disconnected) { if (heartbeat) clearInterval(heartbeat); return; }
+
+      send({ type: "progress", detail: "チェック3: 放送禁止用語・差別用語・商標名のAIチェック...", elapsed: elapsed() });
+      const batchSize = 100;
+      const aiFlagged = new Set<string>();
+      for (let i = 0; i < allWords.length; i += batchSize) {
+        if (disconnected) break;
+        const batch = allWords.slice(i, i + batchSize);
+        const wordList = batch.map(w => w.word).join("\n");
+        try {
+          const knownGaps = SCRUTINY_REFERENCE.duplicateDetectionGaps.join("\n- ");
+          const prompt = `以下の日本語ワードリストを精査してください。
+次のカテゴリに該当するワードだけを抽出してください：
+
+1. 放送禁止用語（テレビ・ラジオで使えない言葉）
+2. 差別用語（人種・障害・性別・職業等への差別的表現）
+3. 商標名・IP（企業名、ブランド名、キャラクター名、芸能人の実名）
+
+重要ルール：
+- 「悪口」「侮辱」「ディス」は本アプリの目的なので問題なし。単なる悪口は該当しない。
+- 「バカ」「アホ」「クズ」「死ね」「ブス」「ハゲ」「デブ」等の一般的な悪口は対象外。
+- 明確に上記3カテゴリに該当するもののみ抽出すること。
+- 該当なしの場合は「該当なし」と回答。
+
+過去の検出漏れパターン（参考）：
+- ${knownGaps}
+
+ワードリスト：
+${wordList}
+
+回答形式（該当ワードがある場合）：
+ワード名|カテゴリ（放送禁止/差別/商標）
+例：
+ニガー|差別
+コカコーラ野郎|商標`;
+
+          const result = await aiGenerate(prompt);
+          const text = (result?.text || "").trim();
+          if (text && !text.includes("該当なし")) {
+            for (const line of text.split("\n")) {
+              const parts = line.split("|").map((s: string) => s.trim());
+              if (parts.length >= 2 && parts[0]) {
+                aiFlagged.add(parts[0]);
+              }
+            }
+          }
+        } catch (err) {
+          console.error(`[SCRUTINY] AI check error batch ${i}:`, err);
+          send({ type: "progress", detail: `AIチェックバッチ${Math.floor(i / batchSize) + 1}でエラー、スキップ`, elapsed: elapsed() });
+        }
+      }
+
+      if (aiFlagged.size > 0) {
+        for (const w of allWords) {
+          if (aiFlagged.has(w.word)) {
+            addFlag(w.id, "AI検出: 放送禁止/差別/商標の可能性");
+          }
+        }
+      }
+      send({ type: "progress", detail: `チェック3完了: ${aiFlagged.size}件のAI検出`, elapsed: elapsed() });
+
+      for (const [id, reasons] of flagMap.entries()) {
+        flagged.push({ id, reasons });
+      }
+
+      if (heartbeat) clearInterval(heartbeat);
+      send({ type: "result", flagged, totalChecked: allWords.length, summary: {
+        vowelMismatch: vowelMismatchCount,
+        duplicateEndings: dupEndingCount,
+        aiDetected: aiFlagged.size,
+      }});
+      res.end();
+    } catch (error) {
+      console.error("Scrutiny error:", error);
+      if (heartbeat) clearInterval(heartbeat);
+      try { res.write(`data: ${JSON.stringify({ type: "error", error: "精査に失敗しました" })}\n\n`); res.end(); }
+      catch { try { res.status(500).json({ error: "精査に失敗しました" }); } catch {} }
+    }
   });
 
   app.delete("/api/favorites", async (_req, res) => {
