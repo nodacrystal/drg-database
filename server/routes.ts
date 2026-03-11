@@ -440,7 +440,7 @@ ${wordListForFilter}
       send("done", `完了: ${totalGrouped + ungrouped.length}個 (グループ${totalGrouped} + 未分類${ungrouped.length}) [${timingSummary}]`);
 
       if (!disconnected) {
-        res.write(`data: ${JSON.stringify({ type: "result", groups, ungrouped, total: totalGrouped + ungrouped.length })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: "result", groups, ungrouped, total: totalGrouped + ungrouped.length, elapsedMs: Date.now() - startTime })}\n\n`);
         if (typeof (res as any).flush === "function") (res as any).flush();
         res.end();
       }
@@ -1018,27 +1018,22 @@ ${wordList}
       }
 
       for (const fb of genericFallbacks) {
-        const tail = fb.candidates[0]?.reading.slice(-2) || "";
-        let anyDeleted = false;
         for (let k = 1; k < fb.candidates.length; k++) {
-          if (!fb.candidates[k].protected) { toDelete.add(fb.candidates[k].id); tailDupCount++; anyDeleted = true; }
+          if (!fb.candidates[k].protected) { toDelete.add(fb.candidates[k].id); tailDupCount++; }
         }
-        if (anyDeleted && tail) ngSuffixes.add(tail);
       }
 
       if (genericTasks.length > 0) {
         send("check4", `末尾重複 ${genericTasks.length}グループをAI選定中...`);
-        const PICK_PARALLEL = 3;
+        const PICK_PARALLEL = 5;
         for (let b = 0; b < genericTasks.length; b += PICK_PARALLEL) {
           const batch = genericTasks.slice(b, b + PICK_PARALLEL);
           const batchResults = await Promise.all(batch.map(t => aiPickWord(t)));
           for (let i = 0; i < batch.length; i++) {
             const keepId = batchResults[i];
-            let anyDeleted = false;
             for (const w of batch[i].candidates) {
-              if (w.id !== keepId && !w.protected) { toDelete.add(w.id); anyDeleted = true; tailDupCount++; }
+              if (w.id !== keepId && !w.protected) { toDelete.add(w.id); tailDupCount++; }
             }
-            if (anyDeleted) ngSuffixes.add(batch[i].label);
           }
         }
       }
@@ -1054,7 +1049,7 @@ ${wordList}
       const groupsWithNewWords = groupsToCheck.filter(g => g.words.some(w => !w.protected));
       send("check5", `${groupsWithNewWords.length}/${groupsToCheck.length}グループに新規ワードあり`);
 
-      const SEMANTIC_PARALLEL = 3;
+      const SEMANTIC_PARALLEL = 5;
       for (let b = 0; b < groupsWithNewWords.length; b += SEMANTIC_PARALLEL) {
         const batch = groupsWithNewWords.slice(b, b + SEMANTIC_PARALLEL);
         await Promise.all(batch.map(async (g) => {
@@ -1130,7 +1125,7 @@ ${wordList}`);
       send("done", `整理完了: ${summary} (残り${finalCount}語, ${formatElapsed(Date.now() - startTime)})`);
 
       if (!disconnected) {
-        res.write(`data: ${JSON.stringify({ type: "result", deleted: totalDeleted, merged: 0, total: finalCount })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: "result", deleted: totalDeleted, merged: 0, total: finalCount, elapsedMs: Date.now() - startTime })}\n\n`);
         if (typeof (res as any).flush === "function") (res as any).flush();
         res.end();
       }

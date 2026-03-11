@@ -139,6 +139,9 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - Dependency array only includes `toast` (stable) — not the functions themselves
 
 ## Recent Changes
+- 2026-03-11: Timer recording: generation and cleanup record elapsed time and compare with previous run (green = faster, red = slower)
+- 2026-03-11: Cleanup optimization: check4 parallelism 3→5, check5 parallelism 3→5
+- 2026-03-11: NG suffix fix: only meaningful words (顔, 野郎 etc.) go to NG, not generic 2-char hiragana reading tails
 - 2026-03-11: NG system overhaul: renamed to "NG単語リスト", stores suffix/ending terms instead of full words, blocks generation/addition of words ending with NG terms, cleanup saves only shared suffixes to NG, multi-select + batch delete for NG tab
 - 2026-03-11: 精査 (Scrutiny) feature: AI-powered DB scan for vowel mismatch, duplicate endings, prohibited/discriminatory/trademark words
 - 2026-03-11: Fixed 8 words with wrong romaji, deleted 13 duplicate/incomplete words, saved user feedback as reference

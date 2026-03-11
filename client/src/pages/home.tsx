@@ -106,6 +106,10 @@ export default function Home() {
   const [selectedNgIds, setSelectedNgIds] = useState<Set<number>>(new Set());
   const [isScrutinizing, setIsScrutinizing] = useState(false);
   const [scrutinyLogs, setScrutinyLogs] = useState<ProgressLog[]>([]);
+  const [lastGenTime, setLastGenTime] = useState<number | null>(null);
+  const [prevGenTime, setPrevGenTime] = useState<number | null>(null);
+  const [lastCleanupTime, setLastCleanupTime] = useState<number | null>(null);
+  const [prevCleanupTime, setPrevCleanupTime] = useState<number | null>(null);
   const autoModeRef = useRef(false);
   const isCleaningUpRef = useRef(false);
   const cleanupPromiseRef = useRef<Promise<void> | null>(null);
@@ -205,6 +209,9 @@ export default function Home() {
               setGenResult(finalResult);
               const allWords = getWordsFromResult(finalResult);
               setCheckedWords(new Set(allWords.map(e => e.word)));
+              if (data.elapsedMs) {
+                setLastGenTime(prev => { setPrevGenTime(prev); return data.elapsedMs; });
+              }
             } else if (data.type === "error") {
               setGenStatus("error");
               toast({ title: "エラー", description: data.error, variant: "destructive" });
@@ -450,9 +457,15 @@ export default function Home() {
               if (data.type === "progress") {
                 setCleanupLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
               } else if (data.type === "result") {
+                const elapsedMs = data.elapsedMs || 0;
+                if (elapsedMs) {
+                  setLastCleanupTime(prev => { setPrevCleanupTime(prev); return elapsedMs; });
+                }
                 toast({ title: "整理完了", description: `重複削除${data.deleted}個 (残り${data.total}語)` });
                 queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
                 queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
+                queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
+                queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
               } else if (data.type === "error") {
                 toast({ title: "エラー", description: data.error, variant: "destructive" });
               }
@@ -866,6 +879,17 @@ export default function Home() {
                   <div className="flex items-center gap-2 mb-1">
                     <Wrench className="w-4 h-4 text-primary" />
                     <span className="text-xs font-semibold">整理ログ</span>
+                    {lastCleanupTime && !isCleaningUp && (
+                      <span className="text-xs font-mono text-green-400 ml-auto" data-testid="text-cleanup-time">
+                        {formatTimer(Math.round(lastCleanupTime / 1000))}
+                        {prevCleanupTime && (() => {
+                          const diff = lastCleanupTime - prevCleanupTime;
+                          const sign = diff > 0 ? "+" : "";
+                          return <span className={diff <= 0 ? "text-green-300 ml-1" : "text-red-300 ml-1"}>({sign}{formatTimer(Math.abs(Math.round(diff / 1000)))})</span>;
+                        })()}
+                      </span>
+                    )}
+                    {isCleaningUp && <Loader2 className="w-3.5 h-3.5 animate-spin text-primary ml-auto" />}
                   </div>
                   <div className="max-h-32 overflow-y-auto space-y-0.5">
                     {cleanupLogs.map((log, i) => (
@@ -1037,7 +1061,16 @@ export default function Home() {
                       <span className={`text-lg font-bold font-mono tabular-nums ${genStatus === "success" ? "text-green-400" : genStatus === "error" ? "text-red-400" : "text-yellow-400"}`} data-testid="text-timer">
                         {formatTimer(timerSeconds)}
                       </span>
-                      {genStatus === "success" && <span className="text-xs text-green-400">完了</span>}
+                      {genStatus === "success" && lastGenTime && (
+                        <span className="text-xs text-green-400" data-testid="text-gen-time">
+                          {formatTimer(Math.round(lastGenTime / 1000))}
+                          {prevGenTime && (() => {
+                            const diff = lastGenTime - prevGenTime;
+                            const sign = diff > 0 ? "+" : "";
+                            return <span className={diff <= 0 ? "text-green-300 ml-1" : "text-red-300 ml-1"}>({sign}{formatTimer(Math.abs(Math.round(diff / 1000)))})</span>;
+                          })()}
+                        </span>
+                      )}
                       {genStatus === "error" && <span className="text-xs text-red-400">失敗</span>}
                     </div>
                   </div>
