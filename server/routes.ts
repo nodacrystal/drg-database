@@ -6,7 +6,7 @@ import {
   getAllWords, getWordCount, getWordStrings, addWords, deleteWord, deleteWords,
   clearAllWords, exportWords, getAllNgWords, getNgWordStrings,
   addNgWords, getNgWordCount, clearNgWords, deleteNgWords, markWordsProtected, ensureProtectedColumn,
-  getWordById, getWordsByIds,
+  getWordById, getWordsByIds, updateWord,
 } from "./storage";
 import { TARGETS, type TargetData } from "./targets";
 import { SCRUTINY_REFERENCE } from "./scrutiny_reference";
@@ -479,10 +479,22 @@ ${wordListForFilter}
         const assigned = new Set<number>();
         const rhymeGroups: RhymeGroup[] = [];
 
+        const buildTierBuckets = (minLen: number) => {
+          const bkts: Record<string, typeof items> = {};
+          for (const w of words) {
+            if (assigned.has(w.id)) continue;
+            if (w.vowels.length >= minLen) {
+              const s = w.vowels.slice(-minLen);
+              (bkts[s] ??= []).push(w);
+            }
+          }
+          return bkts;
+        };
+
         const perfectBuckets: Record<string, typeof items> = {};
         for (const w of words) {
-          if (w.vowels.length >= 4) {
-            for (let len = w.vowels.length; len >= 4; len--) {
+          if (w.vowels.length >= 7) {
+            for (let len = w.vowels.length; len >= 7; len--) {
               const s = w.vowels.slice(-len);
               (perfectBuckets[s] ??= []).push(w);
             }
@@ -491,62 +503,35 @@ ${wordListForFilter}
         const perfectEntries = Object.entries(perfectBuckets)
           .filter(([s, g]) => {
             const uniqueIds = [...new Set(g.map(w => w.id))];
-            return uniqueIds.length >= 2 && uniqueIds.some(id => {
-              const w = g.find(w2 => w2.id === id)!;
-              return w.vowels.length >= 4 && (s.length / w.vowels.length) >= 0.9;
-            });
+            return uniqueIds.length >= 2;
           })
           .sort((a, b) => b[0].length - a[0].length);
         for (const [ps, pWords] of perfectEntries) {
           const uniqueWords = [...new Map(pWords.map(w => [w.id, w])).values()]
             .filter(w => !assigned.has(w.id));
-          if (uniqueWords.length >= 2 && uniqueWords.some(w => w.vowels.length >= 4 && (ps.length / w.vowels.length) >= 0.9)) {
+          if (uniqueWords.length >= 2) {
             rhymeGroups.push({ suffix: ps, words: sortByRomaji(uniqueWords), tier: "perfect" });
             for (const w of uniqueWords) assigned.add(w.id);
           }
         }
 
-        const legendaryBuckets: Record<string, typeof items> = {};
-        for (const w of words) {
-          if (assigned.has(w.id)) continue;
-          if (w.vowels.length >= 5) {
-            const s5 = w.vowels.slice(-5);
-            (legendaryBuckets[s5] ??= []).push(w);
-          }
-        }
-        for (const [s5, lWords] of Object.entries(legendaryBuckets)) {
+        for (const [s6, lWords] of Object.entries(buildTierBuckets(6))) {
           if (lWords.length >= 2) {
-            rhymeGroups.push({ suffix: s5, words: sortByRomaji(lWords), tier: "legendary" });
+            rhymeGroups.push({ suffix: s6, words: sortByRomaji(lWords), tier: "legendary" });
             for (const w of lWords) assigned.add(w.id);
           }
         }
 
-        const superBuckets: Record<string, typeof items> = {};
-        for (const w of words) {
-          if (assigned.has(w.id)) continue;
-          if (w.vowels.length >= 4) {
-            const s4 = w.vowels.slice(-4);
-            (superBuckets[s4] ??= []).push(w);
-          }
-        }
-        for (const [s4, sWords] of Object.entries(superBuckets)) {
+        for (const [s5, sWords] of Object.entries(buildTierBuckets(5))) {
           if (sWords.length >= 2) {
-            rhymeGroups.push({ suffix: s4, words: sortByRomaji(sWords), tier: "super" });
+            rhymeGroups.push({ suffix: s5, words: sortByRomaji(sWords), tier: "super" });
             for (const w of sWords) assigned.add(w.id);
           }
         }
 
-        const hardBuckets: Record<string, typeof items> = {};
-        for (const w of words) {
-          if (assigned.has(w.id)) continue;
-          if (w.vowels.length >= 3) {
-            const s3 = w.vowels.slice(-3);
-            (hardBuckets[s3] ??= []).push(w);
-          }
-        }
-        for (const [s3, hWords] of Object.entries(hardBuckets)) {
+        for (const [s4, hWords] of Object.entries(buildTierBuckets(4))) {
           if (hWords.length >= 2) {
-            rhymeGroups.push({ suffix: s3, words: sortByRomaji(hWords), tier: "hard" });
+            rhymeGroups.push({ suffix: s4, words: sortByRomaji(hWords), tier: "hard" });
             for (const w of hWords) assigned.add(w.id);
           }
         }
@@ -558,7 +543,13 @@ ${wordListForFilter}
         groups.push({ vowels: `*${suffix}`, words: remaining, hardRhymes: rhymeGroups });
       }
 
+      const vowelOrder: Record<string, number> = { a: 0, i: 1, u: 2, e: 3, o: 4, n: 5 };
       groups.sort((a, b) => {
+        const aLast = a.vowels.slice(-1);
+        const bLast = b.vowels.slice(-1);
+        const aOrd = vowelOrder[aLast] ?? 6;
+        const bOrd = vowelOrder[bLast] ?? 6;
+        if (aOrd !== bOrd) return aOrd - bOrd;
         const aTotal = a.words.length + a.hardRhymes.reduce((s, h) => s + h.words.length, 0);
         const bTotal = b.words.length + b.hardRhymes.reduce((s, h) => s + h.words.length, 0);
         return bTotal - aTotal;
@@ -818,6 +809,93 @@ ${wordList}
       const deleted = await deleteNgWords(parsed.data.ids);
       res.json({ deleted, total: await getNgWordCount() });
     } catch { res.status(500).json({ error: "一括削除に失敗しました" }); }
+  });
+
+  app.post("/api/favorites/group-check", async (req, res) => {
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    let disconnected = false;
+    res.on("close", () => { disconnected = true; if (heartbeat) clearInterval(heartbeat); });
+    try {
+      res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" });
+      heartbeat = setInterval(() => { if (!disconnected) res.write(": heartbeat\n\n"); }, 15000);
+      const startTime = Date.now();
+      const send = (step: string, detail: string) => {
+        if (disconnected) return;
+        const elapsed = `${((Date.now() - startTime) / 1000).toFixed(1)}s`;
+        res.write(`data: ${JSON.stringify({ type: "progress", step, detail, elapsed })}\n\n`);
+      };
+
+      send("init", "グループ検査: 全ワードを取得中...");
+      const allWords = await getAllWords();
+      const BATCH = 30;
+      const PARALLEL = 5;
+      let fixed = 0;
+      let checked = 0;
+
+      type WordFix = { id: number; word: string; reading: string; romaji: string };
+      const fixQueue: WordFix[] = [];
+
+      for (let b = 0; b < allWords.length; b += BATCH * PARALLEL) {
+        const superBatch = allWords.slice(b, b + BATCH * PARALLEL);
+        const batches: typeof allWords[] = [];
+        for (let i = 0; i < superBatch.length; i += BATCH) batches.push(superBatch.slice(i, i + BATCH));
+
+        const results = await Promise.all(batches.map(async batch => {
+          const wordList = batch.map(w => `ID:${w.id} 表記:${w.word} 読み:${w.reading} ローマ字:${w.romaji} 母音:${w.vowels}`).join("\n");
+          const prompt = `以下の日本語ワードリストについて、各ワードの以下を確認し修正せよ:
+1. 読み方(reading)がワードの正確なひらがな読みになっているか
+2. ローマ字(romaji)が読み方のヘボン式ローマ字として正確か（長音・促音・撥音に注意）
+3. 問題がある場合のみJSONで修正内容を出力
+
+ワード一覧:
+${wordList}
+
+問題がある場合のみ以下のJSON配列で出力（問題なければ空配列[]）:
+[{"id":数字,"reading":"正しい読み","romaji":"正しいローマ字"}]
+説明不要、JSONのみ出力。`;
+          try {
+            const result = await aiGenerate(prompt);
+            const text = result.text || "";
+            const jsonMatch = text.match(/\[[\s\S]*\]/);
+            if (!jsonMatch) return [];
+            return JSON.parse(jsonMatch[0]) as WordFix[];
+          } catch { return []; }
+        }));
+
+        checked += superBatch.length;
+        for (const fixes of results) {
+          for (const fix of fixes) {
+            const orig = allWords.find(w => w.id === fix.id);
+            if (!orig) continue;
+            const newRomaji = fix.romaji || orig.romaji;
+            const newReading = fix.reading || orig.reading;
+            const newVowels = extractVowels(newRomaji);
+            if (newRomaji !== orig.romaji || newReading !== orig.reading) {
+              fixQueue.push({ id: fix.id, word: orig.word, reading: newReading, romaji: newRomaji });
+              send("check", `修正:「${orig.word}」 ${orig.romaji}→${newRomaji}`);
+            }
+          }
+        }
+        send("progress", `${checked}/${allWords.length}語チェック完了...`);
+      }
+
+      for (const fix of fixQueue) {
+        const orig = allWords.find(w => w.id === fix.id)!;
+        const newVowels = extractVowels(fix.romaji);
+        await updateWord(fix.id, { word: orig.word, reading: fix.reading, romaji: fix.romaji, vowels: newVowels, charCount: fix.reading.length });
+        fixed++;
+      }
+
+      send("done", `グループ検査完了: ${checked}語チェック、${fixed}語修正`);
+      const elapsedMs = Date.now() - startTime;
+      if (!disconnected) res.write(`data: ${JSON.stringify({ type: "result", checked, fixed, elapsedMs })}\n\n`);
+    } catch (error) {
+      console.error("Group check error:", error);
+      if (!disconnected) res.write(`data: ${JSON.stringify({ type: "error", error: "グループ検査に失敗しました" })}\n\n`);
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
+      if (!disconnected) res.end();
+    }
   });
 
   type TailDupItem = { id: number; word: string; reading: string; romaji: string; vowels: string; charCount: number; protected?: boolean };

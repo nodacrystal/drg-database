@@ -11,7 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
   Flame, Mic2, Sparkles, Zap, AlertTriangle, Loader2, Star,
-  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart, Plus, Wrench, Play, Search, Filter,
+  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart, Plus, Wrench, Play, Search, Filter, ScanLine,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -125,6 +125,8 @@ export default function Home() {
   const [prevCleanupTime, setPrevCleanupTime] = useState<number | null>(null);
   const [rhymeFilter, setRhymeFilter] = useState<RhymeFilter>("all");
   const [isDedupRunning, setIsDedupRunning] = useState(false);
+  const [isGroupChecking, setIsGroupChecking] = useState(false);
+  const [groupCheckLogs, setGroupCheckLogs] = useState<ProgressLog[]>([]);
   const autoModeRef = useRef(false);
   const isCleaningUpRef = useRef(false);
   const cleanupPromiseRef = useRef<Promise<void> | null>(null);
@@ -540,6 +542,44 @@ export default function Home() {
     setIsDedupRunning(false);
   }, [isDedupRunning, isCleaningUp, toast, queryClient]);
 
+  const runGroupCheck = useCallback(async () => {
+    if (isGroupChecking) return;
+    setIsGroupChecking(true);
+    setGroupCheckLogs([]);
+    try {
+      const response = await fetch("/api/favorites/group-check", { method: "POST", headers: { "Content-Type": "application/json" } });
+      if (!response.ok) throw new Error("グループ検査に失敗しました");
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("No reader");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.type === "progress") {
+              setGroupCheckLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
+            } else if (data.type === "result") {
+              toast({ title: "グループ検査完了", description: `${data.checked}語チェック、${data.fixed}語修正` });
+              queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
+            } else if (data.type === "error") {
+              toast({ title: "エラー", description: data.error, variant: "destructive" });
+            }
+          } catch {}
+        }
+      }
+    } catch {
+      toast({ title: "エラー", description: "グループ検査に失敗しました", variant: "destructive" });
+    }
+    setIsGroupChecking(false);
+  }, [isGroupChecking, toast, queryClient]);
+
   const addWordsDirect = useCallback(async (words: WordEntry[]): Promise<{ added: number; total: number }> => {
     if (words.length === 0) return { added: 0, total: 0 };
     const response = await fetch("/api/favorites", {
@@ -887,9 +927,13 @@ export default function Home() {
                     {isCleaningUp ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Wrench className="w-3.5 h-3.5 mr-1" />}
                     整理
                   </Button>
-                  <Button variant="outline" size="sm" onClick={runDedupCleanup} disabled={isDedupRunning || isCleaningUp || isScrutinizing || totalCount === 0} data-testid="button-dedup-cleanup">
+                  <Button variant="outline" size="sm" onClick={runDedupCleanup} disabled={isDedupRunning || isCleaningUp || isScrutinizing || isGroupChecking || totalCount === 0} data-testid="button-dedup-cleanup">
                     {isDedupRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Filter className="w-3.5 h-3.5 mr-1" />}
                     重複整理
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={runGroupCheck} disabled={isGroupChecking || isCleaningUp || isDedupRunning || isScrutinizing || totalCount === 0} data-testid="button-group-check">
+                    {isGroupChecking ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <ScanLine className="w-3.5 h-3.5 mr-1" />}
+                    グループ検査
                   </Button>
                   <Button variant="outline" size="sm" onClick={copyFavorites} data-testid="button-copy-favorites"><Copy className="w-3.5 h-3.5 mr-1" />エクスポート</Button>
                   <Button variant="outline" size="sm" onClick={() => clearFavMutation.mutate()} disabled={clearFavMutation.isPending} data-testid="button-clear-favorites"><Trash2 className="w-3.5 h-3.5 mr-1" />全削除</Button>
@@ -939,6 +983,25 @@ export default function Home() {
                 </div>
               )}
 
+              {groupCheckLogs.length > 0 && (
+                <div className="rounded-md border border-sky-500/30 bg-sky-500/5 p-3 space-y-1" data-testid="group-check-logs">
+                  <div className="flex items-center gap-2 mb-1">
+                    <ScanLine className="w-4 h-4 text-sky-400" />
+                    <span className="text-xs font-semibold text-sky-400">グループ検査ログ</span>
+                    {!isGroupChecking && <Button variant="ghost" size="sm" className="h-5 px-1 text-xs ml-auto" onClick={() => setGroupCheckLogs([])}><X className="w-3 h-3" /></Button>}
+                    {isGroupChecking && <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-400 ml-auto" />}
+                  </div>
+                  <div className="max-h-32 overflow-y-auto space-y-0.5">
+                    {groupCheckLogs.map((log, i) => (
+                      <div key={i} className="text-xs flex gap-2">
+                        <span className="text-muted-foreground font-mono shrink-0">[{log.elapsed}]</span>
+                        <span>{log.detail}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {cleanupLogs.length > 0 && (
                 <div className="rounded-md border border-border/50 bg-muted/20 p-3 space-y-1" data-testid="cleanup-logs">
                   <div className="flex items-center gap-2 mb-1">
@@ -974,11 +1037,24 @@ export default function Home() {
                 <div className="text-center py-8 text-muted-foreground text-sm" data-testid="text-empty-favorites">データベースは空です。生成タブでワードを生成して追加してください。</div>
               ) : (() => {
                 const tierConfig: Record<string, { label: string; border: string; bg: string; badge: string; wordBg: string; highlight: string }> = {
-                  perfect: { label: "Perfect Rhyme", border: "border-fuchsia-500/60", bg: "bg-fuchsia-500/10", badge: "border-fuchsia-500/70 text-fuchsia-500 dark:text-fuchsia-400", wordBg: "bg-fuchsia-500/15 border-fuchsia-500/30", highlight: "text-fuchsia-400" },
-                  legendary: { label: "伝説級硬い韻", border: "border-yellow-500/50", bg: "bg-yellow-500/10", badge: "border-yellow-500/60 text-yellow-600 dark:text-yellow-400", wordBg: "bg-yellow-500/15 border-yellow-500/30", highlight: "text-yellow-400" },
-                  super: { label: "超硬い韻", border: "border-orange-500/40", bg: "bg-orange-500/8", badge: "border-orange-500/50 text-orange-600 dark:text-orange-400", wordBg: "bg-orange-500/12 border-orange-500/25", highlight: "text-orange-400" },
-                  hard: { label: "固い韻", border: "border-primary/30", bg: "bg-primary/5", badge: "border-primary/40 text-primary", wordBg: "bg-primary/10 border-primary/20", highlight: "text-primary" },
+                  perfect: { label: "Perfect Rhyme (7+)", border: "border-fuchsia-500/60", bg: "bg-fuchsia-500/10", badge: "border-fuchsia-500/70 text-fuchsia-500 dark:text-fuchsia-400", wordBg: "bg-fuchsia-500/15 border-fuchsia-500/30", highlight: "text-fuchsia-400" },
+                  legendary: { label: "伝説級硬い韻 (6)", border: "border-yellow-500/50", bg: "bg-yellow-500/10", badge: "border-yellow-500/60 text-yellow-600 dark:text-yellow-400", wordBg: "bg-yellow-500/15 border-yellow-500/30", highlight: "text-yellow-400" },
+                  super: { label: "超硬い韻 (5)", border: "border-orange-500/40", bg: "bg-orange-500/8", badge: "border-orange-500/50 text-orange-600 dark:text-orange-400", wordBg: "bg-orange-500/12 border-orange-500/25", highlight: "text-orange-400" },
+                  hard: { label: "硬い韻 (4)", border: "border-primary/30", bg: "bg-primary/5", badge: "border-primary/40 text-primary", wordBg: "bg-primary/10 border-primary/20", highlight: "text-primary" },
                 };
+
+                const renderRomajiChars = (romaji: string, hlIdx: number, hlColor: string, isSelected: boolean) => (
+                  <span className="font-mono text-[9px] leading-tight mt-0.5 inline-flex flex-wrap justify-center">
+                    {romaji.split("").map((ch, i) => {
+                      const isVowel = "aeiou".includes(ch.toLowerCase());
+                      const inHL = hlIdx >= 0 && i >= hlIdx;
+                      if (inHL && isVowel) {
+                        return <span key={i} style={{ fontSize: "11px" }} className={`font-bold ${isSelected ? "opacity-90" : hlColor}`}>{ch}</span>;
+                      }
+                      return <span key={i} className={isSelected ? "opacity-60" : "text-muted-foreground"}>{ch}</span>;
+                    })}
+                  </span>
+                );
 
                 const renderWord = (w: FavWord, tc: typeof tierConfig[string] | null, suffixLen?: number) => {
                   const hlIdx = suffixLen ? getRomajiHighlightIndex(w.romaji, suffixLen) : -1;
@@ -987,16 +1063,7 @@ export default function Home() {
                       className={`inline-flex flex-col items-center text-xs rounded px-2 py-1 cursor-pointer transition-all ${selectedFavIds.has(w.id) ? "bg-primary text-primary-foreground border border-primary ring-2 ring-primary/30" : tc ? `${tc.wordBg} hover:opacity-80` : "bg-card border border-border/50 hover:bg-muted/50"}`}
                       data-testid={`fav-word-${w.id}`}>
                       <span className="font-medium">{w.word}</span>
-                      <span className="font-mono text-[9px] leading-tight mt-0.5">
-                        {hlIdx >= 0 ? (
-                          <>
-                            <span className={selectedFavIds.has(w.id) ? "opacity-60" : "text-muted-foreground"}>{w.romaji.slice(0, hlIdx)}</span>
-                            <span className={selectedFavIds.has(w.id) ? "opacity-90" : (tc?.highlight || "text-primary")}>{w.romaji.slice(hlIdx)}</span>
-                          </>
-                        ) : (
-                          <span className={selectedFavIds.has(w.id) ? "opacity-60" : "text-muted-foreground"}>{w.romaji}</span>
-                        )}
-                      </span>
+                      {renderRomajiChars(w.romaji, hlIdx, tc?.highlight || "text-primary", selectedFavIds.has(w.id))}
                     </button>
                   );
                 };
