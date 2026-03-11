@@ -383,22 +383,35 @@ export default function Home() {
 
     try {
       while (autoModeRef.current) {
-        // Step 1: ターゲット生成 + 前回データクリア
-        const targetRes = await (await fetch("/api/target")).json();
-        setTarget(targetRes.target);
+        // === Step 1: 前回データ完全クリア + ターゲット生成 ===
+        setActiveTab("gen");
         setGenResult(null);
         setCheckedWords(new Set());
         setProgressLogs([]);
         setCleanupLogs([]);
+        setGenStatus("idle");
+        setTimerSeconds(0);
+        setIsGenerating(false);
+        if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+        await delay(500);
 
-        // Step 2: レベル設定（8〜10ランダム）
+        const targetRes = await (await fetch("/api/target")).json();
+        setTarget(targetRes.target);
+        toast({ title: "Step 1: ターゲット生成", description: `${targetRes.target.name}` });
+        await delay(1500);
+        if (!autoModeRef.current) break;
+
+        // === Step 2: レベル設定（8〜10ランダム）===
         const randomLvl = 8 + Math.floor(Math.random() * 3);
         setLevel(randomLvl);
         setAgeConfirmed(true);
-
+        toast({ title: "Step 2: レベル設定", description: `Lv.${randomLvl} に設定` });
+        await delay(1000);
         if (!autoModeRef.current) break;
 
-        // Step 3: 生成（完了まで待機）
+        // === Step 3: 生成（完了まで待機）===
+        setActiveTab("gen");
+        toast({ title: "Step 3: 生成開始", description: `${targetRes.target.name} Lv.${randomLvl} で生成中...` });
         const result = await generateDissSSE(targetRes.target, randomLvl);
         if (!autoModeRef.current) break;
 
@@ -413,25 +426,33 @@ export default function Home() {
           continue;
         }
         emptyStreak = 0;
+        toast({ title: "Step 3: 生成完了", description: `${result.total}個のワードを生成` });
+        await delay(2000);
+        if (!autoModeRef.current) break;
 
-        // Step 4: データベースに送信（完了まで待機）
+        // === Step 4: データベースに送信（完了まで待機）===
+        setActiveTab("fav");
+        await delay(500);
         const allWords = getWordsFromResult(result);
         try {
           const addResult = await addWordsDirect(allWords);
-          toast({ title: "DB追加完了", description: `${addResult.added}個追加（合計 ${addResult.total}個）` });
+          toast({ title: "Step 4: DB追加完了", description: `${addResult.added}個追加（合計 ${addResult.total}個）` });
           setAutoModeCount(prev => prev + 1);
         } catch (err) {
-          toast({ title: "DB追加エラー", description: err instanceof Error ? err.message : "追加に失敗", variant: "destructive" });
+          toast({ title: "Step 4: DB追加エラー", description: err instanceof Error ? err.message : "追加に失敗", variant: "destructive" });
         }
-
+        await delay(2000);
         if (!autoModeRef.current) break;
 
-        // Step 5: 整理（完了まで待機）
+        // === Step 5: 整理（完了まで待機）===
+        toast({ title: "Step 5: 整理開始", description: "データベースの整理を実行中..." });
         await runCleanup();
-
+        toast({ title: "Step 5: 整理完了", description: "整理が完了しました" });
+        await delay(2000);
         if (!autoModeRef.current) break;
 
-        // Step 6: 次のサイクルへ（2秒クールダウン）
+        // === Step 6: 次のサイクルへ ===
+        toast({ title: "Step 6: 次のサイクルへ", description: "2秒後に次のサイクルを開始します..." });
         await delay(2000);
       }
     } catch (err) {
