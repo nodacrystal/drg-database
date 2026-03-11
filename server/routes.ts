@@ -471,10 +471,31 @@ ${wordListForFilter}
           return bMaxMatch - aMaxMatch;
         });
 
-        groups.push({ vowels: `*${suffix}`, words: sorted });
+        const hardRhymeBuckets: Record<string, typeof items> = {};
+        const hardRhymeAssigned = new Set<number>();
+        for (const w of sorted) {
+          if (w.vowels.length < 3) continue;
+          const suffix3 = w.vowels.slice(-3);
+          (hardRhymeBuckets[suffix3] ??= []).push(w);
+        }
+        const hardRhymes: { suffix: string; words: typeof items }[] = [];
+        for (const [s3, hrWords] of Object.entries(hardRhymeBuckets)) {
+          if (hrWords.length >= 2) {
+            hardRhymes.push({ suffix: s3, words: hrWords });
+            for (const w of hrWords) hardRhymeAssigned.add(w.id);
+          }
+        }
+        hardRhymes.sort((a, b) => b.words.length - a.words.length);
+        const remaining = sorted.filter(w => !hardRhymeAssigned.has(w.id));
+
+        groups.push({ vowels: `*${suffix}`, words: remaining, hardRhymes });
       }
 
-      groups.sort((a, b) => b.words.length - a.words.length);
+      groups.sort((a, b) => {
+        const aTotal = a.words.length + (a.hardRhymes?.reduce((s: number, h: { words: { id: number }[] }) => s + h.words.length, 0) || 0);
+        const bTotal = b.words.length + (b.hardRhymes?.reduce((s: number, h: { words: { id: number }[] }) => s + h.words.length, 0) || 0);
+        return bTotal - aTotal;
+      });
       res.json({ groups, total: allWords.length });
     } catch (error) { console.error("Favorites fetch error:", error); res.status(500).json({ error: "お気に入りの取得に失敗しました" }); }
   });

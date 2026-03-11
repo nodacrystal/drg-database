@@ -17,7 +17,8 @@ import { motion, AnimatePresence } from "framer-motion";
 
 interface WordEntry { word: string; reading: string; romaji: string; }
 interface FavWord { id: number; word: string; reading: string; romaji: string; vowels: string; charCount: number; }
-interface FavGroup { vowels: string; words: FavWord[]; }
+interface HardRhymeGroup { suffix: string; words: FavWord[]; }
+interface FavGroup { vowels: string; words: FavWord[]; hardRhymes?: HardRhymeGroup[]; }
 interface NgWord { id: number; word: string; reading: string; romaji: string; }
 interface ProgressLog { time: string; detail: string; elapsed: string; }
 interface GenerationResult {
@@ -216,12 +217,15 @@ export default function Home() {
     }
   }, [target, level, toast]);
 
+  const runCleanupRef = useRef<(() => void) | null>(null);
+
   const addFavMutation = useMutation({
     mutationFn: async (words: WordEntry[]) => { const res = await apiRequest("POST", "/api/favorites", { words }); return res.json(); },
     onSuccess: (data: { added: number; total: number }) => {
-      toast({ title: "追加完了", description: `${data.added}個追加（合計 ${data.total}個）` });
+      toast({ title: "追加完了", description: `${data.added}個追加（合計 ${data.total}個）→ 自動整理を開始...` });
       queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
       queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
+      setTimeout(() => { runCleanupRef.current?.(); }, 500);
     },
     onError: () => { toast({ title: "エラー", description: "お気に入りの追加に失敗しました", variant: "destructive" }); },
   });
@@ -307,6 +311,7 @@ export default function Home() {
   const [cleanupLogs, setCleanupLogs] = useState<ProgressLog[]>([]);
 
   const runCleanup = useCallback(async () => {
+    if (isCleaningUp) return;
     setIsCleaningUp(true);
     setCleanupLogs([]);
     try {
@@ -345,7 +350,9 @@ export default function Home() {
       toast({ title: "エラー", description: "整理に失敗しました", variant: "destructive" });
     }
     setIsCleaningUp(false);
-  }, [toast, queryClient]);
+  }, [toast, queryClient, isCleaningUp]);
+
+  runCleanupRef.current = runCleanup;
 
   const handleGenerateDiss = useCallback(() => {
     if (!target) { toast({ title: "ターゲット未設定", description: "先にターゲットを選んでください" }); return; }
@@ -621,23 +628,49 @@ export default function Home() {
                 <div className="text-center py-8 text-muted-foreground text-sm" data-testid="text-empty-favorites">データベースは空です。生成タブでワードを生成して追加してください。</div>
               ) : (
                 <div className="space-y-3" data-testid="favorites-container">
-                  {favQuery.data.groups.map(group => (
+                  {favQuery.data.groups.map(group => {
+                    const totalInGroup = group.words.length + (group.hardRhymes?.reduce((s, h) => s + h.words.length, 0) || 0);
+                    return (
                     <div key={group.vowels} className="rounded-md border border-border/50 bg-muted/10 p-3">
                       <div className="flex items-center gap-2 mb-2">
                         <Badge variant="default" className="text-xs font-mono">[{group.vowels}]</Badge>
-                        <span className="text-xs text-muted-foreground">{group.words.length}個</span>
+                        <span className="text-xs text-muted-foreground">{totalInGroup}個</span>
                       </div>
-                      <div className="flex flex-wrap gap-1.5">
-                        {group.words.map(w => (
-                          <div key={w.id} className="inline-flex items-center gap-1 text-xs bg-card border border-border/50 rounded px-2 py-1" data-testid={`fav-word-${w.id}`}>
-                            <span className="font-medium">{w.word}</span>
-                            <span className="text-muted-foreground">({w.reading})</span>
-                            <button onClick={() => deleteFavMutation.mutate(w.id)} className="text-muted-foreground hover:text-destructive ml-0.5" data-testid={`button-delete-fav-${w.id}`}><X className="w-3 h-3" /></button>
-                          </div>
-                        ))}
-                      </div>
+                      {group.hardRhymes && group.hardRhymes.length > 0 && (
+                        <div className="space-y-2 mb-2">
+                          {group.hardRhymes.map(hr => (
+                            <div key={hr.suffix} className="rounded border border-primary/30 bg-primary/5 p-2" data-testid={`hard-rhyme-${hr.suffix}`}>
+                              <div className="flex items-center gap-1.5 mb-1.5">
+                                <Badge variant="outline" className="text-[10px] font-mono border-primary/40 text-primary">固い韻 *{hr.suffix}</Badge>
+                                <span className="text-[10px] text-muted-foreground">{hr.words.length}個</span>
+                              </div>
+                              <div className="flex flex-wrap gap-1.5">
+                                {hr.words.map(w => (
+                                  <div key={w.id} className="inline-flex items-center gap-1 text-xs bg-primary/10 border border-primary/20 rounded px-2 py-1" data-testid={`fav-word-${w.id}`}>
+                                    <span className="font-medium">{w.word}</span>
+                                    <span className="text-muted-foreground">({w.reading})</span>
+                                    <button onClick={() => deleteFavMutation.mutate(w.id)} className="text-muted-foreground hover:text-destructive ml-0.5" data-testid={`button-delete-fav-${w.id}`}><X className="w-3 h-3" /></button>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {group.words.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {group.words.map(w => (
+                            <div key={w.id} className="inline-flex items-center gap-1 text-xs bg-card border border-border/50 rounded px-2 py-1" data-testid={`fav-word-${w.id}`}>
+                              <span className="font-medium">{w.word}</span>
+                              <span className="text-muted-foreground">({w.reading})</span>
+                              <button onClick={() => deleteFavMutation.mutate(w.id)} className="text-muted-foreground hover:text-destructive ml-0.5" data-testid={`button-delete-fav-${w.id}`}><X className="w-3 h-3" /></button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </CardContent>

@@ -41,6 +41,8 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
   - e.g., "tennen" → "enen", "kansai" → "anai", "funben" → "unen"
 - Favorites grouped by last 2 vowels (including n) as bucket key
 - Within groups, words with 3+ matching vowel suffix sorted first
+- **固い韻 (Hard Rhymes)**: Within each vowel group, words sharing the same last 3 vowels (2+ words) are sub-grouped as "固い韻" with distinct visual styling (primary-colored border/background)
+- **Auto-cleanup**: Adding words via "選択ワードをデータベースに追加" automatically triggers the database "整理" cleanup process
 
 ## Generation System (3-Step Pipeline)
 - **STEP 1: Bulk Generation** — 6 parallel AI calls, each generates 50 diss words (target: 300 total)
