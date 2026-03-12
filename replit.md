@@ -1,4 +1,4 @@
-# 悪口データベース (Diss Database)
+# DRGデータベース (DRG Database)
 
 ## Overview
 A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 chars) ranging from pure respect/praise (Level 1) to extreme diss (Level 10). Goal: accumulate 10,000 words in a PostgreSQL database. Words are organized by vowel pattern (including 「ん」) for rhyme matching.
@@ -112,16 +112,21 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - `DELETE /api/ng-words` - Clear all NG terms
 - `POST /api/favorites/cleanup` - DB cleanup via SSE (saves shared suffixes to NG)
 - `POST /api/favorites/scrutinize` - DB精査 via SSE (vowel check, duplicate endings, AI content check)
+- `GET /api/favorites/export-pdf` - Export DB as PDF with visual stats + embedded JSON data
+- `POST /api/favorites/import-pdf` - Import DB from exported PDF (50MB max, marker-based extraction)
+- `GET /api/ng-words/export-json` - Export NG words as JSON
+- `POST /api/ng-words/import-json` - Import NG words from JSON
 
 ## Full Auto Mode
 - **完全オートモード**: Automated loop that runs continuously until user presses "停止"
 - **Strict sequential flow** — each step fully completes before the next begins:
   1. ターゲット生成
-  2. レベル設定（8〜10ランダム）
+  2. レベル設定（5〜10ランダム）
   3. 生成（完了まで待機）
   4. データベースに送信（完了まで待機）
-  5. 整理（完了まで待機）
+  5. サイクルカウンター+1; 5サイクルごとに全て整理→カウンターリセット
   6. 2秒クールダウン → 1に戻る
+- Progress bar only visible during auto mode
 - Uses `autoModeRef` for cancellation, `addWordsDirect` for non-mutation favorites adding
 - During auto mode, manual controls (slider, checkboxes, generate button) are disabled
 - Empty result detection: 3 consecutive empty results → auto-stop with toast
@@ -138,11 +143,16 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - Protected word system: `protected` boolean column; words surviving cleanup get marked protected; check4/check5 skip protected words
 
 ## Stale Closure Fix
-- `generateDissSSERef`, `addWordsDirectRef`, `runCleanupRef` refs kept in sync via useEffect
+- `generateDissSSERef`, `addWordsDirectRef`, `runCleanupRef`, `runAllCleanupRef` refs kept in sync via useEffect
 - `startAutoMode` uses refs instead of direct function references to avoid stale closures
 - Dependency array only includes `toast` (stable) — not the functions themselves
 
 ## Recent Changes
+- 2026-03-12: Title changed to "DRGデータベース", subtitle removed
+- 2026-03-12: Auto mode: level range 5-10 (was 8-10), 5-cycle cleanup trigger with counter reset
+- 2026-03-12: Progress bar only visible during auto mode
+- 2026-03-12: PDF export/import: visual stats PDF with embedded JSON data (marker-based), 50MB upload limit
+- 2026-03-12: NG words JSON export/import endpoints and UI buttons
 - 2026-03-11: Perfect Rhyme tier: 4+ vowel match AND 100% match rate, fuchsia styling, filter buttons for all tiers
 - 2026-03-11: Romaji display: each word shows romaji below with rhyme-matching portion highlighted
 - 2026-03-11: 重複整理: dedicated AI tail-dedup button with cross-script detection (漢字/ひらがな/カタカナ)

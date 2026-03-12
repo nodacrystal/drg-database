@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import {
   Flame, Mic2, Sparkles, Zap, AlertTriangle, Loader2, Star,
-  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart, Plus, Wrench, Play, Search, Filter, ScanLine, Languages,
+  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart, Plus, Wrench, Play, Search, Filter, ScanLine, Languages, Download, Upload, FileText, FileJson,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -147,6 +147,10 @@ export default function Home() {
   const generateDissSSERef = useRef<typeof generateDissSSE | null>(null);
   const addWordsDirectRef = useRef<typeof addWordsDirect | null>(null);
   const runCleanupRef = useRef<typeof runCleanup | null>(null);
+  const runAllCleanupRef = useRef<typeof runAllCleanup | null>(null);
+  const [isPdfExporting, setIsPdfExporting] = useState(false);
+  const pdfInputRef = useRef<HTMLInputElement>(null);
+  const ngJsonInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: "smooth" }); }, [progressLogs]);
   useEffect(() => { return () => {
@@ -700,6 +704,96 @@ export default function Home() {
     setIsAllCleaning(false);
   }, [isAllCleaning, isDedupRunning, isGroupChecking, isCleaningUp, isCharChecking, toast, queryClient, readSSEStream]);
 
+  const handlePdfExport = useCallback(async () => {
+    setIsPdfExporting(true);
+    try {
+      const res = await fetch("/api/favorites/export-pdf");
+      if (!res.ok) throw new Error("PDF export failed");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `drg-database-${new Date().toISOString().slice(0, 10)}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast({ title: "PDF保存完了", description: "データベースをPDFに保存しました" });
+    } catch {
+      toast({ title: "エラー", description: "PDF保存に失敗しました", variant: "destructive" });
+    }
+    setIsPdfExporting(false);
+  }, [toast]);
+
+  const handlePdfImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const res = await fetch("/api/favorites/import-pdf", {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: file,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.error || "PDF読込に失敗しました");
+      }
+      const data = await res.json();
+      toast({ title: "PDF読込完了", description: `${data.added}個のワードを追加しました（合計 ${data.total}個）` });
+      queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
+    } catch (err) {
+      toast({ title: "エラー", description: err instanceof Error ? err.message : "PDF読込に失敗しました", variant: "destructive" });
+    }
+    if (pdfInputRef.current) pdfInputRef.current.value = "";
+  }, [toast, queryClient]);
+
+  const handleNgJsonExport = useCallback(async () => {
+    try {
+      const res = await fetch("/api/ng-words/export-json");
+      if (!res.ok) throw new Error("JSON export failed");
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ng-words-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      toast({ title: "JSON保存完了", description: "NG単語をJSONに保存しました" });
+    } catch {
+      toast({ title: "エラー", description: "JSON保存に失敗しました", variant: "destructive" });
+    }
+  }, [toast]);
+
+  const handleNgJsonImport = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const jsonData = JSON.parse(text);
+      const words = jsonData.words || jsonData;
+      if (!Array.isArray(words)) throw new Error("Invalid JSON format");
+      const res = await fetch("/api/ng-words/import-json", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ words }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.error || "JSON読込に失敗しました");
+      }
+      const data = await res.json();
+      toast({ title: "JSON読込完了", description: `${data.added}個のNG単語を追加しました（合計 ${data.total}個）` });
+      queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
+    } catch (err) {
+      toast({ title: "エラー", description: err instanceof Error ? err.message : "JSON読込に失敗しました", variant: "destructive" });
+    }
+    if (ngJsonInputRef.current) ngJsonInputRef.current.value = "";
+  }, [toast, queryClient]);
+
   const addWordsDirect = useCallback(async (words: WordEntry[]): Promise<{ added: number; total: number }> => {
     if (words.length === 0) return { added: 0, total: 0 };
     const response = await fetch("/api/favorites", {
@@ -717,6 +811,7 @@ export default function Home() {
   useEffect(() => { generateDissSSERef.current = generateDissSSE; }, [generateDissSSE]);
   useEffect(() => { addWordsDirectRef.current = addWordsDirect; }, [addWordsDirect]);
   useEffect(() => { runCleanupRef.current = runCleanup; }, [runCleanup]);
+  useEffect(() => { runAllCleanupRef.current = runAllCleanup; }, [runAllCleanup]);
 
   const startAutoMode = useCallback(async () => {
     if (autoModeRef.current) return;
@@ -727,15 +822,18 @@ export default function Home() {
 
     const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
     let emptyStreak = 0;
+    let cycleCounter = 0;
 
     try {
       while (autoModeRef.current) {
-        // === Step 1: 前回データ完全クリア + ターゲット生成 ===
+        // === (1) ターゲット生成 ===
         setActiveTab("gen");
         setGenResult(null);
         setCheckedWords(new Set());
         setProgressLogs([]);
         setCleanupLogs([]);
+        setCharCheckLogs([]);
+        setGroupCheckLogs([]);
         setGenStatus("idle");
         setTimerSeconds(0);
         setIsGenerating(false);
@@ -744,21 +842,20 @@ export default function Home() {
 
         const targetRes = await (await fetch("/api/target")).json();
         setTarget(targetRes.target);
-        toast({ title: "Step 1: ターゲット生成", description: `${targetRes.target.name}` });
-        await delay(1500);
-        if (!autoModeRef.current) break;
-
-        // === Step 2: レベル設定（8〜10ランダム）===
-        const randomLvl = 8 + Math.floor(Math.random() * 3);
-        setLevel(randomLvl);
-        setAgeConfirmed(true);
-        toast({ title: "Step 2: レベル設定", description: `Lv.${randomLvl} に設定` });
+        toast({ title: "(1) ターゲット生成", description: `${targetRes.target.name || targetRes.target}` });
         await delay(1000);
         if (!autoModeRef.current) break;
 
-        // === Step 3: 生成（完了まで待機）===
-        setActiveTab("gen");
-        toast({ title: "Step 3: 生成開始", description: `Lv.${randomLvl} で生成中...` });
+        // === (2) レベル5〜10ランダム ===
+        const randomLvl = 5 + Math.floor(Math.random() * 6);
+        setLevel(randomLvl);
+        setAgeConfirmed(true);
+        toast({ title: "(2) レベル設定", description: `Lv.${randomLvl} ${LEVEL_INFO[randomLvl].label}` });
+        await delay(500);
+        if (!autoModeRef.current) break;
+
+        // === (3) 生成（完了まで待機）===
+        toast({ title: "(3) 生成開始", description: `Lv.${randomLvl} で生成中...` });
         if (!generateDissSSERef.current) break;
         const result = await generateDissSSERef.current(targetRes.target, randomLvl);
         if (!autoModeRef.current) break;
@@ -766,44 +863,46 @@ export default function Home() {
         if (!result || result.total === 0) {
           emptyStreak++;
           if (emptyStreak >= 3) {
-            toast({ title: "オートモード停止", description: "3回連続で生成結果が空のため停止しました。APIレート制限の可能性があります。", variant: "destructive" });
+            toast({ title: "オートモード停止", description: "3回連続で生成結果が空のため停止しました", variant: "destructive" });
             break;
           }
-          toast({ title: "生成結果なし", description: `ワードが0個でした（${emptyStreak}/3）。10秒後にリトライ...`, variant: "destructive" });
+          toast({ title: "生成結果なし", description: `ワードが0個（${emptyStreak}/3）。10秒後にリトライ...`, variant: "destructive" });
           await delay(10000);
           continue;
         }
         emptyStreak = 0;
-        toast({ title: "Step 3: 生成完了", description: `${result.total}個のワードを生成` });
-        await delay(2000);
-        if (!autoModeRef.current) break;
 
-        // === Step 4: データベースに送信（完了まで待機）===
-        setActiveTab("fav");
-        await delay(500);
+        // === (4) データベースにすべて保存 ===
         const allWords = getWordsFromResult(result);
         try {
           if (!addWordsDirectRef.current) break;
           const addResult = await addWordsDirectRef.current(allWords);
-          toast({ title: "Step 4: DB追加完了", description: `${addResult.added}個追加（合計 ${addResult.total}個）` });
-          setAutoModeCount(prev => prev + 1);
+          toast({ title: "(4) DB追加完了", description: `${addResult.added}個追加（合計 ${addResult.total}個）` });
         } catch (err) {
-          toast({ title: "Step 4: DB追加エラー", description: err instanceof Error ? err.message : "追加に失敗", variant: "destructive" });
+          toast({ title: "(4) DB追加エラー", description: err instanceof Error ? err.message : "追加に失敗", variant: "destructive" });
         }
-        await delay(2000);
+        await delay(1000);
         if (!autoModeRef.current) break;
 
-        // === Step 5: 整理（完了まで待機）===
-        toast({ title: "Step 5: 整理開始", description: "データベースの整理を実行中..." });
-        if (!runCleanupRef.current) break;
-        await runCleanupRef.current();
-        toast({ title: "Step 5: 整理完了", description: "整理が完了しました" });
-        await delay(2000);
-        if (!autoModeRef.current) break;
+        // === (5) カウンター+1 ===
+        cycleCounter++;
+        setAutoModeCount(prev => prev + 1);
 
-        // === Step 6: 次のサイクルへ ===
-        toast({ title: "Step 6: 次のサイクルへ", description: "5秒後に次のサイクルを開始します..." });
-        await delay(5000);
+        if (cycleCounter >= 5) {
+          // 5回完了 → 全て整理を実行
+          toast({ title: "全て整理開始", description: `${cycleCounter}回完了 → データベースの全て整理を実行中...` });
+          setActiveTab("fav");
+          await delay(500);
+          if (!runAllCleanupRef.current) break;
+          await runAllCleanupRef.current();
+          toast({ title: "全て整理完了", description: "整理が完了しました。生成を再開します..." });
+          cycleCounter = 0;
+          await delay(2000);
+        } else {
+          toast({ title: `サイクル${cycleCounter}/5完了`, description: "次のサイクルへ..." });
+          await delay(1000);
+        }
+        if (!autoModeRef.current) break;
       }
     } catch (err) {
       toast({ title: "オートモードエラー", description: err instanceof Error ? err.message : "エラーが発生しました", variant: "destructive" });
@@ -917,43 +1016,45 @@ export default function Home() {
       <div className="relative overflow-hidden border-b border-border/50">
         <div className="absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-primary/5 dark:from-primary/5 dark:via-transparent dark:to-primary/3" />
         <div className="relative max-w-2xl mx-auto px-4 py-6 text-center">
-          <div className="flex items-center justify-center gap-2 mb-2">
+          <div className="flex items-center justify-center gap-2 mb-3">
             <Mic2 className="w-7 h-7 text-primary" />
-            <h1 className="text-2xl font-bold tracking-tight" data-testid="text-title">悪口データベース</h1>
+            <h1 className="text-2xl font-bold tracking-tight" data-testid="text-title">DRGデータベース</h1>
             <Database className="w-6 h-6 text-primary" />
           </div>
-          <p className="text-muted-foreground text-xs mb-3">目標1万ワード！AIでワードを量産してデータベースに蓄積</p>
-          <div className="max-w-xs mx-auto mb-3">
-            <div className="flex items-center justify-between text-xs mb-1">
-              <span className="text-muted-foreground">{totalCount.toLocaleString()} / 10,000</span>
-              <span className="font-mono text-primary">{progressPercent.toFixed(1)}%</span>
+
+          {isAutoMode && (
+            <div className="max-w-xs mx-auto mb-3">
+              <div className="flex items-center justify-between text-xs mb-1">
+                <span className="text-muted-foreground">{totalCount.toLocaleString()} / 10,000</span>
+                <span className="font-mono text-primary">{progressPercent.toFixed(1)}%</span>
+              </div>
+              <div className="h-2 bg-muted rounded-full overflow-hidden" data-testid="progress-bar">
+                <div className="h-full bg-primary rounded-full transition-all duration-500" style={{ width: `${progressPercent}%` }} />
+              </div>
             </div>
-            <div className="h-2 bg-muted rounded-full overflow-hidden" data-testid="progress-bar">
-              <div className="h-full bg-primary rounded-full transition-all duration-500" style={{ width: `${progressPercent}%` }} />
-            </div>
-          </div>
+          )}
 
           {isAutoMode ? (
             <div className="flex items-center justify-center gap-3">
-              <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-red-500/20 border border-red-500/40">
-                <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                <span className="text-xs font-medium text-red-400">完全オートモード稼働中</span>
-                <Badge variant="secondary" className="text-xs px-1.5 py-0">{autoModeCount}回完了</Badge>
+              <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-red-500/20 border border-red-500/40">
+                <div className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse" />
+                <span className="text-sm font-semibold text-red-400">オートモード稼働中</span>
+                <Badge variant="secondary" className="text-sm px-2 py-0.5">{autoModeCount}回完了</Badge>
               </div>
-              <Button variant="destructive" size="sm" onClick={stopAutoMode} data-testid="button-stop-auto">
-                <Square className="w-3.5 h-3.5 mr-1" />停止
+              <Button variant="destructive" size="default" onClick={stopAutoMode} className="text-base px-5 py-2" data-testid="button-stop-auto">
+                <Square className="w-4 h-4 mr-1.5" />停止
               </Button>
             </div>
           ) : (
             <Button
-              variant="outline"
-              size="sm"
+              variant="default"
+              size="lg"
               onClick={startAutoMode}
               disabled={isGenerating || isCleaningUp}
-              className="border-primary/40 text-primary hover:bg-primary/10"
+              className="text-base px-8 py-3 font-semibold shadow-lg hover:shadow-xl transition-shadow"
               data-testid="button-start-auto"
             >
-              <Play className="w-3.5 h-3.5 mr-1" />完全オートモード
+              <Play className="w-5 h-5 mr-2" />オートモード
             </Button>
           )}
         </div>
@@ -983,8 +1084,11 @@ export default function Home() {
                   <h2 className="text-base font-semibold">NG単語リスト</h2>
                   <Badge variant="secondary">{ngCount.toLocaleString()}件</Badge>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-1.5">
                   <Button variant="outline" size="sm" onClick={copyNgWords} disabled={ngCount === 0} data-testid="button-copy-ng"><Copy className="w-3.5 h-3.5 mr-1" />コピー</Button>
+                  <Button variant="outline" size="sm" onClick={handleNgJsonExport} disabled={ngCount === 0} data-testid="button-ng-export-json"><FileJson className="w-3.5 h-3.5 mr-1" />JSON保存</Button>
+                  <Button variant="outline" size="sm" onClick={() => ngJsonInputRef.current?.click()} data-testid="button-ng-import-json"><Upload className="w-3.5 h-3.5 mr-1" />JSON読込</Button>
+                  <input ref={ngJsonInputRef} type="file" accept=".json" className="hidden" onChange={handleNgJsonImport} />
                   <Button variant="outline" size="sm" onClick={() => clearNgMutation.mutate()} disabled={clearNgMutation.isPending || ngCount === 0} data-testid="button-clear-ng"><Trash2 className="w-3.5 h-3.5 mr-1" />全削除</Button>
                 </div>
               </div>
@@ -1035,11 +1139,19 @@ export default function Home() {
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <div className="flex items-center gap-2">
                   <Database className="w-5 h-5 text-primary" />
-                  <h2 className="text-base font-semibold">悪口データベース</h2>
+                  <h2 className="text-base font-semibold">DRGデータベース</h2>
                   <Badge variant="secondary">{totalCount.toLocaleString()}件</Badge>
                 </div>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-1.5">
                   <Button variant="outline" size="sm" onClick={copyFavorites} data-testid="button-copy-favorites"><Copy className="w-3.5 h-3.5 mr-1" />エクスポート</Button>
+                  <Button variant="outline" size="sm" onClick={handlePdfExport} disabled={isPdfExporting || totalCount === 0} data-testid="button-pdf-export">
+                    {isPdfExporting ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <FileText className="w-3.5 h-3.5 mr-1" />}
+                    PDF保存
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => pdfInputRef.current?.click()} data-testid="button-pdf-import">
+                    <Upload className="w-3.5 h-3.5 mr-1" />PDF読込
+                  </Button>
+                  <input ref={pdfInputRef} type="file" accept=".pdf" className="hidden" onChange={handlePdfImport} />
                   <AlertDialog>
                     <AlertDialogTrigger asChild>
                       <Button variant="destructive" size="sm" disabled={clearFavMutation.isPending || totalCount === 0} data-testid="button-clear-favorites">

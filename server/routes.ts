@@ -1506,5 +1506,168 @@ ${wordList}`);
     } catch { res.status(500).json({ error: "追加に失敗しました" }); }
   });
 
+  app.get("/api/ng-words/export-json", async (_req, res) => {
+    try {
+      const words = await getAllNgWords();
+      const data = { version: 1, exportedAt: new Date().toISOString(), words: words.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji })) };
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="ng-words-${new Date().toISOString().slice(0, 10)}.json"`);
+      res.send(JSON.stringify(data, null, 2));
+    } catch { res.status(500).json({ error: "エクスポートに失敗しました" }); }
+  });
+
+  app.post("/api/ng-words/import-json", async (req, res) => {
+    try {
+      const { words } = req.body;
+      if (!Array.isArray(words) || words.length === 0) return res.status(400).json({ error: "有効なNG単語データが見つかりません" });
+      const entries = words.map((w: any) => ({ word: String(w.word || w), reading: String(w.reading || ""), romaji: String(w.romaji || "") })).filter((w: any) => w.word.length > 0);
+      if (entries.length === 0) return res.status(400).json({ error: "有効なNG単語が見つかりません" });
+      const added = await addNgWords(entries);
+      res.json({ added, total: await getNgWordCount() });
+    } catch { res.status(500).json({ error: "インポートに失敗しました" }); }
+  });
+
+  app.get("/api/favorites/export-pdf", async (_req, res) => {
+    try {
+      const pdfLib = await import("pdf-lib");
+      const { PDFDocument, StandardFonts, rgb } = pdfLib;
+      const allWords = await getAllWords();
+      const totalCount = allWords.length;
+
+      const groups: Record<string, typeof allWords> = {};
+      for (const w of allWords) {
+        const v = w.vowels || "";
+        if (!groups[v]) groups[v] = [];
+        groups[v].push(w);
+      }
+
+      const jsonData = JSON.stringify({
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        totalCount,
+        words: allWords.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji, vowels: w.vowels, charCount: w.charCount })),
+      });
+      const b64Data = Buffer.from(jsonData, "utf-8").toString("base64");
+
+      const pdfDoc = await PDFDocument.create();
+      const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+      const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+
+      const addTextPages = (lines: string[]) => {
+        let page = pdfDoc.addPage([595.28, 841.89]);
+        let y = 800;
+        for (let i = 0; i < lines.length; i++) {
+          if (y < 40) {
+            page = pdfDoc.addPage([595.28, 841.89]);
+            y = 800;
+          }
+          const line = lines[i];
+          if (line === "") { y -= 10; continue; }
+          const fontSize = line.startsWith("##") ? 14 : line.startsWith("#") ? 18 : 10;
+          const f = line.startsWith("#") ? fontBold : font;
+          const text = line.replace(/^#+\s*/, "");
+          try {
+            page.drawText(text, { x: 40, y, size: fontSize, font: f, color: rgb(0.1, 0.1, 0.1) });
+          } catch { /* skip non-encodable chars */ }
+          y -= fontSize + 6;
+        }
+      };
+
+      const statsLines = [
+        "# DRG Database Export",
+        `## Total Words: ${totalCount}`,
+        "",
+        `## Groups: ${Object.keys(groups).length}`,
+        "",
+      ];
+      const groupKeys = Object.keys(groups).sort();
+      for (const key of groupKeys) {
+        const g = groups[key];
+        statsLines.push(`[${key}] - ${g.length} words`);
+        const romajiList = g.slice(0, 10).map(w => `  ${w.romaji}`);
+        statsLines.push(...romajiList);
+        if (g.length > 10) statsLines.push(`  ... and ${g.length - 10} more`);
+        statsLines.push("");
+      }
+      addTextPages(statsLines);
+
+      pdfDoc.setTitle("DRG Database Export");
+
+      const pdfBytes = await pdfDoc.save();
+      const dataMarker = "\n===DRG_DATA_START===\n";
+      const dataEnd = "\n===DRG_DATA_END===\n";
+      const jsonBuf = Buffer.from(dataMarker + jsonData + dataEnd, "utf-8");
+      const combined = Buffer.concat([Buffer.from(pdfBytes), jsonBuf]);
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="drg-database-${new Date().toISOString().slice(0, 10)}.pdf"`);
+      res.send(combined);
+    } catch (err) {
+      console.error("PDF export error:", err);
+      res.status(500).json({ error: "PDFエクスポートに失敗しました" });
+    }
+  });
+
+  app.post("/api/favorites/import-pdf", async (req, res) => {
+    try {
+      const MAX_UPLOAD_SIZE = 50 * 1024 * 1024;
+      let totalSize = 0;
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => {
+        totalSize += chunk.length;
+        if (totalSize > MAX_UPLOAD_SIZE) {
+          req.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      });
+      await new Promise<void>((resolve, reject) => { req.on("end", resolve); req.on("error", reject); });
+
+      if (totalSize > MAX_UPLOAD_SIZE) {
+        return res.status(413).json({ error: "ファイルサイズが大きすぎます（最大50MB）" });
+      }
+
+      const pdfBuffer = Buffer.concat(chunks);
+      const fileStr = pdfBuffer.toString("utf-8");
+      const startMarker = "===DRG_DATA_START===";
+      const endMarker = "===DRG_DATA_END===";
+      const startIdx = fileStr.lastIndexOf(startMarker);
+      if (startIdx === -1) {
+        return res.status(400).json({ error: "DRGデータベースのPDFではありません" });
+      }
+      const endIdx = fileStr.indexOf(endMarker, startIdx);
+      if (endIdx === -1) {
+        return res.status(400).json({ error: "PDFデータが破損しています" });
+      }
+
+      const jsonStr = fileStr.slice(startIdx + startMarker.length, endIdx).trim();
+      let data: any;
+      try {
+        data = JSON.parse(jsonStr);
+      } catch {
+        return res.status(400).json({ error: "PDFに含まれるデータが不正です" });
+      }
+
+      if (!data.words || !Array.isArray(data.words)) {
+        return res.status(400).json({ error: "PDFに有効なワードデータが含まれていません" });
+      }
+
+      const ngList = await getNgWordStrings();
+      const entries = data.words
+        .filter((w: any) => w.word && w.reading && w.romaji)
+        .filter((w: any) => !ngList.some((ng: string) => w.word.endsWith(ng)))
+        .map((w: any) => ({
+          word: w.word, reading: w.reading, romaji: w.romaji,
+          vowels: w.vowels || extractVowels(w.romaji),
+          charCount: w.charCount || w.reading.length,
+        }));
+
+      const added = await addWords(entries);
+      res.json({ added, total: await getWordCount(), imported: entries.length });
+    } catch (err) {
+      console.error("PDF import error:", err);
+      res.status(500).json({ error: "PDFインポートに失敗しました" });
+    }
+  });
+
   return httpServer;
 }
