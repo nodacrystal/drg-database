@@ -889,13 +889,17 @@ export default function Home() {
         setAutoModeCount(prev => prev + 1);
 
         if (cycleCounter >= 5) {
-          // 5回完了 → 全て整理を実行
           toast({ title: "全て整理開始", description: `${cycleCounter}回完了 → データベースの全て整理を実行中...` });
           setActiveTab("fav");
           await delay(500);
-          if (!runAllCleanupRef.current) break;
-          await runAllCleanupRef.current();
-          toast({ title: "全て整理完了", description: "整理が完了しました。生成を再開します..." });
+          try {
+            if (!runAllCleanupRef.current) break;
+            await runAllCleanupRef.current();
+            toast({ title: "全て整理完了", description: "整理が完了しました。生成を再開します..." });
+          } catch (cleanupErr) {
+            console.error("Auto mode cleanup error:", cleanupErr);
+            toast({ title: "整理エラー（続行）", description: "整理中にエラーが発生しましたが、生成を続行します", variant: "destructive" });
+          }
           cycleCounter = 0;
           await delay(2000);
         } else {
@@ -905,6 +909,7 @@ export default function Home() {
         if (!autoModeRef.current) break;
       }
     } catch (err) {
+      console.error("Auto mode error:", err);
       toast({ title: "オートモードエラー", description: err instanceof Error ? err.message : "エラーが発生しました", variant: "destructive" });
     }
 

@@ -58,7 +58,9 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - **STEP 1: Bulk Generation** — 6 parallel AI calls, each generates 50 diss words (target: 300 total)
   - Word types: 悪口, 嫌なあだ名, 挑発, 弱点の指摘
   - Each batch uses different angle/切り口 to maximize diversity
-  - Dedup against DB words, NG words, and cross-batch duplicates
+  - Dedup only within current generation batch (NOT against DB words)
+  - If count < 200 after dedup, regenerates `300 - current` more words, excluding duplicate tail words
+  - NG words still block generation
   - Same suffix/助詞 restriction enforced
 - **STEP 2: Quality Filter** — AI evaluates all generated words:
   - 子供でもわかる言葉か？ (kid-friendly vocabulary)
@@ -148,6 +150,9 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - Dependency array only includes `toast` (stable) — not the functions themselves
 
 ## Recent Changes
+- 2026-03-12: Generation dedup: only within current batch (not DB), regenerate if < 200, exclude dup tail words
+- 2026-03-12: Group check: detailed group count logging, clearer result messages
+- 2026-03-12: Auto mode: cleanup wrapped in try/catch for resilience, error logging added
 - 2026-03-12: Title changed to "DRGデータベース", subtitle removed
 - 2026-03-12: Auto mode: level range 5-10 (was 8-10), 5-cycle cleanup trigger with counter reset
 - 2026-03-12: Progress bar only visible during auto mode

@@ -267,7 +267,6 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       logTiming("db");
       send("init", `準備完了 (DB: ${existingWords.length}語, NG: ${ngWordList.length}語)`);
 
-      const seen = new Set<string>(existingWords);
       const shortHistory = existingWords.slice(-80).join(",") || "なし";
       const ngEndingNote = ngWordList.length > 0 ? `\n【末尾禁止単語】以下の単語で終わるワードは生成禁止: ${ngWordList.join("、")}` : "";
 
@@ -304,14 +303,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           "造語・オリジナル・合成語（既存にない独創的な悪口）",
         ];
 
-      const step1Prompt = (batchIndex: number) => `【タスク】「${targetName}」に対する${contentType}ワードを50個生成せよ。
+      const dupTailWords = new Set<string>();
+
+      const runStep1Generation = async (targetCount: number, extraExclusions: string[] = []): Promise<WordEntry[]> => {
+        const batchCount = Math.max(2, Math.ceil(targetCount / 50));
+        const usedAngles = batchAngles.slice(0, Math.min(batchCount, batchAngles.length));
+
+        const extraExclusionNote = extraExclusions.length > 0
+          ? `\n【追加禁止末尾】以下の末尾単語で終わるワードは生成禁止: ${extraExclusions.join("、")}`
+          : "";
+
+        const makePrompt = (batchIndex: number) => `【タスク】「${targetName}」に対する${contentType}ワードを50個生成せよ。
 
 【ターゲット情報】
 ${target}
 
 【Lv.${level} ${levelConfig.label}】${levelConfig.instruction}${antiPraise}
 
-【このバッチの切り口】★${batchAngles[batchIndex]}★
+【このバッチの切り口】★${usedAngles[batchIndex % usedAngles.length]}★
 この切り口に特化して50個全てを生成せよ。他の切り口のワードは絶対に混ぜるな。
 
 【生成するワードの種類】
@@ -325,55 +334,82 @@ ${wordTypes}
 - 造語OK（ただし意味が通じること）
 - ありきたりな表現を避け、独自性のある言葉を生成せよ
 - 「〜野郎」「〜め」「〜だ」など同じ語尾パターンは最大2個まで
-${ngEndingNote}
+${ngEndingNote}${extraExclusionNote}
 既出（生成するな）: ${shortHistory}
-バッチ${batchIndex + 1}/6
+バッチ${batchIndex + 1}/${batchCount}
 
 【出力形式】50個。1行1個。番号不要。説明不要。即座に出力:
 ワード/よみ(romaji)
 例: ポンコツ野郎/ぽんこつやろう(ponkotsuyarou)
 ※必ず「/」の後にひらがな読みを書き、(romaji)を付けること`;
 
-      const step1Results: PromiseSettledResult<any>[] = [];
-      for (let batch = 0; batch < 3; batch++) {
-        const batchResults = await Promise.allSettled(
-          [batch * 2, batch * 2 + 1].map(i =>
-            aiGenerate(step1Prompt(i), { ...geminiConfig, maxOutputTokens: 4096 })
-          )
-        );
-        step1Results.push(...batchResults);
-      }
+        const results: PromiseSettledResult<any>[] = [];
+        for (let batch = 0; batch < Math.ceil(batchCount / 2); batch++) {
+          const indices = [batch * 2, batch * 2 + 1].filter(i => i < batchCount);
+          const batchResults = await Promise.allSettled(
+            indices.map(i => aiGenerate(makePrompt(i), { ...geminiConfig, maxOutputTokens: 4096 }))
+          );
+          results.push(...batchResults);
+        }
+
+        const words: WordEntry[] = [];
+        const batchSeen = new Set<string>();
+        for (let i = 0; i < results.length; i++) {
+          const result = results[i];
+          if (result.status !== "fulfilled") {
+            console.log(`[STEP1] Batch ${i + 1} FAILED`);
+            continue;
+          }
+          const text = result.value.text || "";
+          const entries = parseWordEntries(text);
+          let batchAdded = 0;
+          for (const e of entries) {
+            if (batchSeen.has(e.word)) {
+              const tail = e.reading.slice(-2);
+              if (tail.length >= 2) dupTailWords.add(tail);
+              continue;
+            }
+            if (ngWordList.length > 0 && ngWordList.some(ng => e.word.endsWith(ng))) continue;
+            const isHiragana = /^[ぁ-ゟー]+$/.test(e.reading);
+            const len = isHiragana ? e.reading.length : countMoraFromRomaji(e.romaji);
+            if (len < 3 || len > 10) continue;
+            if (!isHiragana) e.reading = e.word;
+            batchSeen.add(e.word);
+            words.push(e);
+            batchAdded++;
+          }
+          console.log(`[STEP1] Batch ${i + 1}: parsed=${entries.length} added=${batchAdded}`);
+        }
+        return words;
+      };
+
+      let finalRawWords = await runStep1Generation(300);
       logTiming("step1-generate");
+      console.log(`[STEP1] Initial generation: ${finalRawWords.length} words, dup tails found: ${[...dupTailWords].join(",") || "none"}`);
 
-      const rawWords: WordEntry[] = [];
-      for (let i = 0; i < 6; i++) {
-        const result = step1Results[i];
-        if (result.status !== "fulfilled") {
-          console.log(`[STEP1] Batch ${i + 1} FAILED`);
-          continue;
+      if (finalRawWords.length < 200) {
+        const needed = 300 - finalRawWords.length;
+        send("step1", `STEP1: 生成数${finalRawWords.length}個 < 200 → 追加${needed}個を再生成中... (除外末尾: ${[...dupTailWords].join(",") || "なし"})`);
+        console.log(`[STEP1] Count ${finalRawWords.length} < 200, regenerating ${needed} more (excluding tails: ${[...dupTailWords].join(",")})`);
+        const extraWords = await runStep1Generation(needed, [...dupTailWords]);
+        logTiming("step1-regen");
+        const existingSet = new Set(finalRawWords.map(w => w.word));
+        let extraAdded = 0;
+        for (const w of extraWords) {
+          if (existingSet.has(w.word)) continue;
+          existingSet.add(w.word);
+          finalRawWords.push(w);
+          extraAdded++;
         }
-        const text = result.value.text || "";
-        const entries = parseWordEntries(text);
-        let batchAdded = 0;
-        for (const e of entries) {
-          if (seen.has(e.word)) continue;
-          if (rawWords.some(w => w.word === e.word)) continue;
-          if (ngWordList.length > 0 && ngWordList.some(ng => e.word.endsWith(ng))) continue;
-          const isHiragana = /^[ぁ-ゟー]+$/.test(e.reading);
-          const len = isHiragana ? e.reading.length : countMoraFromRomaji(e.romaji);
-          if (len < 3 || len > 10) continue;
-          if (!isHiragana) e.reading = e.word;
-          rawWords.push(e);
-          batchAdded++;
-        }
-        console.log(`[STEP1] Batch ${i + 1}: parsed=${entries.length} added=${batchAdded}`);
+        console.log(`[STEP1] Regeneration added ${extraAdded} words, total now: ${finalRawWords.length}`);
       }
-      send("step1", `STEP1完了: ${rawWords.length}個のワード生成`);
-      console.log(`[STEP1] Total raw words: ${rawWords.length}`);
 
-      send("step2", `STEP2: 品質フィルタリング中... (${rawWords.length}個を評価)`);
+      send("step1", `STEP1完了: ${finalRawWords.length}個のワード生成`);
+      console.log(`[STEP1] Total raw words: ${finalRawWords.length}`);
 
-      const wordListForFilter = rawWords.map(w => w.word).join("\n");
+      send("step2", `STEP2: 品質フィルタリング中... (${finalRawWords.length}個を評価)`);
+
+      const wordListForFilter = finalRawWords.map(w => w.word).join("\n");
       const step2Prompt = `【タスク】以下のワード一覧から品質チェックを行い、合格ワードだけを出力せよ。
 
 【評価基準】
@@ -388,7 +424,7 @@ ${wordListForFilter}
 【出力】合格ワードのみ、1行1個。元の形そのまま出力。説明不要:`;
 
       let filteredWordSet: Set<string>;
-      const rawWordSet = new Set(rawWords.map(w => w.word));
+      const rawWordSet = new Set(finalRawWords.map(w => w.word));
       try {
         const filterResult = await aiGenerate(step2Prompt, { ...geminiConfig, maxOutputTokens: 8192 });
         const filterText = filterResult.text || "";
@@ -396,11 +432,11 @@ ${wordListForFilter}
           .map(l => l.trim().replace(/^\d+[\.\)）、]\s*/, "").replace(/^[・●▸►\-]\s*/, "").replace(/^「/, "").replace(/」$/, "").trim())
           .filter(l => l.length > 0 && rawWordSet.has(l));
         filteredWordSet = new Set(passedWords);
-        if (filteredWordSet.size < rawWords.length * 0.1) {
-          console.log(`[STEP2] Filter pass rate too low (${filteredWordSet.size}/${rawWords.length}), keeping all words`);
+        if (filteredWordSet.size < finalRawWords.length * 0.1) {
+          console.log(`[STEP2] Filter pass rate too low (${filteredWordSet.size}/${finalRawWords.length}), keeping all words`);
           filteredWordSet = rawWordSet;
         } else {
-          console.log(`[STEP2] Filter passed: ${filteredWordSet.size}/${rawWords.length}`);
+          console.log(`[STEP2] Filter passed: ${filteredWordSet.size}/${finalRawWords.length}`);
         }
       } catch (err) {
         console.log(`[STEP2] Filter failed, using all words:`, err);
@@ -408,8 +444,8 @@ ${wordListForFilter}
       }
       logTiming("step2-filter");
 
-      const qualityWords = rawWords.filter(w => filteredWordSet.has(w.word));
-      send("step2", `STEP2完了: ${qualityWords.length}/${rawWords.length}個が合格`);
+      const qualityWords = finalRawWords.filter(w => filteredWordSet.has(w.word));
+      send("step2", `STEP2完了: ${qualityWords.length}/${finalRawWords.length}個が合格`);
 
       send("step3", `STEP3: 母音パターンでグルーピング中...`);
 
@@ -829,7 +865,14 @@ ${wordList}
       const allWords = await getAllWords();
       let vowelFixed = 0;
 
-      send("check", `グループ母音とワード母音の整合性を検査中 (${allWords.length}語)...`);
+      const groupCounts: Record<string, number> = {};
+      for (const w of allWords) {
+        const key = w.vowels.length >= 2 ? w.vowels.slice(-2) : w.vowels || "_";
+        groupCounts[key] = (groupCounts[key] || 0) + 1;
+      }
+      const groupSummary = Object.entries(groupCounts).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}:${v}`).join(", ");
+      send("check", `${allWords.length}語を${Object.keys(groupCounts).length}グループで検査中... (${groupSummary})`);
+
       const vowelFixUpdates: { id: number; word: string; reading: string; romaji: string; vowels: string; charCount: number }[] = [];
 
       for (const w of allWords) {
@@ -848,7 +891,11 @@ ${wordList}
         vowelFixed++;
       }
 
-      send("done", `グループ検査完了: ${allWords.length}語検査、グループ再配属${vowelFixed}語`);
+      if (vowelFixed === 0) {
+        send("done", `グループ検査完了: ${allWords.length}語すべて正常（母音不一致なし）`);
+      } else {
+        send("done", `グループ検査完了: ${allWords.length}語検査、グループ再配属${vowelFixed}語`);
+      }
       const elapsedMs = Date.now() - startTime;
       if (!disconnected) res.write(`data: ${JSON.stringify({ type: "result", checked: allWords.length, vowelFixed, elapsedMs })}\n\n`);
     } catch (error) {
