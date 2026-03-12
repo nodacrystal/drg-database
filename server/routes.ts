@@ -1312,124 +1312,187 @@ JSONのみ出力（説明文・コードブロック不要）。`;
     const ngSuffixes = new Set<string>();
     const PARALLEL = 8;
 
+    // ─── PHASE 0: Programmatic reading-suffix detection ───
+    // Group words by reading suffix (2-7 hiragana chars) within each bucket.
+    // This reliably catches ALL same-ending words regardless of kanji/kana surface form.
+    // Key: readingSuffix → canonical reading suffix
+    // Value: array of TailDupItem sharing that reading suffix
+    const readingSuffixGroups: Map<string, TailDupItem[]> = new Map();
+
+    for (const [, bucketWords] of Object.entries(buckets)) {
+      const words = bucketWords.filter(w => !toDelete.has(w.id));
+      if (words.length < 2) continue;
+
+      // Build suffix → words map for this bucket
+      const localSufMap: Record<string, Set<number>> = {};
+      for (const w of words) {
+        const r = w.reading;
+        for (let len = 2; len <= Math.min(7, r.length - 1); len++) {
+          const suf = r.slice(-len);
+          (localSufMap[suf] ??= new Set()).add(w.id);
+        }
+      }
+
+      // For each suffix with 2+ words, record the group
+      // Prefer the LONGEST suffix that covers a given set of words
+      const usedIds = new Set<string>(); // key = sorted id combo
+      const suffixes = Object.entries(localSufMap)
+        .filter(([, ids]) => ids.size >= 2)
+        .sort((a, b) => b[0].length - a[0].length); // longest suffix first
+
+      for (const [suf, idSet] of suffixes) {
+        const ids = [...idSet].sort().join(",");
+        if (usedIds.has(ids)) continue; // already covered by a longer suffix
+        usedIds.add(ids);
+        const groupKey = `reading:${suf}`;
+        const existing = readingSuffixGroups.get(groupKey) ?? [];
+        const toAdd = words.filter(w => idSet.has(w.id) && !existing.some(e => e.id === w.id));
+        readingSuffixGroups.set(groupKey, [...existing, ...toAdd]);
+      }
+    }
+
+    // ─── PHASE 1: Validate reading suffixes as complete standalone words ───
+    const candidateReadingSuffixes = [...readingSuffixGroups.keys()]
+      .map(k => k.slice("reading:".length))
+      .filter(s => readingSuffixGroups.get(`reading:${s}`)!.length >= 2);
+
+    const validReadingSuffixes = new Set<string>();
+    if (candidateReadingSuffixes.length > 0) {
+      send("validate", `読み末尾を単語検証中 (${candidateReadingSuffixes.length}候補)...`);
+      const VBATCH = 80;
+      for (let i = 0; i < candidateReadingSuffixes.length; i += VBATCH) {
+        const chunk = candidateReadingSuffixes.slice(i, i + VBATCH);
+        const validationPrompt = `以下のひらがな文字列が「単独で辞書に載る完全な日本語単語の読み」かどうか判定せよ。
+
+【合格（完全な単語の読み）】: 名詞・代名詞・よく知られた表現の読み
+合格例: おとこ（男）、かお（顔）、おんな（女）、かたまり（塊）、やろう（野郎）、のう（脳）、からだ（体）、ぬけがら（抜け殻）、かべ（壁）、ぶた（豚）、かがみ（鏡）、くず（屑）、おう（王）、じん（人）、めん（面）、だん（弾）、さん（山）、もの（者・物）
+
+【不合格（断片・活用形・助詞）】: 完全な単語でない
+不合格例: のかたまり（の＋かたまり）、なかたまり、くかたまり、ぐん、でん、りや、いた、ぶん、てる、てた、よ、の、な、か、わ、さ
+
+判定対象:
+${chunk.map((e, idx) => `${idx + 1}. ${e}`).join("\n")}
+
+合格のもののみ番号をJSON配列で返せ（例: [1,3,5]）。全て不合格なら[]。数字のみ出力。`;
+        try {
+          const vResult = await aiGenerate(validationPrompt, { ...geminiConfig, maxOutputTokens: 512 });
+          const vText = vResult?.text || "";
+          const vMatch = vText.match(/\[[\s\S]*?\]/);
+          if (vMatch) {
+            const validIdxs = JSON.parse(vMatch[0]) as number[];
+            for (const idx of validIdxs) {
+              if (idx >= 1 && idx <= chunk.length) validReadingSuffixes.add(chunk[idx - 1]);
+            }
+          }
+        } catch {}
+      }
+      send("validate", `読み末尾検証完了: ${candidateReadingSuffixes.length}候補中 ${validReadingSuffixes.size}語採用`);
+    }
+
+    // ─── PHASE 2: AI-based surface-form detection (cross-script variants) ───
+    // This catches cases where same-meaning words have different readings (e.g., 固まり vs 塊)
+    // but weren't caught by the reading-suffix approach.
     const groupsToScan = Object.entries(buckets)
       .map(([key, words]) => ({ key, words: words.filter(w => !toDelete.has(w.id)) }))
       .filter(g => g.words.length >= 2 && g.words.some(w => !w.protected));
 
-    const detectTasks: { key: string; words: TailDupItem[] }[] = [];
-    for (const g of groupsToScan) {
-      detectTasks.push({ key: g.key, words: g.words });
-    }
+    type EndingGroup = { ending: string; words: string[]; readingSuffix?: string };
+    const aiEndingGroups: { key: string; endings: EndingGroup[]; srcWords: TailDupItem[] }[] = [];
 
-    type EndingGroup = { ending: string; words: string[] };
-    const allEndingGroups: { key: string; endings: EndingGroup[]; srcWords: TailDupItem[] }[] = [];
-
-    for (let b = 0; b < detectTasks.length; b += PARALLEL) {
-      const batch = detectTasks.slice(b, b + PARALLEL);
+    for (let b = 0; b < groupsToScan.length; b += PARALLEL) {
+      const batch = groupsToScan.slice(b, b + PARALLEL);
       const results = await Promise.all(batch.map(async g => {
-        const wordList = g.words.map(w => `${w.word}(${w.reading}/${w.romaji})`).join("\n");
-        const prompt = `以下の悪口ワードリストで、末尾が「辞書に単独で載っている完全な単語」として一致するものをグループ化せよ。
+        const wordList = g.words.map(w => `${w.word}/${w.reading}`).join("\n");
+        const prompt = `以下の悪口ワードリストで、末尾単語が完全に一致（同一単語）するものをグループ化せよ。
 
-【採用する末尾語の条件】
-単独でも意味が完結する名詞・形容詞・よく知られた表現のみ対象:
-✓ 採用例: 野郎、ざこ、アホ、馬鹿、ジジイ、ババア、人間、顔面、悪魔、もどき、オッサン、指揮官、監督、死神、丸出し、だまれ、皮膚、墓場
+【対象となる末尾単語（例）】
+単独でも意味が完結する名詞のみ対象:
+・1文字: 体(からだ/たい)・顔(かお)・脳(のう)・腹(はら)・肉・男・女・者・王・面・玉・虫・人・金
+・2文字以上: 野郎・面倒・ゴミ・アホ・人間・固まり・塊(かたまり)・抜け殻・機関車・化身・呪い・宝物・成功
+・表記違い（漢字/ひらがな/カタカナ）でも読みが同じなら同一グループに入れること
+  例: 固まり(かたまり) = 塊(かたまり) = かたまり → 同一グループ
 
-【絶対に除外する末尾語】
-- 動詞活用形（命令形・連用形・て形等）: めろ・みろ・しろ・けろ・いけ・とけ・なげ・かけ・られ・れろ・れ・てる など
-- 語の一部・断片: しご・りや・いた・でん・ぐん など（それ単体では意味が成立しない）
-- 助詞・助動詞・接尾語: ない・ぶん・うん・ぞ・よ・の・わ・な・か・て・で など
-- 動詞語幹のみ（末尾が辞書形でない）: やろ・だろ・なよ など
+【除外する末尾】
+助詞・助動詞・断片: の・な・だ・わ・よ・て・で・か・を・は・が・に・ない・ぶん・ぐん
+動詞活用形: めろ・みろ・しろ・いけ・かけ・られ・てる・てた
 
-【重要】表記違い（漢字/ひらがな/カタカナ）でも同一語なら同一グループ
-
-ワード一覧:
+ワード一覧（表記/読み）:
 ${wordList}
 
-JSON配列のみ出力（説明不要）:
-[{"ending":"完全な単語のみ","words":["word1","word2",...]}]
-一致がない場合は空配列[]を返せ。`;
+JSON配列のみ出力:
+[{"ending":"末尾単語（代表表記）","readingSuffix":"読み","words":["ワード1","ワード2"]}]
+一致なしは[]。`;
         try {
-          const result = await aiGenerate(prompt);
-          const text = result.text || "";
+          const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 2048 });
+          const text = result?.text || "";
           const jsonMatch = text.match(/\[[\s\S]*\]/);
           if (!jsonMatch) return [];
           return JSON.parse(jsonMatch[0]) as EndingGroup[];
         } catch { return []; }
       }));
       for (let i = 0; i < batch.length; i++) {
-        const endings = results[i].filter(e =>
-          e.words && e.words.length >= 2 &&
-          e.ending && [...e.ending].length >= 2
+        const endings = (results[i] || []).filter(e =>
+          e.words && e.words.length >= 2 && e.ending && [...e.ending].length >= 1
         );
         if (endings.length > 0) {
-          allEndingGroups.push({ key: batch[i].key, endings, srcWords: batch[i].words });
+          aiEndingGroups.push({ key: batch[i].key, endings, srcWords: batch[i].words });
         }
       }
     }
 
-    // 二次検証: 全ての ending が独立した単語かAIで確認し、語の断片・活用形を除外
-    const allCandidateEndings = [...new Set(allEndingGroups.flatMap(eg => eg.endings.map(e => e.ending)))];
-    if (allCandidateEndings.length > 0) {
-      send("validate", `末尾語を単語検証中 (${allCandidateEndings.length}候補)...`);
-    }
-    const validEndings = new Set<string>();
-    if (allCandidateEndings.length > 0) {
-      const VBATCH = 100;
-      for (let i = 0; i < allCandidateEndings.length; i += VBATCH) {
-        const chunk = allCandidateEndings.slice(i, i + VBATCH);
-        const validationPrompt = `以下の日本語の語について、「単独で辞書に載り得る完全な単語」かどうかを判定せよ。
-
-【完全な単語と判定する】: 名詞（普通名詞・固有名詞・代名詞）、形容詞（い形・な形の基本形）、よく知られた感嘆詞や慣用表現
-例: 野郎、ざこ、アホ、馬鹿、ジジイ、ババア、人間、顔面、悪魔、もどき、オッサン、指揮官、監督、死神、丸出し、だまれ、皮膚、墓場、ばっか
-
-【完全な単語でないと判定する】: 動詞の活用形（命令形・て形・連用形など）、語の断片・接尾語のみ
-例: めろ、みろ、しろ、いけ、とけ、なげ、かけ、られ、ない、ぶん、うん、でん、ぐん、りや、いた、やろ
-
-判定対象:
-${chunk.map((e, idx) => `${idx + 1}. ${e}`).join("\n")}
-
-「完全な単語」のもののみ番号をJSON配列で返せ（例: [1,3,5]）。全て不合格なら空配列[]。数字のみ出力。`;
-        try {
-          const vResult = await aiGenerate(validationPrompt);
-          const vText = vResult.text || "";
-          const vMatch = vText.match(/\[[\s\S]*?\]/);
-          if (vMatch) {
-            const validIdxs = JSON.parse(vMatch[0]) as number[];
-            for (const idx of validIdxs) {
-              if (idx >= 1 && idx <= chunk.length) validEndings.add(chunk[idx - 1]);
-            }
-          }
-        } catch {}
-      }
-    }
-
-    // validEndings でフィルタ（検証に失敗した場合は全て通過させる）
-    if (allCandidateEndings.length > 0) {
-      send("validate", `単語検証完了: ${allCandidateEndings.length}候補中 ${validEndings.size}語を採用`);
-    }
-    const filteredEndingGroups = validEndings.size > 0
-      ? allEndingGroups.map(eg => ({ ...eg, endings: eg.endings.filter(e => validEndings.has(e.ending)) })).filter(eg => eg.endings.length > 0)
-      : allEndingGroups;
-
+    // ─── PHASE 3: Build pick tasks from both sources ───
     type PickTask = { candidates: TailDupItem[]; ending: string };
     const pickTasks: PickTask[] = [];
-    for (const eg of filteredEndingGroups) {
+    const processedGroupKeys = new Set<string>(); // prevent double-processing same word sets
+
+    // Fallback: if AI validation returned 0 (likely glitch), treat all reading suffixes as valid
+    const useAllReadingSuffixes = validReadingSuffixes.size === 0 && candidateReadingSuffixes.length > 0;
+    if (useAllReadingSuffixes) {
+      send("validate", "読み末尾バリデーション0件のためフォールバック: 全候補を採用");
+      for (const s of candidateReadingSuffixes) validReadingSuffixes.add(s);
+    }
+
+    // From programmatic reading-suffix detection
+    for (const [groupKey, groupWords] of readingSuffixGroups) {
+      const readingSuffix = groupKey.slice("reading:".length);
+      if (!validReadingSuffixes.has(readingSuffix)) continue;
+      const candidates = groupWords.filter(w => !toDelete.has(w.id));
+      if (candidates.length < 2) continue;
+      const key = candidates.map(w => w.id).sort().join(",");
+      if (processedGroupKeys.has(key)) continue;
+      processedGroupKeys.add(key);
+      send("check4", `「${readingSuffix}」系(読み一致) ${candidates.length}個検出`);
+      pickTasks.push({ candidates, ending: readingSuffix });
+    }
+
+    // From AI surface-form detection
+    for (const eg of aiEndingGroups) {
       for (const ending of eg.endings) {
-        const candidates = eg.srcWords.filter(w => ending.words.includes(w.word) && !toDelete.has(w.id));
-        if (candidates.length >= 2) {
-          send("check4", `「${ending.ending}」系 ${candidates.length}個検出`);
-          pickTasks.push({ candidates, ending: ending.ending });
-        }
+        // Match by word name OR reading suffix
+        const rsuffix = ending.readingSuffix || "";
+        const candidates = eg.srcWords.filter(w => {
+          if (toDelete.has(w.id)) return false;
+          if (ending.words.includes(w.word)) return true;
+          if (rsuffix && w.reading.endsWith(rsuffix)) return true;
+          return false;
+        });
+        if (candidates.length < 2) continue;
+        const key = candidates.map(w => w.id).sort().join(",");
+        if (processedGroupKeys.has(key)) continue;
+        processedGroupKeys.add(key);
+        send("check4", `「${ending.ending}」系(AI検出) ${candidates.length}個検出`);
+        pickTasks.push({ candidates, ending: ending.ending });
       }
     }
 
+    // ─── PHASE 4: AI picks the best word per group ───
     for (let p = 0; p < pickTasks.length; p += PARALLEL) {
       const pickBatch = pickTasks.slice(p, p + PARALLEL);
       const pickResults = await Promise.all(pickBatch.map(async t => {
         const prompt = `以下のワードから最も辛辣・強烈なパンチラインのワードを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${t.candidates.map(w => w.word).join("\n")}`;
         try {
-          const result = await aiGenerate(prompt);
-          const best = (result.text || "").trim().replace(/^「/, "").replace(/」$/, "").trim();
+          const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 64 });
+          const best = (result?.text || "").trim().replace(/^「/, "").replace(/」$/, "").trim();
           const match = t.candidates.find(w => w.word === best);
           return match ? match.id : t.candidates[0].id;
         } catch { return t.candidates[0].id; }
