@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import {
   Flame, Mic2, Sparkles, Zap, AlertTriangle, Loader2, Star,
-  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart, Plus, Wrench, Play, Search, Filter, ScanLine,
+  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart, Plus, Wrench, Play, Search, Filter, ScanLine, Languages,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -132,6 +132,9 @@ export default function Home() {
   const [isAllCleaning, setIsAllCleaning] = useState(false);
   const [dedupResult, setDedupResult] = useState<{ deleted: number; total: number; ngAdded: string[] } | null>(null);
   const [groupCheckResult, setGroupCheckResult] = useState<{ checked: number; aiFixed: number; vowelFixed: number } | null>(null);
+  const [isCharChecking, setIsCharChecking] = useState(false);
+  const [charCheckLogs, setCharCheckLogs] = useState<ProgressLog[]>([]);
+  const [charCheckResult, setCharCheckResult] = useState<{ checked: number; fixed: number } | null>(null);
   const autoModeRef = useRef(false);
   const isCleaningUpRef = useRef(false);
   const cleanupPromiseRef = useRef<Promise<void> | null>(null);
@@ -554,6 +557,51 @@ export default function Home() {
     }
     setIsGroupChecking(false);
   }, [isGroupChecking, toast, queryClient]);
+
+  const runCharCheck = useCallback(async () => {
+    if (isCharChecking) return;
+    setIsCharChecking(true);
+    setCharCheckLogs([]);
+    setCharCheckResult(null);
+    try {
+      const response = await fetch("/api/favorites/char-check", { method: "POST", headers: { "Content-Type": "application/json" } });
+      if (!response.ok) throw new Error("文字検査に失敗しました");
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("No reader");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.type === "progress") {
+              setCharCheckLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
+            } else if (data.type === "result") {
+              setCharCheckResult({ checked: data.checked, fixed: data.fixed });
+              toast({
+                title: "文字検査完了",
+                description: data.fixed === 0
+                  ? `${data.checked}語を検査→問題なし`
+                  : `${data.checked}語検査　${data.fixed}語を修正しました`,
+              });
+              queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
+            } else if (data.type === "error") {
+              toast({ title: "エラー", description: data.error, variant: "destructive" });
+            }
+          } catch {}
+        }
+      }
+    } catch {
+      toast({ title: "エラー", description: "文字検査に失敗しました", variant: "destructive" });
+    }
+    setIsCharChecking(false);
+  }, [isCharChecking, toast, queryClient]);
 
   const runAllCleanup = useCallback(async () => {
     if (isAllCleaning || isDedupRunning || isGroupChecking || isCleaningUp) return;
@@ -1003,15 +1051,19 @@ export default function Home() {
               </div>
 
               <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" onClick={runDedupCleanup} disabled={isDedupRunning || isCleaningUp || isGroupChecking || isAllCleaning || totalCount === 0} data-testid="button-dedup-cleanup">
+                <Button variant="outline" size="sm" onClick={runDedupCleanup} disabled={isDedupRunning || isCleaningUp || isGroupChecking || isAllCleaning || isCharChecking || totalCount === 0} data-testid="button-dedup-cleanup">
                   {isDedupRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Filter className="w-3.5 h-3.5 mr-1" />}
                   重複整理
                 </Button>
-                <Button variant="outline" size="sm" onClick={runGroupCheck} disabled={isGroupChecking || isCleaningUp || isDedupRunning || isAllCleaning || totalCount === 0} data-testid="button-group-check">
+                <Button variant="outline" size="sm" onClick={runGroupCheck} disabled={isGroupChecking || isCleaningUp || isDedupRunning || isAllCleaning || isCharChecking || totalCount === 0} data-testid="button-group-check">
                   {isGroupChecking ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <ScanLine className="w-3.5 h-3.5 mr-1" />}
                   グループ検査
                 </Button>
-                <Button variant="default" size="sm" onClick={runAllCleanup} disabled={isAllCleaning || isDedupRunning || isGroupChecking || isCleaningUp || totalCount === 0} data-testid="button-all-cleanup">
+                <Button variant="outline" size="sm" onClick={runCharCheck} disabled={isCharChecking || isGroupChecking || isDedupRunning || isAllCleaning || isCleaningUp || totalCount === 0} data-testid="button-char-check">
+                  {isCharChecking ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Languages className="w-3.5 h-3.5 mr-1" />}
+                  文字検査
+                </Button>
+                <Button variant="default" size="sm" onClick={runAllCleanup} disabled={isAllCleaning || isDedupRunning || isGroupChecking || isCleaningUp || isCharChecking || totalCount === 0} data-testid="button-all-cleanup">
                   {isAllCleaning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Wrench className="w-3.5 h-3.5 mr-1" />}
                   全て整理
                 </Button>
@@ -1039,6 +1091,32 @@ export default function Home() {
                     削除
                   </Button>
                   <Button variant="ghost" size="sm" onClick={() => setSelectedFavIds(new Set())} data-testid="button-clear-selection"><X className="w-3.5 h-3.5 mr-1" />選択解除</Button>
+                </div>
+              )}
+
+              {charCheckLogs.length > 0 && (
+                <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 space-y-1" data-testid="char-check-logs">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Languages className="w-4 h-4 text-emerald-400" />
+                    <span className="text-xs font-semibold text-emerald-400">文字検査ログ</span>
+                    {!isCharChecking && <Button variant="ghost" size="sm" className="h-5 px-1 text-xs ml-auto" onClick={() => { setCharCheckLogs([]); setCharCheckResult(null); }}><X className="w-3 h-3" /></Button>}
+                    {isCharChecking && <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400 ml-auto" />}
+                  </div>
+                  <div className="max-h-40 overflow-y-auto space-y-0.5">
+                    {charCheckLogs.map((log, i) => (
+                      <div key={i} className="text-xs flex gap-2">
+                        <span className="text-muted-foreground font-mono shrink-0">[{log.elapsed}]</span>
+                        <span>{log.detail}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {!isCharChecking && charCheckResult && (
+                    <div className="mt-2 pt-2 border-t border-emerald-500/20 text-xs font-semibold text-emerald-300 flex gap-3">
+                      <span>検査: {charCheckResult.checked}語</span>
+                      <span className={charCheckResult.fixed > 0 ? "text-yellow-400" : ""}>修正: {charCheckResult.fixed}語</span>
+                      {charCheckResult.fixed === 0 && <span className="text-green-400">✓ 問題なし</span>}
+                    </div>
+                  )}
                 </div>
               )}
 

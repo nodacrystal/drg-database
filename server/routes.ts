@@ -940,6 +940,115 @@ JSONのみ出力。`;
     }
   });
 
+  app.post("/api/favorites/char-check", async (req, res) => {
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    let disconnected = false;
+    res.on("close", () => { disconnected = true; if (heartbeat) clearInterval(heartbeat); });
+    try {
+      res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" });
+      heartbeat = setInterval(() => { if (!disconnected) res.write(": heartbeat\n\n"); }, 15000);
+      const startTime = Date.now();
+      const send = (step: string, detail: string) => {
+        if (disconnected) return;
+        const elapsed = `${((Date.now() - startTime) / 1000).toFixed(1)}s`;
+        res.write(`data: ${JSON.stringify({ type: "progress", step, detail, elapsed })}\n\n`);
+      };
+
+      send("init", "文字検査: 全ワードを取得中...");
+      const allWords = await getAllWords();
+      const BATCH = 20;
+      const PARALLEL = 5;
+      let fixed = 0;
+      let checked = 0;
+
+      type CharFix = { id: number; reading: string; romaji: string; issues: string };
+      const fixQueue: CharFix[] = [];
+
+      send("start", `文字検査開始 (${allWords.length}語)...`);
+
+      for (let b = 0; b < allWords.length; b += BATCH * PARALLEL) {
+        if (disconnected) break;
+        const superBatch = allWords.slice(b, b + BATCH * PARALLEL);
+        const batches: typeof allWords[] = [];
+        for (let i = 0; i < superBatch.length; i += BATCH) batches.push(superBatch.slice(i, i + BATCH));
+
+        const results = await Promise.all(batches.map(async batch => {
+          const wordList = batch.map(w => `ID:${w.id} 表記:${w.word} 読み:${w.reading} ローマ字:${w.romaji}`).join("\n");
+          const prompt = `以下の日本語悪口ワードについて3点を厳密に検証せよ。
+
+【検証ポイント】
+1. 表記（漢字・カタカナ等）の読みが正しいか
+2. 読みに対してヘボン式ローマ字が完全に正確か
+3. 「ん」「っ」以外の全モーラに対応する母音がローマ字に含まれているか
+   - 「か」→a, 「き」→i, 「く」→u, 「け」→e, 「こ」→o（全行共通）
+   - 「っ」(促音): 子音重複のみ(kk/tt/ss等)、母音不要
+   - 「ん」(撥音): n のみ、母音不要
+   - 長音「ー」: 前の母音を繰り返す（こう→kou, こー→koo）
+   - 小書き(ゃゅょ): 前の子音と合体(sha,chi,fu,kya等)
+   - 注意: 母音の数はモーラ数と一致するはず（ん・っ除く）
+
+ワード一覧:
+${wordList}
+
+問題がある場合のみJSON配列で出力（問題なければ空配列[]）:
+[{"id":数字,"reading":"正しいひらがな","romaji":"正しいヘボン式ローマ字（英小文字+ハイフンのみ）","issues":"問題の簡潔な説明"}]
+JSONのみ出力（説明文・コードブロック不要）。`;
+          try {
+            const result = await aiGenerate(prompt);
+            const text = result.text || "";
+            const jsonMatch = text.match(/\[[\s\S]*\]/);
+            if (!jsonMatch) return [];
+            return JSON.parse(jsonMatch[0]) as CharFix[];
+          } catch { return []; }
+        }));
+
+        checked += superBatch.length;
+        for (const fixes of results) {
+          for (const fix of fixes) {
+            const orig = allWords.find(w => w.id === fix.id);
+            if (!orig) continue;
+            const newRomaji = (fix.romaji || orig.romaji)
+              .toLowerCase()
+              .replace(/ā/g, "aa").replace(/ī/g, "ii").replace(/ū/g, "uu")
+              .replace(/ē/g, "ee").replace(/ō/g, "oo")
+              .replace(/[^a-z\-]/g, "");
+            const newReading = fix.reading || orig.reading;
+            if (newRomaji !== orig.romaji || newReading !== orig.reading) {
+              fixQueue.push({ id: fix.id, reading: newReading, romaji: newRomaji, issues: fix.issues });
+              send("fix", `問題検出:「${orig.word}」 [${fix.issues}] → ${orig.romaji}→${newRomaji}`);
+            }
+          }
+        }
+        if (checked % (BATCH * PARALLEL) === 0 || checked === allWords.length) {
+          send("progress", `${checked}/${allWords.length}語検査済み...`);
+        }
+      }
+
+      send("apply", `${fixQueue.length}件の問題を修正中...`);
+      for (const fix of fixQueue) {
+        const orig = allWords.find(w => w.id === fix.id)!;
+        const newVowels = extractVowels(fix.romaji);
+        await updateWord(fix.id, {
+          word: orig.word, reading: fix.reading, romaji: fix.romaji,
+          vowels: newVowels, charCount: fix.reading.length,
+        });
+        fixed++;
+      }
+
+      const elapsedMs = Date.now() - startTime;
+      send("done", `文字検査完了: ${allWords.length}語検査、${fixed}語修正`);
+      if (!disconnected) {
+        res.write(`data: ${JSON.stringify({ type: "result", checked: allWords.length, fixed, elapsedMs })}\n\n`);
+      }
+    } catch (error) {
+      console.error("Char check error:", error);
+      if (!disconnected) res.write(`data: ${JSON.stringify({ type: "error", error: "文字検査に失敗しました" })}\n\n`);
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
+      if (!disconnected) res.end();
+    }
+  });
+
   app.get("/api/favorites/integrity-check", async (req, res) => {
     try {
       const allWords = await getAllWords();
@@ -1027,12 +1136,13 @@ JSONのみ出力。`;
       const batch = detectTasks.slice(b, b + PARALLEL);
       const results = await Promise.all(batch.map(async g => {
         const wordList = g.words.map(w => `${w.word}(${w.reading}/${w.romaji})`).join("\n");
-        const prompt = `以下の悪口ワードリストで「末尾の単語」が同じものをグループ化せよ。
+        const prompt = `以下の悪口ワードリストで「末尾の単語（名詞・動詞・形容詞など）」が同じものをグループ化せよ。
 重要ルール:
 - 漢字・ひらがな・カタカナの表記違いでも同じ言葉なら同一グループ
 - フリガナの誤りで同じ言葉と認識できないケースも同一とみなす
-- 1文字だけの一致は除外、意味のある2文字以上の単語の一致のみ対象
-- 助詞・接尾辞（的、化、さ等）は除外
+- 必ず意味のある単語（2文字以上）の一致のみ対象。ひらがな1文字（よ、ぞ、の、か、な等）は絶対に除外
+- 助詞・終助詞・接尾辞（的、化、さ、よ、ぞ、の、わ、ね、な、か等）は除外
+- 「ざこ」「野郎」「馬鹿」のような2文字以上の意味を持つ侮蔑語のみ対象
 
 ワード一覧:
 ${wordList}
@@ -1049,7 +1159,11 @@ JSON配列のみ出力（説明不要）:
         } catch { return []; }
       }));
       for (let i = 0; i < batch.length; i++) {
-        const endings = results[i].filter(e => e.words && e.words.length >= 2);
+        // ending が実際の単語であること（ひらがな1文字等は除外、最低2文字）
+        const endings = results[i].filter(e =>
+          e.words && e.words.length >= 2 &&
+          e.ending && [...e.ending].length >= 2
+        );
         if (endings.length > 0) {
           allEndingGroups.push({ key: batch[i].key, endings, srcWords: batch[i].words });
         }
