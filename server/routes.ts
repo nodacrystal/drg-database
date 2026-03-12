@@ -874,7 +874,11 @@ JSONのみ出力。`;
           for (const fix of fixes) {
             const orig = allWords.find(w => w.id === fix.id);
             if (!orig) continue;
-            const newRomaji = (fix.romaji || orig.romaji).toLowerCase().replace(/[^a-z\-]/g, "");
+            const newRomaji = (fix.romaji || orig.romaji)
+              .toLowerCase()
+              .replace(/ā/g, "aa").replace(/ī/g, "ii").replace(/ū/g, "uu")
+              .replace(/ē/g, "ee").replace(/ō/g, "oo")
+              .replace(/[^a-z\-]/g, "");
             const newReading = fix.reading || orig.reading;
             if (newRomaji !== orig.romaji || newReading !== orig.reading) {
               fixQueue.push({ id: fix.id, word: orig.word, reading: newReading, romaji: newRomaji });
@@ -1178,11 +1182,16 @@ JSON配列のみ出力（説明不要）:
       send("init", "データベース分析中...");
 
       const allDbWords = await getAllWords();
-      const items = allDbWords.map(w => ({
-        id: w.id, word: w.word, reading: w.reading, romaji: w.romaji,
-        vowels: extractVowels(w.romaji), charCount: w.charCount,
-        protected: w.protected ?? false,
-      }));
+      const items = allDbWords.map(w => {
+        const computedVowels = extractVowels(w.romaji);
+        return {
+          id: w.id, word: w.word, reading: w.reading, romaji: w.romaji,
+          vowels: computedVowels,
+          dbVowels: w.vowels,
+          charCount: w.charCount,
+          protected: w.protected ?? false,
+        };
+      });
 
       const buckets: Record<string, typeof items> = {};
       for (const item of items) {
@@ -1195,19 +1204,18 @@ JSON配列のみ出力（説明不要）:
       const toDelete = new Set<number>();
       const ngSuffixes = new Set<string>();
 
-      send("check1", "チェック1: グループ内の母音パターン不一致を検出中...");
+      // check1: DBのvowelsフィールドがromajiから計算した値と一致するか検査
+      send("check1", "チェック1: DBのvowelsフィールドとromaji計算値の不一致を検出中...");
       let wrongVowelCount = 0;
-      for (const [groupKey, groupWords] of Object.entries(buckets)) {
-        for (const w of groupWords) {
-          const suffix = w.vowels.length >= 2 ? w.vowels.slice(-2) : w.vowels;
-          if (suffix !== groupKey) {
-            toDelete.add(w.id);
-            wrongVowelCount++;
-            console.log(`[CLEANUP:vowel] "${w.word}" vowels=${w.vowels} suffix=${suffix} ≠ group=${groupKey}`);
-          }
+      for (const item of items) {
+        if (item.dbVowels !== item.vowels) {
+          wrongVowelCount++;
+          console.log(`[CLEANUP:vowel] "${item.word}" db_vowels=${item.dbVowels} computed=${item.vowels} — DB更新が必要`);
+          // DBのvowelsフィールドを修正（グループは既にcomputed vowelsで正しい）
+          await updateWord(item.id, { word: item.word, reading: item.reading, romaji: item.romaji, vowels: item.vowels, charCount: item.charCount });
         }
       }
-      send("check1", `母音不一致: ${wrongVowelCount}個`);
+      send("check1", `DBvowels不一致: ${wrongVowelCount}個（修正済み）`);
 
       send("check2", "チェック2: 表記違い重複を検出中...");
       let scriptDupCount = 0;
