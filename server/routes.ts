@@ -1056,19 +1056,25 @@ JSONのみ出力（説明文・コードブロック不要）。`;
       const batch = detectTasks.slice(b, b + PARALLEL);
       const results = await Promise.all(batch.map(async g => {
         const wordList = g.words.map(w => `${w.word}(${w.reading}/${w.romaji})`).join("\n");
-        const prompt = `以下の悪口ワードリストで「末尾の単語（名詞・動詞・形容詞など）」が同じものをグループ化せよ。
-重要ルール:
-- 漢字・ひらがな・カタカナの表記違いでも同じ言葉なら同一グループ
-- フリガナの誤りで同じ言葉と認識できないケースも同一とみなす
-- 必ず意味のある単語（2文字以上）の一致のみ対象。ひらがな1文字（よ、ぞ、の、か、な等）は絶対に除外
-- 助詞・終助詞・接尾辞（的、化、さ、よ、ぞ、の、わ、ね、な、か等）は除外
-- 「ざこ」「野郎」「馬鹿」のような2文字以上の意味を持つ侮蔑語のみ対象
+        const prompt = `以下の悪口ワードリストで、末尾が「辞書に単独で載っている完全な単語」として一致するものをグループ化せよ。
+
+【採用する末尾語の条件】
+単独でも意味が完結する名詞・形容詞・よく知られた表現のみ対象:
+✓ 採用例: 野郎、ざこ、アホ、馬鹿、ジジイ、ババア、人間、顔面、悪魔、もどき、オッサン、指揮官、監督、死神、丸出し、だまれ、皮膚、墓場
+
+【絶対に除外する末尾語】
+- 動詞活用形（命令形・連用形・て形等）: めろ・みろ・しろ・けろ・いけ・とけ・なげ・かけ・られ・れろ・れ・てる など
+- 語の一部・断片: しご・りや・いた・でん・ぐん など（それ単体では意味が成立しない）
+- 助詞・助動詞・接尾語: ない・ぶん・うん・ぞ・よ・の・わ・な・か・て・で など
+- 動詞語幹のみ（末尾が辞書形でない）: やろ・だろ・なよ など
+
+【重要】表記違い（漢字/ひらがな/カタカナ）でも同一語なら同一グループ
 
 ワード一覧:
 ${wordList}
 
 JSON配列のみ出力（説明不要）:
-[{"ending":"共通末尾単語","words":["word1","word2",...]}]
+[{"ending":"完全な単語のみ","words":["word1","word2",...]}]
 一致がない場合は空配列[]を返せ。`;
         try {
           const result = await aiGenerate(prompt);
@@ -1079,7 +1085,6 @@ JSON配列のみ出力（説明不要）:
         } catch { return []; }
       }));
       for (let i = 0; i < batch.length; i++) {
-        // ending が実際の単語であること（ひらがな1文字等は除外、最低2文字）
         const endings = results[i].filter(e =>
           e.words && e.words.length >= 2 &&
           e.ending && [...e.ending].length >= 2
@@ -1090,9 +1095,53 @@ JSON配列のみ出力（説明不要）:
       }
     }
 
+    // 二次検証: 全ての ending が独立した単語かAIで確認し、語の断片・活用形を除外
+    const allCandidateEndings = [...new Set(allEndingGroups.flatMap(eg => eg.endings.map(e => e.ending)))];
+    if (allCandidateEndings.length > 0) {
+      send("validate", `末尾語を単語検証中 (${allCandidateEndings.length}候補)...`);
+    }
+    const validEndings = new Set<string>();
+    if (allCandidateEndings.length > 0) {
+      const VBATCH = 50;
+      for (let i = 0; i < allCandidateEndings.length; i += VBATCH) {
+        const chunk = allCandidateEndings.slice(i, i + VBATCH);
+        const validationPrompt = `以下の日本語の語について、「単独で辞書に載り得る完全な単語」かどうかを判定せよ。
+
+【完全な単語と判定する】: 名詞（普通名詞・固有名詞・代名詞）、形容詞（い形・な形の基本形）、よく知られた感嘆詞や慣用表現
+例: 野郎、ざこ、アホ、馬鹿、ジジイ、ババア、人間、顔面、悪魔、もどき、オッサン、指揮官、監督、死神、丸出し、だまれ、皮膚、墓場、ばっか
+
+【完全な単語でないと判定する】: 動詞の活用形（命令形・て形・連用形など）、語の断片・接尾語のみ
+例: めろ、みろ、しろ、いけ、とけ、なげ、かけ、られ、ない、ぶん、うん、でん、ぐん、りや、いた、やろ
+
+判定対象:
+${chunk.map((e, idx) => `${idx + 1}. ${e}`).join("\n")}
+
+「完全な単語」のもののみ番号をJSON配列で返せ（例: [1,3,5]）。全て不合格なら空配列[]。数字のみ出力。`;
+        try {
+          const vResult = await aiGenerate(validationPrompt);
+          const vText = vResult.text || "";
+          const vMatch = vText.match(/\[[\s\S]*?\]/);
+          if (vMatch) {
+            const validIdxs = JSON.parse(vMatch[0]) as number[];
+            for (const idx of validIdxs) {
+              if (idx >= 1 && idx <= chunk.length) validEndings.add(chunk[idx - 1]);
+            }
+          }
+        } catch {}
+      }
+    }
+
+    // validEndings でフィルタ（検証に失敗した場合は全て通過させる）
+    if (allCandidateEndings.length > 0) {
+      send("validate", `単語検証完了: ${allCandidateEndings.length}候補中 ${validEndings.size}語を採用`);
+    }
+    const filteredEndingGroups = validEndings.size > 0
+      ? allEndingGroups.map(eg => ({ ...eg, endings: eg.endings.filter(e => validEndings.has(e.ending)) })).filter(eg => eg.endings.length > 0)
+      : allEndingGroups;
+
     type PickTask = { candidates: TailDupItem[]; ending: string };
     const pickTasks: PickTask[] = [];
-    for (const eg of allEndingGroups) {
+    for (const eg of filteredEndingGroups) {
       for (const ending of eg.endings) {
         const candidates = eg.srcWords.filter(w => ending.words.includes(w.word) && !toDelete.has(w.id));
         if (candidates.length >= 2) {
