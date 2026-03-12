@@ -827,98 +827,18 @@ ${wordList}
 
       send("init", "グループ検査: 全ワードを取得中...");
       const allWords = await getAllWords();
-      const BATCH = 30;
-      const PARALLEL = 5;
-      let aiFixed = 0;
       let vowelFixed = 0;
-      let checked = 0;
 
-      // Step 1: AI romaji/reading validation
-      type WordFix = { id: number; word: string; reading: string; romaji: string };
-      const fixQueue: WordFix[] = [];
-
-      send("phase1", `ステップ1: アルファベット表記確認 (${allWords.length}語)...`);
-      for (let b = 0; b < allWords.length; b += BATCH * PARALLEL) {
-        if (disconnected) break;
-        const superBatch = allWords.slice(b, b + BATCH * PARALLEL);
-        const batches: typeof allWords[] = [];
-        for (let i = 0; i < superBatch.length; i += BATCH) batches.push(superBatch.slice(i, i + BATCH));
-
-        const results = await Promise.all(batches.map(async batch => {
-          const wordList = batch.map(w => `ID:${w.id} 表記:${w.word} 読み:${w.reading} ローマ字:${w.romaji}`).join("\n");
-          const prompt = `以下の日本語ワードについて読み方とヘボン式ローマ字を厳密に検証せよ。
-ルール:
-- 促音(っ/ッ)=子音重複(kk,tt,ss等)
-- 撥音(ん/ン)=n(母音前はnn)
-- 長音(ー)=前の母音を繰り返す
-- 小書き(ゃゅょ)=前の子音と合体(sha,chi,fu等)
-- 読みとローマ字が厳密に対応しているか確認
-
-ワード:
-${wordList}
-
-問題がある場合のみJSON配列で出力(問題なければ空配列[]):
-[{"id":数字,"reading":"正しいひらがな","romaji":"正しいローマ字"}]
-JSONのみ出力。`;
-          try {
-            const result = await aiGenerate(prompt);
-            const text = result.text || "";
-            const jsonMatch = text.match(/\[[\s\S]*\]/);
-            if (!jsonMatch) return [];
-            return JSON.parse(jsonMatch[0]) as WordFix[];
-          } catch { return []; }
-        }));
-
-        checked += superBatch.length;
-        for (const fixes of results) {
-          for (const fix of fixes) {
-            const orig = allWords.find(w => w.id === fix.id);
-            if (!orig) continue;
-            const newRomaji = (fix.romaji || orig.romaji)
-              .toLowerCase()
-              .replace(/ā/g, "aa").replace(/ī/g, "ii").replace(/ū/g, "uu")
-              .replace(/ē/g, "ee").replace(/ō/g, "oo")
-              .replace(/[^a-z\-]/g, "");
-            const newReading = fix.reading || orig.reading;
-            if (newRomaji !== orig.romaji || newReading !== orig.reading) {
-              fixQueue.push({ id: fix.id, word: orig.word, reading: newReading, romaji: newRomaji });
-              send("fix", `ローマ字修正:「${orig.word}」 ${orig.romaji}→${newRomaji}`);
-            }
-          }
-        }
-        if (checked % (BATCH * PARALLEL) === 0) {
-          send("progress", `ステップ1: ${checked}/${allWords.length}語確認済み...`);
-        }
-      }
-
-      // Apply AI fixes
-      const fixedRomajiMap = new Map<number, string>();
-      for (const fix of fixQueue) {
-        const orig = allWords.find(w => w.id === fix.id)!;
-        const newVowels = extractVowels(fix.romaji);
-        await updateWord(fix.id, { word: orig.word, reading: fix.reading, romaji: fix.romaji, vowels: newVowels, charCount: fix.reading.length });
-        fixedRomajiMap.set(fix.id, fix.romaji);
-        aiFixed++;
-      }
-      send("phase1done", `ステップ1完了: ${aiFixed}語のローマ字を修正`);
-
-      // Step 2: Local vowel/group consistency check (no exceptions)
-      send("phase2", "ステップ2: グループの母音とワードの母音の整合性を検査中...");
-      let vowelMismatchCount = 0;
+      send("check", `グループ母音とワード母音の整合性を検査中 (${allWords.length}語)...`);
       const vowelFixUpdates: { id: number; word: string; reading: string; romaji: string; vowels: string; charCount: number }[] = [];
 
       for (const w of allWords) {
-        const effectiveRomaji = fixedRomajiMap.get(w.id) ?? w.romaji;
-        const computedVowels = extractVowels(effectiveRomaji);
+        const computedVowels = extractVowels(w.romaji);
         if (computedVowels !== w.vowels) {
-          vowelMismatchCount++;
           const oldGroup = w.vowels.length >= 2 ? `*${w.vowels.slice(-2)}` : w.vowels;
           const newGroup = computedVowels.length >= 2 ? `*${computedVowels.slice(-2)}` : computedVowels;
           const groupChange = oldGroup !== newGroup ? ` [${oldGroup}→${newGroup}]` : ` [母音フィールド更新]`;
-          vowelFixUpdates.push({
-            id: w.id, word: w.word, reading: w.reading, romaji: effectiveRomaji,
-            vowels: computedVowels, charCount: w.charCount,
-          });
+          vowelFixUpdates.push({ id: w.id, word: w.word, reading: w.reading, romaji: w.romaji, vowels: computedVowels, charCount: w.charCount });
           send("vowel", `グループ再配属:「${w.word}」 ${w.vowels}→${computedVowels}${groupChange}`);
         }
       }
@@ -928,9 +848,9 @@ JSONのみ出力。`;
         vowelFixed++;
       }
 
-      send("done", `グループ検査完了: ${allWords.length}語検査、ローマ字${aiFixed}語修正、グループ再配属${vowelFixed}語`);
+      send("done", `グループ検査完了: ${allWords.length}語検査、グループ再配属${vowelFixed}語`);
       const elapsedMs = Date.now() - startTime;
-      if (!disconnected) res.write(`data: ${JSON.stringify({ type: "result", checked: allWords.length, aiFixed, vowelFixed, elapsedMs })}\n\n`);
+      if (!disconnected) res.write(`data: ${JSON.stringify({ type: "result", checked: allWords.length, vowelFixed, elapsedMs })}\n\n`);
     } catch (error) {
       console.error("Group check error:", error);
       if (!disconnected) res.write(`data: ${JSON.stringify({ type: "error", error: "グループ検査に失敗しました" })}\n\n`);

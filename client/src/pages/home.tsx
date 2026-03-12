@@ -131,10 +131,16 @@ export default function Home() {
   const [groupCheckLogs, setGroupCheckLogs] = useState<ProgressLog[]>([]);
   const [isAllCleaning, setIsAllCleaning] = useState(false);
   const [dedupResult, setDedupResult] = useState<{ deleted: number; total: number; ngAdded: string[] } | null>(null);
-  const [groupCheckResult, setGroupCheckResult] = useState<{ checked: number; aiFixed: number; vowelFixed: number } | null>(null);
+  const [groupCheckResult, setGroupCheckResult] = useState<{ checked: number; vowelFixed: number } | null>(null);
   const [isCharChecking, setIsCharChecking] = useState(false);
   const [charCheckLogs, setCharCheckLogs] = useState<ProgressLog[]>([]);
   const [charCheckResult, setCharCheckResult] = useState<{ checked: number; fixed: number } | null>(null);
+  const [dedupSecs, setDedupSecs] = useState(0);
+  const [charCheckSecs, setCharCheckSecs] = useState(0);
+  const [groupCheckSecs, setGroupCheckSecs] = useState(0);
+  const dedupTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const charCheckTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const groupCheckTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoModeRef = useRef(false);
   const isCleaningUpRef = useRef(false);
   const cleanupPromiseRef = useRef<Promise<void> | null>(null);
@@ -143,7 +149,22 @@ export default function Home() {
   const runCleanupRef = useRef<typeof runCleanup | null>(null);
 
   useEffect(() => { if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: "smooth" }); }, [progressLogs]);
-  useEffect(() => { return () => { if (timerRef.current) clearInterval(timerRef.current); }; }, []);
+  useEffect(() => { return () => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (dedupTimerRef.current) clearInterval(dedupTimerRef.current);
+    if (charCheckTimerRef.current) clearInterval(charCheckTimerRef.current);
+    if (groupCheckTimerRef.current) clearInterval(groupCheckTimerRef.current);
+  }; }, []);
+
+  const startSecsTimer = (setter: (n: number) => void, ref: React.MutableRefObject<ReturnType<typeof setInterval> | null>) => {
+    setter(0);
+    if (ref.current) clearInterval(ref.current);
+    const t0 = Date.now();
+    ref.current = setInterval(() => setter(Math.floor((Date.now() - t0) / 1000)), 500);
+  };
+  const stopSecsTimer = (ref: React.MutableRefObject<ReturnType<typeof setInterval> | null>) => {
+    if (ref.current) { clearInterval(ref.current); ref.current = null; }
+  };
 
   const favQuery = useQuery<{ groups: FavGroup[]; total: number }>({ queryKey: ["/api/favorites"] });
   const favCountQuery = useQuery<{ total: number }>({ queryKey: ["/api/favorites/count"] });
@@ -473,6 +494,7 @@ export default function Home() {
     if (isDedupRunning || isCleaningUp) return;
     setIsDedupRunning(true);
     setCleanupLogs([]);
+    startSecsTimer(setDedupSecs, dedupTimerRef);
     try {
       const response = await fetch("/api/favorites/dedup-cleanup", { method: "POST", headers: { "Content-Type": "application/json" } });
       if (!response.ok) throw new Error("重複整理に失敗しました");
@@ -510,180 +532,173 @@ export default function Home() {
     } catch {
       toast({ title: "エラー", description: "重複整理に失敗しました", variant: "destructive" });
     }
+    stopSecsTimer(dedupTimerRef);
     setIsDedupRunning(false);
   }, [isDedupRunning, isCleaningUp, toast, queryClient]);
+
+  const readSSEStream = useCallback(async (
+    url: string,
+    onProgress: (data: Record<string, unknown>) => void,
+    onResult: (data: Record<string, unknown>) => void,
+    onError: (data: Record<string, unknown>) => void,
+  ) => {
+    const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" } });
+    if (!response.ok) throw new Error(`${url} failed`);
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("No reader");
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        try {
+          const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
+          if (data.type === "progress") onProgress(data);
+          else if (data.type === "result") onResult(data);
+          else if (data.type === "error") onError(data);
+        } catch {}
+      }
+    }
+  }, []);
 
   const runGroupCheck = useCallback(async () => {
     if (isGroupChecking) return;
     setIsGroupChecking(true);
     setGroupCheckLogs([]);
+    setGroupCheckResult(null);
+    startSecsTimer(setGroupCheckSecs, groupCheckTimerRef);
     try {
-      const response = await fetch("/api/favorites/group-check", { method: "POST", headers: { "Content-Type": "application/json" } });
-      if (!response.ok) throw new Error("グループ検査に失敗しました");
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error("No reader");
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const data = JSON.parse(line.slice(6));
-            if (data.type === "progress") {
-              setGroupCheckLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
-            } else if (data.type === "result") {
-              setGroupCheckResult({ checked: data.checked, aiFixed: data.aiFixed, vowelFixed: data.vowelFixed });
-              const noIssues = data.aiFixed === 0 && data.vowelFixed === 0;
-              toast({
-                title: "グループ検査完了",
-                description: noIssues
-                  ? `${data.checked}語を検査→問題なし`
-                  : `${data.checked}語検査　ローマ字修正:${data.aiFixed}語　グループ再配属:${data.vowelFixed}語`,
-              });
-              queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
-            } else if (data.type === "error") {
-              toast({ title: "エラー", description: data.error, variant: "destructive" });
-            }
-          } catch {}
-        }
-      }
+      await readSSEStream(
+        "/api/favorites/group-check",
+        (data) => setGroupCheckLogs(prev => [...prev, { time: String(data.step), detail: String(data.detail), elapsed: String(data.elapsed || "") }]),
+        (data) => {
+          stopSecsTimer(groupCheckTimerRef);
+          setGroupCheckResult({ checked: Number(data.checked), vowelFixed: Number(data.vowelFixed) });
+          toast({
+            title: "グループ検査完了",
+            description: data.vowelFixed === 0
+              ? `${data.checked}語を検査→問題なし`
+              : `${data.checked}語検査　グループ再配属:${data.vowelFixed}語`,
+          });
+          queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
+        },
+        (data) => toast({ title: "エラー", description: String(data.error), variant: "destructive" }),
+      );
     } catch {
       toast({ title: "エラー", description: "グループ検査に失敗しました", variant: "destructive" });
     }
+    stopSecsTimer(groupCheckTimerRef);
     setIsGroupChecking(false);
-  }, [isGroupChecking, toast, queryClient]);
+  }, [isGroupChecking, toast, queryClient, readSSEStream]);
 
   const runCharCheck = useCallback(async () => {
     if (isCharChecking) return;
     setIsCharChecking(true);
     setCharCheckLogs([]);
     setCharCheckResult(null);
+    startSecsTimer(setCharCheckSecs, charCheckTimerRef);
     try {
-      const response = await fetch("/api/favorites/char-check", { method: "POST", headers: { "Content-Type": "application/json" } });
-      if (!response.ok) throw new Error("文字検査に失敗しました");
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error("No reader");
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const data = JSON.parse(line.slice(6));
-            if (data.type === "progress") {
-              setCharCheckLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
-            } else if (data.type === "result") {
-              setCharCheckResult({ checked: data.checked, fixed: data.fixed });
-              toast({
-                title: "文字検査完了",
-                description: data.fixed === 0
-                  ? `${data.checked}語を検査→問題なし`
-                  : `${data.checked}語検査　${data.fixed}語を修正しました`,
-              });
-              queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
-            } else if (data.type === "error") {
-              toast({ title: "エラー", description: data.error, variant: "destructive" });
-            }
-          } catch {}
-        }
-      }
+      await readSSEStream(
+        "/api/favorites/char-check",
+        (data) => setCharCheckLogs(prev => [...prev, { time: String(data.step), detail: String(data.detail), elapsed: String(data.elapsed || "") }]),
+        (data) => {
+          stopSecsTimer(charCheckTimerRef);
+          setCharCheckResult({ checked: Number(data.checked), fixed: Number(data.fixed) });
+          toast({
+            title: "文字検査完了",
+            description: data.fixed === 0
+              ? `${data.checked}語を検査→問題なし`
+              : `${data.checked}語検査　${data.fixed}語を修正しました`,
+          });
+          queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
+        },
+        (data) => toast({ title: "エラー", description: String(data.error), variant: "destructive" }),
+      );
     } catch {
       toast({ title: "エラー", description: "文字検査に失敗しました", variant: "destructive" });
     }
+    stopSecsTimer(charCheckTimerRef);
     setIsCharChecking(false);
-  }, [isCharChecking, toast, queryClient]);
+  }, [isCharChecking, toast, queryClient, readSSEStream]);
 
   const runAllCleanup = useCallback(async () => {
-    if (isAllCleaning || isDedupRunning || isGroupChecking || isCleaningUp) return;
+    if (isAllCleaning || isDedupRunning || isGroupChecking || isCleaningUp || isCharChecking) return;
     setIsAllCleaning(true);
     setCleanupLogs([]);
+    setCharCheckLogs([]);
     setGroupCheckLogs([]);
-    // Step 1: dedup
+    setDedupResult(null);
+    setCharCheckResult(null);
+    setGroupCheckResult(null);
+
+    // Step 1: 重複整理
     setIsDedupRunning(true);
+    startSecsTimer(setDedupSecs, dedupTimerRef);
     try {
-      const response = await fetch("/api/favorites/dedup-cleanup", { method: "POST", headers: { "Content-Type": "application/json" } });
-      if (response.ok) {
-        const reader = response.body?.getReader();
-        if (reader) {
-          const decoder = new TextDecoder();
-          let buffer = "";
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() || "";
-            for (const line of lines) {
-              if (!line.startsWith("data: ")) continue;
-              try {
-                const data = JSON.parse(line.slice(6));
-                if (data.type === "progress") setCleanupLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
-                else if (data.type === "result") {
-                  const ngAdded: string[] = data.ngAdded || [];
-                  setDedupResult({ deleted: data.deleted, total: data.total, ngAdded });
-                  queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
-                  queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
-                  queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
-                  queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
-                }
-              } catch {}
-            }
-          }
-        }
-      }
+      await readSSEStream(
+        "/api/favorites/dedup-cleanup",
+        (data) => setCleanupLogs(prev => [...prev, { time: String(data.step), detail: String(data.detail), elapsed: String(data.elapsed || "") }]),
+        (data) => {
+          const ngAdded: string[] = Array.isArray(data.ngAdded) ? data.ngAdded as string[] : [];
+          setDedupResult({ deleted: Number(data.deleted), total: Number(data.total), ngAdded });
+          queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
+          queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
+          queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
+          queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
+        },
+        () => {},
+      );
     } catch {}
+    stopSecsTimer(dedupTimerRef);
     setIsDedupRunning(false);
-    // Step 2: group-check
-    setIsGroupChecking(true);
+
+    // Step 2: 文字検査
+    setIsCharChecking(true);
+    startSecsTimer(setCharCheckSecs, charCheckTimerRef);
     try {
-      const response = await fetch("/api/favorites/group-check", { method: "POST", headers: { "Content-Type": "application/json" } });
-      if (response.ok) {
-        const reader = response.body?.getReader();
-        if (reader) {
-          const decoder = new TextDecoder();
-          let buffer = "";
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() || "";
-            for (const line of lines) {
-              if (!line.startsWith("data: ")) continue;
-              try {
-                const data = JSON.parse(line.slice(6));
-                if (data.type === "progress") setGroupCheckLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
-                else if (data.type === "result") {
-                  setGroupCheckResult({ checked: data.checked, aiFixed: data.aiFixed, vowelFixed: data.vowelFixed });
-                  const noIssues = data.aiFixed === 0 && data.vowelFixed === 0;
-                  toast({
-                    title: "全て整理完了",
-                    description: noIssues
-                      ? `グループ検査${data.checked}語→問題なし`
-                      : `グループ検査: ローマ字${data.aiFixed}語・再配属${data.vowelFixed}語修正`,
-                  });
-                  queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
-                  queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
-                }
-              } catch {}
-            }
-          }
-        }
-      }
+      await readSSEStream(
+        "/api/favorites/char-check",
+        (data) => setCharCheckLogs(prev => [...prev, { time: String(data.step), detail: String(data.detail), elapsed: String(data.elapsed || "") }]),
+        (data) => {
+          stopSecsTimer(charCheckTimerRef);
+          setCharCheckResult({ checked: Number(data.checked), fixed: Number(data.fixed) });
+          queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
+        },
+        () => {},
+      );
     } catch {}
+    stopSecsTimer(charCheckTimerRef);
+    setIsCharChecking(false);
+
+    // Step 3: グループ検査
+    setIsGroupChecking(true);
+    startSecsTimer(setGroupCheckSecs, groupCheckTimerRef);
+    try {
+      await readSSEStream(
+        "/api/favorites/group-check",
+        (data) => setGroupCheckLogs(prev => [...prev, { time: String(data.step), detail: String(data.detail), elapsed: String(data.elapsed || "") }]),
+        (data) => {
+          stopSecsTimer(groupCheckTimerRef);
+          setGroupCheckResult({ checked: Number(data.checked), vowelFixed: Number(data.vowelFixed) });
+          toast({
+            title: "全て整理完了",
+            description: `重複整理・文字検査・グループ検査を完了しました`,
+          });
+          queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
+          queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
+        },
+        () => {},
+      );
+    } catch {}
+    stopSecsTimer(groupCheckTimerRef);
     setIsGroupChecking(false);
     setIsAllCleaning(false);
-  }, [isAllCleaning, isDedupRunning, isGroupChecking, isCleaningUp, toast, queryClient]);
+  }, [isAllCleaning, isDedupRunning, isGroupChecking, isCleaningUp, isCharChecking, toast, queryClient, readSSEStream]);
 
   const addWordsDirect = useCallback(async (words: WordEntry[]): Promise<{ added: number; total: number }> => {
     if (words.length === 0) return { added: 0, total: 0 };
@@ -1099,6 +1114,7 @@ export default function Home() {
                   <div className="flex items-center gap-2 mb-1">
                     <Languages className="w-4 h-4 text-emerald-400" />
                     <span className="text-xs font-semibold text-emerald-400">文字検査ログ</span>
+                    {isCharChecking && <span className="text-xs font-mono text-emerald-300 ml-1">{charCheckSecs}秒</span>}
                     {!isCharChecking && <Button variant="ghost" size="sm" className="h-5 px-1 text-xs ml-auto" onClick={() => { setCharCheckLogs([]); setCharCheckResult(null); }}><X className="w-3 h-3" /></Button>}
                     {isCharChecking && <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400 ml-auto" />}
                   </div>
@@ -1125,6 +1141,7 @@ export default function Home() {
                   <div className="flex items-center gap-2 mb-1">
                     <ScanLine className="w-4 h-4 text-sky-400" />
                     <span className="text-xs font-semibold text-sky-400">グループ検査ログ</span>
+                    {isGroupChecking && <span className="text-xs font-mono text-sky-300 ml-1">{groupCheckSecs}秒</span>}
                     {!isGroupChecking && <Button variant="ghost" size="sm" className="h-5 px-1 text-xs ml-auto" onClick={() => { setGroupCheckLogs([]); setGroupCheckResult(null); }}><X className="w-3 h-3" /></Button>}
                     {isGroupChecking && <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-400 ml-auto" />}
                   </div>
@@ -1139,9 +1156,8 @@ export default function Home() {
                   {!isGroupChecking && groupCheckResult && (
                     <div className="mt-2 pt-2 border-t border-sky-500/20 text-xs font-semibold text-sky-300 flex gap-3">
                       <span>検査: {groupCheckResult.checked}語</span>
-                      <span className={groupCheckResult.aiFixed > 0 ? "text-yellow-400" : ""}>ローマ字修正: {groupCheckResult.aiFixed}語</span>
                       <span className={groupCheckResult.vowelFixed > 0 ? "text-orange-400" : ""}>グループ再配属: {groupCheckResult.vowelFixed}語</span>
-                      {groupCheckResult.aiFixed === 0 && groupCheckResult.vowelFixed === 0 && <span className="text-green-400">✓ 問題なし</span>}
+                      {groupCheckResult.vowelFixed === 0 && <span className="text-green-400">✓ 問題なし</span>}
                     </div>
                   )}
                 </div>
@@ -1150,9 +1166,10 @@ export default function Home() {
               {cleanupLogs.length > 0 && (
                 <div className="rounded-md border border-border/50 bg-muted/20 p-3 space-y-1" data-testid="cleanup-logs">
                   <div className="flex items-center gap-2 mb-1">
-                    <Wrench className="w-4 h-4 text-primary" />
-                    <span className="text-xs font-semibold">整理ログ</span>
-                    {lastCleanupTime && !isCleaningUp && (
+                    <Filter className="w-4 h-4 text-primary" />
+                    <span className="text-xs font-semibold">重複整理ログ</span>
+                    {isDedupRunning && <span className="text-xs font-mono text-primary/70 ml-1">{dedupSecs}秒</span>}
+                    {lastCleanupTime && !isCleaningUp && !isDedupRunning && (
                       <span className="text-xs font-mono text-green-400 ml-auto" data-testid="text-cleanup-time">
                         {formatTimer(Math.round(lastCleanupTime / 1000))}
                         {prevCleanupTime && (() => {
@@ -1162,8 +1179,8 @@ export default function Home() {
                         })()}
                       </span>
                     )}
-                    {!lastCleanupTime && !isCleaningUp && dedupResult && <span className="ml-auto" />}
                     {isCleaningUp && <Loader2 className="w-3.5 h-3.5 animate-spin text-primary ml-auto" />}
+                    {isDedupRunning && !isCleaningUp && <Loader2 className="w-3.5 h-3.5 animate-spin text-primary ml-auto" />}
                     {!isCleaningUp && !isDedupRunning && <Button variant="ghost" size="sm" className="h-5 px-1 text-xs" onClick={() => { setCleanupLogs([]); setDedupResult(null); }}><X className="w-3 h-3" /></Button>}
                   </div>
                   <div className="max-h-32 overflow-y-auto space-y-0.5">
