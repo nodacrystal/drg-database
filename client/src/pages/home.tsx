@@ -1075,69 +1075,155 @@ export default function Home() {
             {totalCount > 0 && <Badge variant="secondary" className="ml-1 text-xs px-1.5 py-0">{totalCount.toLocaleString()}</Badge>}
           </button>
           <button onClick={() => { setActiveTab("ng"); setSelectedNgIds(new Set()); queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] }); }} className={`flex-1 py-2.5 text-sm font-medium transition-colors flex items-center justify-center gap-1.5 ${activeTab === "ng" ? "bg-primary text-primary-foreground" : "bg-muted/40 text-muted-foreground hover:bg-muted/60"}`} data-testid="tab-ng">
-            <Ban className="w-4 h-4" />NG単語リスト
+            <ScrollText className="w-4 h-4" />ルール
             {ngCount > 0 && <Badge variant="secondary" className="ml-1 text-xs px-1.5 py-0">{ngCount.toLocaleString()}</Badge>}
           </button>
         </div>
 
         {activeTab === "ng" ? (
-          <Card>
-            <CardContent className="p-4 space-y-3">
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <div className="flex items-center gap-2">
-                  <Ban className="w-5 h-5 text-destructive" />
-                  <h2 className="text-base font-semibold">NG単語リスト</h2>
-                  <Badge variant="secondary">{ngCount.toLocaleString()}件</Badge>
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  <Button variant="outline" size="sm" onClick={copyNgWords} disabled={ngCount === 0} data-testid="button-copy-ng"><Copy className="w-3.5 h-3.5 mr-1" />コピー</Button>
-                  <Button variant="outline" size="sm" onClick={handleNgJsonExport} disabled={ngCount === 0} data-testid="button-ng-export-json"><FileJson className="w-3.5 h-3.5 mr-1" />JSON保存</Button>
-                  <Button variant="outline" size="sm" onClick={() => ngJsonInputRef.current?.click()} data-testid="button-ng-import-json"><Upload className="w-3.5 h-3.5 mr-1" />JSON読込</Button>
-                  <input ref={ngJsonInputRef} type="file" accept=".json" className="hidden" onChange={handleNgJsonImport} />
-                  <Button variant="outline" size="sm" onClick={() => clearNgMutation.mutate()} disabled={clearNgMutation.isPending || ngCount === 0} data-testid="button-clear-ng"><Trash2 className="w-3.5 h-3.5 mr-1" />全削除</Button>
-                </div>
-              </div>
-              <p className="text-xs text-muted-foreground">ワードの末尾がNG単語と一致する場合、生成・追加されません。整理や精査で検出された末尾単語が自動追加されます。</p>
-
-              {selectedNgIds.size > 0 && (
-                <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}
-                  className="flex items-center gap-2 bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2">
-                  <span className="text-sm font-medium">{selectedNgIds.size}個選択中</span>
-                  <div className="flex gap-1.5 ml-auto">
-                    <Button variant="ghost" size="sm" onClick={() => setSelectedNgIds(new Set())} data-testid="button-deselect-ng"><X className="w-3.5 h-3.5 mr-1" />解除</Button>
-                    <Button variant="destructive" size="sm" onClick={deleteSelectedNg} disabled={batchDeleteNgMutation.isPending} data-testid="button-delete-selected-ng">
-                      {batchDeleteNgMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Trash2 className="w-3.5 h-3.5 mr-1" />}
-                      削除
-                    </Button>
+          <div className="space-y-4">
+            {/* NG単語リスト */}
+            <Card>
+              <CardContent className="p-4 space-y-3">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-2">
+                    <Ban className="w-5 h-5 text-destructive" />
+                    <h2 className="text-base font-semibold">NG単語リスト</h2>
+                    <Badge variant="secondary">{ngCount.toLocaleString()}件</Badge>
                   </div>
-                </motion.div>
-              )}
-
-              <div className="space-y-2">
-                <Textarea placeholder="NG単語を入力（改行・カンマ区切り）&#10;例: 野郎、顔、存在" value={pasteTextNg} onChange={e => setPasteTextNg(e.target.value)} className="text-xs min-h-[60px]" data-testid="textarea-paste-ng" />
-                <Button variant="outline" size="sm" onClick={() => pasteNgMutation.mutate(pasteTextNg)} disabled={!pasteTextNg.trim() || pasteNgMutation.isPending} data-testid="button-paste-ng">
-                  {pasteNgMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Plus className="w-3.5 h-3.5 mr-1" />}
-                  追加
-                </Button>
-              </div>
-
-              {ngWordsQuery.isLoading ? (
-                <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-8 w-full rounded-md" />)}</div>
-              ) : !ngWordsQuery.data || ngWordsQuery.data.words.length === 0 ? (
-                <div className="text-center py-8 text-muted-foreground text-sm" data-testid="text-empty-ng">NG単語はまだありません。</div>
-              ) : (
-                <div className="flex flex-wrap gap-1.5 max-h-96 overflow-y-auto" data-testid="ng-words-container">
-                  {ngWordsQuery.data.words.map(w => (
-                    <button key={w.id} onClick={() => toggleNgSelection(w.id)}
-                      className={`inline-flex items-center gap-1 text-xs rounded px-2 py-1 cursor-pointer transition-all ${selectedNgIds.has(w.id) ? "bg-primary text-primary-foreground border border-primary ring-2 ring-primary/30" : "bg-destructive/10 border border-destructive/20 hover:bg-destructive/20"}`}
-                      data-testid={`ng-word-${w.id}`}>
-                      <span className="font-medium">{w.word}</span>
-                    </button>
-                  ))}
+                  <div className="flex flex-wrap gap-1.5">
+                    <Button variant="outline" size="sm" onClick={copyNgWords} disabled={ngCount === 0} data-testid="button-copy-ng"><Copy className="w-3.5 h-3.5 mr-1" />コピー</Button>
+                    <Button variant="outline" size="sm" onClick={handleNgJsonExport} disabled={ngCount === 0} data-testid="button-ng-export-json"><FileJson className="w-3.5 h-3.5 mr-1" />JSON保存</Button>
+                    <Button variant="outline" size="sm" onClick={() => ngJsonInputRef.current?.click()} data-testid="button-ng-import-json"><Upload className="w-3.5 h-3.5 mr-1" />JSON読込</Button>
+                    <input ref={ngJsonInputRef} type="file" accept=".json" className="hidden" onChange={handleNgJsonImport} />
+                    <Button variant="outline" size="sm" onClick={() => clearNgMutation.mutate()} disabled={clearNgMutation.isPending || ngCount === 0} data-testid="button-clear-ng"><Trash2 className="w-3.5 h-3.5 mr-1" />全削除</Button>
+                  </div>
                 </div>
-              )}
-            </CardContent>
-          </Card>
+                <p className="text-xs text-muted-foreground">ワードの末尾がNG単語と一致する場合、生成・追加されません。整理や精査で検出された末尾単語が自動追加されます。</p>
+
+                {selectedNgIds.size > 0 && (
+                  <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}
+                    className="flex items-center gap-2 bg-destructive/10 border border-destructive/30 rounded-lg px-3 py-2">
+                    <span className="text-sm font-medium">{selectedNgIds.size}個選択中</span>
+                    <div className="flex gap-1.5 ml-auto">
+                      <Button variant="ghost" size="sm" onClick={() => setSelectedNgIds(new Set())} data-testid="button-deselect-ng"><X className="w-3.5 h-3.5 mr-1" />解除</Button>
+                      <Button variant="destructive" size="sm" onClick={deleteSelectedNg} disabled={batchDeleteNgMutation.isPending} data-testid="button-delete-selected-ng">
+                        {batchDeleteNgMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Trash2 className="w-3.5 h-3.5 mr-1" />}
+                        削除
+                      </Button>
+                    </div>
+                  </motion.div>
+                )}
+
+                <div className="space-y-2">
+                  <Textarea placeholder="NG単語を入力（改行・カンマ区切り）&#10;例: 野郎、顔、存在" value={pasteTextNg} onChange={e => setPasteTextNg(e.target.value)} className="text-xs min-h-[60px]" data-testid="textarea-paste-ng" />
+                  <Button variant="outline" size="sm" onClick={() => pasteNgMutation.mutate(pasteTextNg)} disabled={!pasteTextNg.trim() || pasteNgMutation.isPending} data-testid="button-paste-ng">
+                    {pasteNgMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Plus className="w-3.5 h-3.5 mr-1" />}
+                    追加
+                  </Button>
+                </div>
+
+                {ngWordsQuery.isLoading ? (
+                  <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-8 w-full rounded-md" />)}</div>
+                ) : !ngWordsQuery.data || ngWordsQuery.data.words.length === 0 ? (
+                  <div className="text-center py-8 text-muted-foreground text-sm" data-testid="text-empty-ng">NG単語はまだありません。</div>
+                ) : (
+                  <div className="flex flex-wrap gap-1.5 max-h-96 overflow-y-auto" data-testid="ng-words-container">
+                    {ngWordsQuery.data.words.map(w => (
+                      <button key={w.id} onClick={() => toggleNgSelection(w.id)}
+                        className={`inline-flex items-center gap-1 text-xs rounded px-2 py-1 cursor-pointer transition-all ${selectedNgIds.has(w.id) ? "bg-primary text-primary-foreground border border-primary ring-2 ring-primary/30" : "bg-destructive/10 border border-destructive/20 hover:bg-destructive/20"}`}
+                        data-testid={`ng-word-${w.id}`}>
+                        <span className="font-medium">{w.word}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* 生成のルール */}
+            <Card>
+              <CardContent className="p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Zap className="w-5 h-5 text-primary" />
+                  <h2 className="text-base font-semibold">生成のルール</h2>
+                </div>
+                <p className="text-xs text-muted-foreground">AIへの生成プロンプトに含まれる絶対ルール（原文そのまま）</p>
+                <pre className="text-xs bg-muted/50 border border-border rounded-lg p-3 whitespace-pre-wrap leading-relaxed font-sans overflow-x-auto">{`【絶対ルール】
+- 1ワード10文字以内（ひらがな換算）
+- 小学生でもわかる簡単な言葉のみ
+- 同じ助詞・助動詞で終わるワードを重複させるな（例：〜だろ、〜だろ は禁止）
+- 関西弁・方言語尾は絶対禁止（やな/やわ/やろ/やで/やん/ねん/やんか/やんな/わな/じゃな/じゃろ/っちゃ等）→ 標準語のみ使用
+- 【体言止め必須】各ワードは必ず名詞・名詞句で終わらせること。助詞（〜な/〜だ/〜わ/〜よ/〜ね）、助動詞（〜てる/〜てた/〜です/〜ます）、形容詞語尾（〜い）、動詞活用形（〜する/〜いる）で終わるワードは絶対禁止
+- ターゲット「{ターゲット名}」に特化した内容
+- 造語OK（ただし意味が通じること）
+- ありきたりな表現を避け、独自性のある言葉を生成せよ
+- 「〜野郎」「〜め」「〜だ」など同じ語尾パターンは最大2個まで
+
+【末尾禁止単語】以下の単語で終わるワードは生成禁止: {NG単語リスト}（実行時に動的挿入）
+
+【追加禁止末尾】以下の末尾単語で終わるワードは生成禁止: {重複整理で検出された末尾}（実行時に動的挿入）`}</pre>
+              </CardContent>
+            </Card>
+
+            {/* 重複整理のルール */}
+            <Card>
+              <CardContent className="p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Filter className="w-5 h-5 text-primary" />
+                  <h2 className="text-base font-semibold">重複整理のルール</h2>
+                </div>
+                <p className="text-xs text-muted-foreground">重複整理で使用するAIプロンプト（原文そのまま・全フェーズ）</p>
+
+                <div className="space-y-3">
+                  <div>
+                    <p className="text-xs font-semibold text-muted-foreground mb-1">▍フェーズ1：読み末尾バリデーション</p>
+                    <pre className="text-xs bg-muted/50 border border-border rounded-lg p-3 whitespace-pre-wrap leading-relaxed font-sans overflow-x-auto">{`以下のひらがな文字列が「単独で辞書に載る完全な日本語単語の読み」かどうか判定せよ。
+
+【合格（完全な単語の読み）】: 名詞・代名詞・よく知られた表現の読み
+合格例: おとこ（男）、かお（顔）、おんな（女）、かたまり（塊）、やろう（野郎）、のう（脳）、からだ（体）、ぬけがら（抜け殻）、かべ（壁）、ぶた（豚）、かがみ（鏡）、くず（屑）、おう（王）、じん（人）、めん（面）、だん（弾）、さん（山）、もの（者・物）
+
+【不合格（断片・活用形・助詞）】: 完全な単語でない
+不合格例: のかたまり（の＋かたまり）、なかたまり、くかたまり、ぐん、でん、りや、いた、ぶん、てる、てた、よ、の、な、か、わ、さ
+
+判定対象:
+{候補リスト}
+
+合格のもののみ番号をJSON配列で返せ（例: [1,3,5]）。全て不合格なら[]。数字のみ出力。`}</pre>
+                  </div>
+
+                  <div>
+                    <p className="text-xs font-semibold text-muted-foreground mb-1">▍フェーズ2：AI表記ゆれ・異体字グループ化</p>
+                    <pre className="text-xs bg-muted/50 border border-border rounded-lg p-3 whitespace-pre-wrap leading-relaxed font-sans overflow-x-auto">{`以下の悪口ワードリストで、末尾単語が完全に一致（同一単語）するものをグループ化せよ。
+
+【対象となる末尾単語（例）】
+単独でも意味が完結する名詞のみ対象:
+・1文字: 体(からだ/たい)・顔(かお)・脳(のう)・腹(はら)・肉・男・女・者・王・面・玉・虫・人・金
+・2文字以上: 野郎・面倒・ゴミ・アホ・人間・固まり・塊(かたまり)・抜け殻・機関車・化身・呪い・宝物・成功
+・表記違い（漢字/ひらがな/カタカナ）でも読みが同じなら同一グループに入れること
+  例: 固まり(かたまり) = 塊(かたまり) = かたまり → 同一グループ
+
+【除外する末尾】
+助詞・助動詞・断片: の・な・だ・わ・よ・て・で・か・を・は・が・に・ない・ぶん・ぐん
+動詞活用形: めろ・みろ・しろ・いけ・かけ・られ・てる・てた
+
+ワード一覧（表記/読み）:
+{ワードリスト}
+
+JSON配列のみ出力:
+[{"ending":"末尾単語（代表表記）","readingSuffix":"読み","words":["ワード1","ワード2"]}]
+一致なしは[]。`}</pre>
+                  </div>
+
+                  <div>
+                    <p className="text-xs font-semibold text-muted-foreground mb-1">▍フェーズ4：最良ワード選択</p>
+                    <pre className="text-xs bg-muted/50 border border-border rounded-lg p-3 whitespace-pre-wrap leading-relaxed font-sans overflow-x-auto">{`以下のワードから最も辛辣・強烈なパンチラインのワードを1個だけ選べ。選んだワードだけを出力（説明不要）:
+{候補ワード一覧}`}</pre>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
         ) : activeTab === "fav" ? (
           <Card>
             <CardContent className="p-4 space-y-3">
