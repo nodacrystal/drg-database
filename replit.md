@@ -9,6 +9,8 @@ The agent should prioritize the following:
 - Accumulate 10,000 words in a PostgreSQL database.
 - Organize words by vowel pattern (including 「ん」) for rhyme matching.
 - Generate words that are "小学生でもわかる簡単な言葉のみ" (elementary school level vocabulary).
+- **体言止め必須 (Taigen-dome Rule):** Every word/phrase must end with a noun or noun phrase. Particles (〜な/〜だ/〜わ/〜よ/〜ね), auxiliary verbs (〜てる/〜てた/〜ている/〜ます/〜です), i-adjective endings (〜い), and verb conjugation forms are strictly prohibited. Rhyming by unnaturally extending word endings is also forbidden.
+- **方言禁止 (No Dialect):** All Kansai/regional dialect endings (やな/やわ/やろ/やで/やん/ねん/やんか/わな/じゃな/じゃろ/っちゃ etc.) are prohibited. Standard Japanese only.
 
 ## System Architecture
 The application follows a client-server architecture with a clear separation of concerns.
@@ -42,7 +44,7 @@ The application follows a client-server architecture with a clear separation of 
     - **`Auto-cleanup`:** Automatically triggers database cleanup upon adding new words.
     - **`DB Cleanup (6-step)`:** A comprehensive process including: (1) vowel pattern correction, (2) script-variant deduplication, (2b) ending-particle variant dedup (だわ/やわ/やな/だな/だぞ etc.), (3) containment dedup, (4) AI tail-dedup (PARALLEL=8, all-protected groups skipped), (5) AI semantic dedup (PARALLEL=8).
     - **`Protected Word System`:** Words surviving cleanup are marked as protected to prevent accidental deletion.
-    - **`Pre-insert char check`:** `quickCharCheck()` validates romaji before every DB insert — rejects invalid characters and words with < 60% expected vowel count (mora-based).
+    - **`Pre-insert char check`:** `quickCharCheck()` validates romaji before every DB insert — rejects invalid characters, words with < 60% expected vowel count (mora-based), and words violating taigen-dome (TAIGEN_VIOLATION_ENDINGS list: てる/てた/てく/でる/でた/ている/だろ/やろ/やな etc.).
     - **`文字検査 optimized`:** Protected words skipped, programmatic vowel-ratio pre-filter, only suspicious words sent to AI (BATCH=30, PARALLEL=8).
 - **NG Word Management:** A list of banned suffix/ending terms. Words ending with NG terms are blocked from generation and addition. Cleanup saves only the shared suffix to the NG list.
 - **`DB精査 (Scrutiny)`:** An AI-powered quality scan checks for vowel group mismatches, duplicate rhyme endings, and identifies prohibited/discriminatory/trademarked words.

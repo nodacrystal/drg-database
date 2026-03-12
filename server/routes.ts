@@ -118,9 +118,22 @@ function countMoraVowels(reading: string): number {
   return count;
 }
 
+const TAIGEN_VIOLATION_ENDINGS = [
+  "てる", "でる", "てた", "でた", "てく", "でく", "てない", "でない",
+  "ている", "でいる", "てきた", "てしまう", "てしまった",
+  "だろ", "やろ", "やな", "やわ", "やで", "やん", "ねん", "やんか",
+  "やんな", "わな", "じゃな", "じゃろ", "っちゃ",
+  "だわ", "だよ", "だね", "だぞ", "だか", "だぜ",
+];
+
 function quickCharCheck(words: WordEntry[]): WordEntry[] {
   return words.filter(w => {
     if (!w.reading || !w.romaji) return false;
+    const reading = w.reading;
+    if (TAIGEN_VIOLATION_ENDINGS.some(e => reading.endsWith(e))) {
+      console.log(`[CHAR-CHECK] 除外: "${w.word}" 体言止め違反 (語尾: ${reading})`);
+      return false;
+    }
     const normalizedRomaji = w.romaji
       .toLowerCase()
       .replace(/ā/g, "aa").replace(/ī/g, "ii").replace(/ū/g, "uu")
@@ -397,6 +410,7 @@ ${wordTypes}
 - 小学生でもわかる簡単な言葉のみ
 - 同じ助詞・助動詞で終わるワードを重複させるな（例：〜だろ、〜だろ は禁止）
 - 関西弁・方言語尾は絶対禁止（やな/やわ/やろ/やで/やん/ねん/やんか/やんな/わな/じゃな/じゃろ/っちゃ等）→ 標準語のみ使用
+- 【体言止め必須】各ワードは必ず名詞・名詞句で終わらせること。助詞（〜な/〜だ/〜わ/〜よ/〜ね）、助動詞（〜てる/〜てた/〜です/〜ます）、形容詞語尾（〜い）、動詞活用形（〜する/〜いる）で終わるワードは絶対禁止
 - ターゲット「${targetName}」に特化した内容
 - 造語OK（ただし意味が通じること）
 - ありきたりな表現を避け、独自性のある言葉を生成せよ
@@ -709,6 +723,118 @@ ${wordListForFilter}
       const deleted = await deleteWords(ids);
       res.json({ deleted, total: await getWordCount() });
     } catch { res.status(500).json({ error: "一括削除に失敗しました" }); }
+  });
+
+  app.post("/api/favorites/taigen-cleanup", async (req, res) => {
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    let disconnected = false;
+    res.on("close", () => { disconnected = true; if (heartbeat) clearInterval(heartbeat); });
+    try {
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders();
+      heartbeat = setInterval(() => { if (!disconnected) try { res.write(": heartbeat\n\n"); } catch {} }, 15000);
+      const send = (data: any) => { if (!disconnected) try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {} };
+
+      const allWords = await getAllWords();
+      send({ type: "progress", detail: `全${allWords.length}ワードを体言止めチェック開始...` });
+
+      const deleteIds = new Set<number>();
+
+      // STEP1: Programmatic — clear verb/adjective progressive endings
+      const PROG_ENDINGS = ["てる", "でる", "てた", "でた", "てく", "でく", "てない", "でない", "ている", "でいる", "てきた", "てしまう"];
+      let progCount = 0;
+      for (const w of allWords) {
+        const r = w.reading;
+        if (PROG_ENDINGS.some(e => r.endsWith(e))) {
+          deleteIds.add(w.id);
+          progCount++;
+        }
+      }
+      send({ type: "progress", detail: `STEP1完了: 動詞形語尾 ${progCount}件を特定` });
+
+      // STEP2: AI batch scan for non-taigen endings
+      if (disconnected) { if (heartbeat) clearInterval(heartbeat); return; }
+      const remaining = allWords.filter(w => !deleteIds.has(w.id));
+      const BATCH = 50;
+      const PARALLEL = 6;
+      let aiViolations = 0;
+      const batches: typeof allWords[] = [];
+      for (let i = 0; i < remaining.length; i += BATCH) batches.push(remaining.slice(i, i + BATCH));
+      send({ type: "progress", detail: `STEP2開始: 残${remaining.length}件をAIで体言チェック (${batches.length}バッチ)...` });
+
+      for (let round = 0; round < Math.ceil(batches.length / PARALLEL); round++) {
+        if (disconnected) break;
+        const roundBatches = batches.slice(round * PARALLEL, (round + 1) * PARALLEL);
+        const results = await Promise.allSettled(roundBatches.map(async (batch) => {
+          const lines = batch.map(w => `${w.word}|${w.reading}`).join("\n");
+          const prompt = `以下の日本語ラップ用悪口ワードリストの中で、末尾が「体言（名詞・名詞句）」でないものを全て洗い出せ。
+
+【体言（名詞）で終わる → 合格例】
+アホ面、ガラクタ、クズ野郎、ポンコツ、ゴミ人間、役立たず（名詞として定着）
+
+【体言でない → 違反例】
+・助詞で終わる: 〜だ、〜わ、〜な、〜よ、〜ね、〜ぞ、〜か
+・助動詞で終わる: 〜てる、〜てた、〜ている、〜ます、〜です
+・形容詞語尾: 〜い（うるさい、キモい、くさい 等）
+・動詞活用形: 〜する、〜いる、〜くる
+・方言語尾: 〜やな、〜やろ、〜ねん（既に削除済みのはずだが念のため）
+
+【重要】「役立たず」「たわけ」「このやろう」など慣用句として名詞化したものはOK。
+「〜ない」は「役に立たない」(形容詞的)はNG、「役立たず」(名詞)はOK。
+
+以下のリスト（ワード|よみ）から違反ワードを抽出：
+${lines}
+
+回答形式（違反がある場合のみ）：
+ワード|理由
+例：
+うるさいやつ|「やつ」で体言止めOK → これは合格
+くさい|形容詞語尾「い」で終わり体言でない
+腐ってる|動詞進行形「てる」で終わり体言でない
+
+違反なしの場合:「違反なし」とだけ回答。`;
+          const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 2048 });
+          const text = (result?.text || "").trim();
+          if (!text || text.includes("違反なし")) return [];
+          const violated: number[] = [];
+          for (const line of text.split("\n")) {
+            const word = line.split("|")[0]?.trim();
+            if (!word || word.length < 2) continue;
+            const match = batch.find(w => w.word === word || w.reading === word);
+            if (match) violated.push(match.id);
+          }
+          return violated;
+        }));
+        for (const r of results) {
+          if (r.status === "fulfilled") {
+            for (const id of r.value) { deleteIds.add(id); aiViolations++; }
+          }
+        }
+        send({ type: "progress", detail: `STEP2進捗: ${Math.min((round + 1) * PARALLEL, batches.length)}/${batches.length}バッチ完了, AI違反累計${aiViolations}件` });
+      }
+
+      send({ type: "progress", detail: `STEP2完了: AI体言違反 ${aiViolations}件` });
+
+      // STEP3: Delete all flagged
+      const idsToDelete = [...deleteIds];
+      send({ type: "progress", detail: `STEP3: 合計${idsToDelete.length}件を削除中...` });
+      let totalDeleted = 0;
+      for (let i = 0; i < idsToDelete.length; i += 500) {
+        const batch = idsToDelete.slice(i, i + 500);
+        totalDeleted += await deleteWords(batch);
+      }
+      const finalCount = await getWordCount();
+      send({ type: "done", detail: `体言止め整理完了: ${totalDeleted}件削除 → 残り${finalCount}語`, deleted: totalDeleted, remaining: finalCount });
+      if (heartbeat) clearInterval(heartbeat);
+      res.end();
+    } catch (err) {
+      console.error("[TAIGEN_CLEANUP]", err);
+      if (heartbeat) clearInterval(heartbeat);
+      if (!disconnected) try { res.write(`data: ${JSON.stringify({ type: "error", detail: String(err) })}\n\n`); res.end(); } catch {}
+    }
   });
 
   app.post("/api/favorites/scrutinize", async (req, res) => {
