@@ -130,6 +130,8 @@ export default function Home() {
   const [isGroupChecking, setIsGroupChecking] = useState(false);
   const [groupCheckLogs, setGroupCheckLogs] = useState<ProgressLog[]>([]);
   const [isAllCleaning, setIsAllCleaning] = useState(false);
+  const [dedupResult, setDedupResult] = useState<{ deleted: number; total: number; ngAdded: string[] } | null>(null);
+  const [groupCheckResult, setGroupCheckResult] = useState<{ checked: number; aiFixed: number; vowelFixed: number } | null>(null);
   const autoModeRef = useRef(false);
   const isCleaningUpRef = useRef(false);
   const cleanupPromiseRef = useRef<Promise<void> | null>(null);
@@ -488,7 +490,10 @@ export default function Home() {
             if (data.type === "progress") {
               setCleanupLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
             } else if (data.type === "result") {
-              toast({ title: "重複整理完了", description: `削除${data.deleted}個 (残り${data.total}語)` });
+              const ngAdded: string[] = data.ngAdded || [];
+              setDedupResult({ deleted: data.deleted, total: data.total, ngAdded });
+              const ngDesc = ngAdded.length > 0 ? `　NG追加(${ngAdded.length}): ${ngAdded.join("、")}` : "　NG追加なし";
+              toast({ title: "重複整理完了", description: `削除${data.deleted}個 (残り${data.total}語)${ngDesc}` });
               queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
               queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
               queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
@@ -529,7 +534,14 @@ export default function Home() {
             if (data.type === "progress") {
               setGroupCheckLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
             } else if (data.type === "result") {
-              toast({ title: "グループ検査完了", description: `${data.checked}語検査、ローマ字${data.aiFixed}語・グループ${data.vowelFixed}語修正` });
+              setGroupCheckResult({ checked: data.checked, aiFixed: data.aiFixed, vowelFixed: data.vowelFixed });
+              const noIssues = data.aiFixed === 0 && data.vowelFixed === 0;
+              toast({
+                title: "グループ検査完了",
+                description: noIssues
+                  ? `${data.checked}語を検査→問題なし`
+                  : `${data.checked}語検査　ローマ字修正:${data.aiFixed}語　グループ再配属:${data.vowelFixed}語`,
+              });
               queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
             } else if (data.type === "error") {
               toast({ title: "エラー", description: data.error, variant: "destructive" });
@@ -569,6 +581,8 @@ export default function Home() {
                 const data = JSON.parse(line.slice(6));
                 if (data.type === "progress") setCleanupLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
                 else if (data.type === "result") {
+                  const ngAdded: string[] = data.ngAdded || [];
+                  setDedupResult({ deleted: data.deleted, total: data.total, ngAdded });
                   queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
                   queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
                   queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
@@ -602,7 +616,14 @@ export default function Home() {
                 const data = JSON.parse(line.slice(6));
                 if (data.type === "progress") setGroupCheckLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
                 else if (data.type === "result") {
-                  toast({ title: "全て整理完了", description: `ローマ字${data.aiFixed}語・グループ${data.vowelFixed}語修正` });
+                  setGroupCheckResult({ checked: data.checked, aiFixed: data.aiFixed, vowelFixed: data.vowelFixed });
+                  const noIssues = data.aiFixed === 0 && data.vowelFixed === 0;
+                  toast({
+                    title: "全て整理完了",
+                    description: noIssues
+                      ? `グループ検査${data.checked}語→問題なし`
+                      : `グループ検査: ローマ字${data.aiFixed}語・再配属${data.vowelFixed}語修正`,
+                  });
                   queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
                   queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
                 }
@@ -1026,7 +1047,7 @@ export default function Home() {
                   <div className="flex items-center gap-2 mb-1">
                     <ScanLine className="w-4 h-4 text-sky-400" />
                     <span className="text-xs font-semibold text-sky-400">グループ検査ログ</span>
-                    {!isGroupChecking && <Button variant="ghost" size="sm" className="h-5 px-1 text-xs ml-auto" onClick={() => setGroupCheckLogs([])}><X className="w-3 h-3" /></Button>}
+                    {!isGroupChecking && <Button variant="ghost" size="sm" className="h-5 px-1 text-xs ml-auto" onClick={() => { setGroupCheckLogs([]); setGroupCheckResult(null); }}><X className="w-3 h-3" /></Button>}
                     {isGroupChecking && <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-400 ml-auto" />}
                   </div>
                   <div className="max-h-32 overflow-y-auto space-y-0.5">
@@ -1037,6 +1058,14 @@ export default function Home() {
                       </div>
                     ))}
                   </div>
+                  {!isGroupChecking && groupCheckResult && (
+                    <div className="mt-2 pt-2 border-t border-sky-500/20 text-xs font-semibold text-sky-300 flex gap-3">
+                      <span>検査: {groupCheckResult.checked}語</span>
+                      <span className={groupCheckResult.aiFixed > 0 ? "text-yellow-400" : ""}>ローマ字修正: {groupCheckResult.aiFixed}語</span>
+                      <span className={groupCheckResult.vowelFixed > 0 ? "text-orange-400" : ""}>グループ再配属: {groupCheckResult.vowelFixed}語</span>
+                      {groupCheckResult.aiFixed === 0 && groupCheckResult.vowelFixed === 0 && <span className="text-green-400">✓ 問題なし</span>}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1055,7 +1084,9 @@ export default function Home() {
                         })()}
                       </span>
                     )}
+                    {!lastCleanupTime && !isCleaningUp && dedupResult && <span className="ml-auto" />}
                     {isCleaningUp && <Loader2 className="w-3.5 h-3.5 animate-spin text-primary ml-auto" />}
+                    {!isCleaningUp && !isDedupRunning && <Button variant="ghost" size="sm" className="h-5 px-1 text-xs" onClick={() => { setCleanupLogs([]); setDedupResult(null); }}><X className="w-3 h-3" /></Button>}
                   </div>
                   <div className="max-h-32 overflow-y-auto space-y-0.5">
                     {cleanupLogs.map((log, i) => (
@@ -1066,6 +1097,18 @@ export default function Home() {
                       </div>
                     ))}
                   </div>
+                  {!isDedupRunning && dedupResult && (
+                    <div className="mt-2 pt-2 border-t border-border/30 text-xs font-semibold flex flex-wrap gap-3">
+                      <span className={dedupResult.deleted > 0 ? "text-red-400" : "text-muted-foreground"}>削除: {dedupResult.deleted}語</span>
+                      <span className="text-muted-foreground">残り: {dedupResult.total}語</span>
+                      {dedupResult.ngAdded.length > 0 ? (
+                        <span className="text-orange-400">NG追加({dedupResult.ngAdded.length}): {dedupResult.ngAdded.join("、")}</span>
+                      ) : (
+                        <span className="text-muted-foreground">NG追加なし</span>
+                      )}
+                      {dedupResult.deleted === 0 && <span className="text-green-400">✓ 重複なし</span>}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1084,9 +1127,14 @@ export default function Home() {
                 const renderRomajiChars = (romaji: string, hlIdx: number, hlColor: string, isSelected: boolean) => (
                   <span className="font-mono text-[9px] leading-tight mt-0.5 inline-flex flex-wrap justify-center">
                     {romaji.split("").map((ch, i) => {
-                      const isVowelOrN = "aeioun".includes(ch.toLowerCase());
+                      const lc = ch.toLowerCase();
+                      const isVowel = "aeiou".includes(lc);
+                      // 「ん」由来のnのみ母音扱い：次の文字が母音でない（または末尾）場合
+                      // 「なにぬねの」等の子音nは通常の子音扱い
+                      const isNN = lc === "n" && !"aeiou".includes((romaji[i + 1] ?? "").toLowerCase());
+                      const isVowelOrNN = isVowel || isNN;
                       const inHL = hlIdx >= 0 && i >= hlIdx;
-                      if (inHL && isVowelOrN) {
+                      if (inHL && isVowelOrNN) {
                         return <span key={i} style={{ fontSize: "11px" }} className={`font-bold ${isSelected ? "opacity-90" : hlColor}`}>{ch}</span>;
                       }
                       return <span key={i} className={isSelected ? "opacity-60" : "text-muted-foreground"}>{ch}</span>;

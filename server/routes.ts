@@ -904,16 +904,18 @@ JSONのみ出力。`;
       const vowelFixUpdates: { id: number; word: string; reading: string; romaji: string; vowels: string; charCount: number }[] = [];
 
       for (const w of allWords) {
-        // Use fixed romaji if available
         const effectiveRomaji = fixedRomajiMap.get(w.id) ?? w.romaji;
         const computedVowels = extractVowels(effectiveRomaji);
         if (computedVowels !== w.vowels) {
           vowelMismatchCount++;
+          const oldGroup = w.vowels.length >= 2 ? `*${w.vowels.slice(-2)}` : w.vowels;
+          const newGroup = computedVowels.length >= 2 ? `*${computedVowels.slice(-2)}` : computedVowels;
+          const groupChange = oldGroup !== newGroup ? ` [${oldGroup}→${newGroup}]` : ` [母音フィールド更新]`;
           vowelFixUpdates.push({
             id: w.id, word: w.word, reading: w.reading, romaji: effectiveRomaji,
             vowels: computedVowels, charCount: w.charCount,
           });
-          send("vowel", `グループ再配属:「${w.word}」 ${w.vowels}→${computedVowels}`);
+          send("vowel", `グループ再配属:「${w.word}」 ${w.vowels}→${computedVowels}${groupChange}`);
         }
       }
 
