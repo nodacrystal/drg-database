@@ -60,6 +60,39 @@ async function aiGenerate(contents: string, config?: any, maxRetries = 3): Promi
 
 interface WordEntry { word: string; reading: string; romaji: string; }
 
+const ENDING_PARTICLE_GROUPS: string[][] = [
+  ["だわ", "やな", "だな", "わな", "かな", "じゃな", "やんか", "だわな"],
+  ["だろ", "やろ", "じゃろ"],
+  ["だぜ", "やで", "じゃで"],
+  ["だよ", "やん"],
+  ["です", "っす"],
+  ["だ", "や", "じゃ"],
+];
+
+const ENDING_SUFFIX_GROUPS: string[][] = [
+  ["奴だ", "奴や", "奴じゃ", "奴だわ", "奴やな", "奴だな", "奴だろ", "奴やろ", "奴だぜ", "奴やで"],
+  ["男だ", "男や", "男だわ", "男やな", "男だな", "男だろ", "男やろ"],
+  ["女だ", "女や", "女だわ", "女やな", "女だな"],
+];
+
+function getEndingBase(reading: string): string | null {
+  for (const group of ENDING_SUFFIX_GROUPS) {
+    for (const ending of group) {
+      if (reading.endsWith(ending)) {
+        return reading.slice(0, -ending.length) + "@@" + ENDING_SUFFIX_GROUPS.indexOf(group);
+      }
+    }
+  }
+  for (const group of ENDING_PARTICLE_GROUPS) {
+    for (const ending of group) {
+      if (reading.endsWith(ending) && reading.length > ending.length + 1) {
+        return reading.slice(0, -ending.length) + "##" + ENDING_PARTICLE_GROUPS.indexOf(group);
+      }
+    }
+  }
+  return null;
+}
+
 function extractVowels(romaji: string): string {
   const r = romaji.toLowerCase();
   let result = "";
@@ -383,9 +416,26 @@ ${ngEndingNote}${extraExclusionNote}
         return words;
       };
 
-      let finalRawWords = await runStep1Generation(300);
+      const rawGenWords = await runStep1Generation(300);
       logTiming("step1-generate");
-      console.log(`[STEP1] Initial generation: ${finalRawWords.length} words, dup tails found: ${[...dupTailWords].join(",") || "none"}`);
+
+      const endingBaseMap = new Map<string, WordEntry>();
+      let endingDupCount = 0;
+      let finalRawWords: WordEntry[] = [];
+      for (const w of rawGenWords) {
+        const base = getEndingBase(w.reading);
+        if (base) {
+          if (endingBaseMap.has(base)) {
+            endingDupCount++;
+            const existing = endingBaseMap.get(base)!;
+            console.log(`[STEP1:ending-dedup] "${w.word}" → "${existing.word}" (同語尾パターン除去)`);
+            continue;
+          }
+          endingBaseMap.set(base, w);
+        }
+        finalRawWords.push(w);
+      }
+      console.log(`[STEP1] Initial: ${rawGenWords.length}, ending-dedup removed: ${endingDupCount}, dup tails: ${[...dupTailWords].join(",") || "none"}`);
 
       if (finalRawWords.length < 200) {
         const needed = 300 - finalRawWords.length;
@@ -1405,6 +1455,33 @@ ${chunk.map((e, idx) => `${idx + 1}. ${e}`).join("\n")}
       }
       send("check2", `表記違い重複: ${scriptDupCount}個`);
 
+      send("check2b", "チェック2b: 語尾バリエーション重複を検出中...");
+      let endingVarCount = 0;
+      const endingBaseGlobal = new Map<string, typeof items[0]>();
+      for (const [groupKey, groupWords] of Object.entries(buckets)) {
+        const alive = groupWords.filter(w => !toDelete.has(w.id));
+        for (const w of alive) {
+          const base = getEndingBase(w.reading);
+          if (!base) continue;
+          if (endingBaseGlobal.has(base)) {
+            const existing = endingBaseGlobal.get(base)!;
+            if (w.protected && !existing.protected) {
+              toDelete.add(existing.id);
+              endingBaseGlobal.set(base, w);
+              endingVarCount++;
+              console.log(`[CLEANUP:ending-var] "${existing.word}" → "${w.word}" (語尾バリエーション、確定優先) [${groupKey}]`);
+            } else {
+              toDelete.add(w.id);
+              endingVarCount++;
+              console.log(`[CLEANUP:ending-var] "${w.word}" → "${existing.word}" (語尾バリエーション) [${groupKey}]`);
+            }
+          } else {
+            endingBaseGlobal.set(base, w);
+          }
+        }
+      }
+      send("check2b", `語尾バリエーション重複: ${endingVarCount}個`);
+
       send("check3", "チェック3: 包含関係の重複を検出中...");
       let containCount = 0;
       for (const [groupKey, groupWords] of Object.entries(buckets)) {
@@ -1511,7 +1588,7 @@ ${wordList}`);
 
       if (heartbeat) clearInterval(heartbeat);
       const finalCount = await getWordCount();
-      const summary = `母音不一致${wrongVowelCount} + 表記重複${scriptDupCount} + 包含${containCount} + 末尾重複${check4Result.deletedCount} + 意味重複${semanticDupCount} = ${totalDeleted}個削除`;
+      const summary = `母音不一致${wrongVowelCount} + 表記重複${scriptDupCount} + 語尾バリエーション${endingVarCount} + 包含${containCount} + 末尾重複${check4Result.deletedCount} + 意味重複${semanticDupCount} = ${totalDeleted}個削除`;
       send("done", `整理完了: ${summary} (残り${finalCount}語, ${formatElapsed(Date.now() - startTime)})`);
 
       if (!disconnected) {

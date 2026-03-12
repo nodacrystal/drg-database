@@ -86,7 +86,7 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - **Manual paste-to-add**: DB tab uses `word/reading(romaji)` format; NG tab uses simple word list (改行/カンマ区切り)
 - Progress bar: shows count / 10,000 target
 - Age confirmation for level 8+
-- **DB Cleanup (5-step)**: (1) Wrong vowel pattern removal, (2) Script-variant dedup with enhanced normalization (っ removal, ー removal, を→お, small kana, word↔reading cross-match), (3) Containment dedup (word A inside word B → delete B), (4) Tail-character dedup with AI selection of strongest word. Special handling for 顔(ao) and 野郎(ou), (5) AI semantic dedup — Gemini detects meaning-similar duplicates within each vowel group (e.g. うっせーよ↔うるせえよ, 生きてる価値なし↔存在価値なし, kanji↔hiragana variants). 5 groups processed in parallel.
+- **DB Cleanup (6-step)**: (1) Wrong vowel pattern removal, (2) Script-variant dedup with enhanced normalization (っ removal, ー removal, を→お, small kana, word↔reading cross-match), (2b) Ending-particle variant dedup — detects words with same base but different ending particles (だわ/やな/だな/わな/かな/じゃな/やんか, 〜奴だ/〜奴や etc.), keeps first/protected, (3) Containment dedup (word A inside word B → delete B), (4) Tail-character dedup with AI selection of strongest word. Special handling for 顔(ao) and 野郎(ou), (5) AI semantic dedup — Gemini detects meaning-similar duplicates within each vowel group. 5 groups processed in parallel.
 - **DB精査 (Scrutiny)**: AI-powered quality scan of all DB words via SSE:
   - Check 1: Vowel group mismatch (stored vs recalculated from romaji)
   - Check 2: Duplicate rhyme endings (shared kanji/katakana word suffix 2+ chars, or shared reading suffix 4+ chars within same vowel bucket)
@@ -150,6 +150,7 @@ A Japanese rap battle tool that uses Gemini AI to generate diss words (≤10 cha
 - Dependency array only includes `toast` (stable) — not the functions themselves
 
 ## Recent Changes
+- 2026-03-12: Ending-particle dedup: `getEndingBase()` detects だわ/やな/だな/わな etc. variants; integrated in STEP1 generation post-processing AND cleanup check2b (語尾バリエーション重複)
 - 2026-03-12: Generation dedup: only within current batch (not DB), regenerate if < 200, exclude dup tail words
 - 2026-03-12: Group check: detailed group count logging, clearer result messages
 - 2026-03-12: Auto mode: cleanup wrapped in try/catch for resilience, error logging added
