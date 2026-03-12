@@ -10,6 +10,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import {
   Flame, Mic2, Sparkles, Zap, AlertTriangle, Loader2, Star,
   Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart, Plus, Wrench, Play, Search, Filter, ScanLine,
 } from "lucide-react";
@@ -117,8 +121,6 @@ export default function Home() {
   const [autoModeCount, setAutoModeCount] = useState(0);
   const [selectedFavIds, setSelectedFavIds] = useState<Set<number>>(new Set());
   const [selectedNgIds, setSelectedNgIds] = useState<Set<number>>(new Set());
-  const [isScrutinizing, setIsScrutinizing] = useState(false);
-  const [scrutinyLogs, setScrutinyLogs] = useState<ProgressLog[]>([]);
   const [lastGenTime, setLastGenTime] = useState<number | null>(null);
   const [prevGenTime, setPrevGenTime] = useState<number | null>(null);
   const [lastCleanupTime, setLastCleanupTime] = useState<number | null>(null);
@@ -127,12 +129,7 @@ export default function Home() {
   const [isDedupRunning, setIsDedupRunning] = useState(false);
   const [isGroupChecking, setIsGroupChecking] = useState(false);
   const [groupCheckLogs, setGroupCheckLogs] = useState<ProgressLog[]>([]);
-  const [isIntegrityChecking, setIsIntegrityChecking] = useState(false);
-  const [integrityResult, setIntegrityResult] = useState<{
-    total: number;
-    vowelIssues: { id: number; word: string; reading: string; romaji: string; expectedVowels: number; actualVowels: number }[];
-    romajiIssues: { id: number; word: string; romaji: string; storedVowels: string; computedVowels: string; hasInvalidChars: boolean }[];
-  } | null>(null);
+  const [isAllCleaning, setIsAllCleaning] = useState(false);
   const autoModeRef = useRef(false);
   const isCleaningUpRef = useRef(false);
   const cleanupPromiseRef = useRef<Promise<void> | null>(null);
@@ -387,46 +384,6 @@ export default function Home() {
     batchDeleteFavMutation.mutate(Array.from(selectedFavIds));
   }, [selectedFavIds, batchDeleteFavMutation]);
 
-  const runScrutiny = useCallback(async () => {
-    if (isScrutinizing) return;
-    setIsScrutinizing(true);
-    setScrutinyLogs([]);
-    setSelectedFavIds(new Set());
-    try {
-      const response = await fetch("/api/favorites/scrutinize", { method: "POST", headers: { "Content-Type": "application/json" } });
-      if (!response.ok) throw new Error("精査に失敗しました");
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error("No reader");
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const data = JSON.parse(line.slice(6));
-            if (data.type === "progress") {
-              setScrutinyLogs(prev => [...prev, { time: "", detail: data.detail, elapsed: data.elapsed || "" }]);
-            } else if (data.type === "result") {
-              const ids = new Set<number>(data.flagged.map((f: { id: number }) => f.id));
-              setSelectedFavIds(ids);
-              const s = data.summary;
-              toast({ title: "精査完了", description: `${ids.size}件を検出（母音${s.vowelMismatch}・重複${s.duplicateEndings}・AI${s.aiDetected}）` });
-            } else if (data.type === "error") {
-              toast({ title: "エラー", description: data.error, variant: "destructive" });
-            }
-          } catch {}
-        }
-      }
-    } catch {
-      toast({ title: "エラー", description: "精査に失敗しました", variant: "destructive" });
-    }
-    setIsScrutinizing(false);
-  }, [isScrutinizing, toast]);
 
   const pasteFavMutation = useMutation({
     mutationFn: async (text: string) => { const res = await apiRequest("POST", "/api/favorites/paste", { text }); return res.json(); },
@@ -572,7 +529,7 @@ export default function Home() {
             if (data.type === "progress") {
               setGroupCheckLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
             } else if (data.type === "result") {
-              toast({ title: "グループ検査完了", description: `${data.checked}語チェック、${data.fixed}語修正` });
+              toast({ title: "グループ検査完了", description: `${data.checked}語検査、ローマ字${data.aiFixed}語・グループ${data.vowelFixed}語修正` });
               queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
             } else if (data.type === "error") {
               toast({ title: "エラー", description: data.error, variant: "destructive" });
@@ -586,22 +543,78 @@ export default function Home() {
     setIsGroupChecking(false);
   }, [isGroupChecking, toast, queryClient]);
 
-  const runIntegrityCheck = useCallback(async () => {
-    if (isIntegrityChecking) return;
-    setIsIntegrityChecking(true);
-    setIntegrityResult(null);
+  const runAllCleanup = useCallback(async () => {
+    if (isAllCleaning || isDedupRunning || isGroupChecking || isCleaningUp) return;
+    setIsAllCleaning(true);
+    setCleanupLogs([]);
+    setGroupCheckLogs([]);
+    // Step 1: dedup
+    setIsDedupRunning(true);
     try {
-      const response = await fetch("/api/favorites/integrity-check");
-      if (!response.ok) throw new Error("整合性チェックに失敗しました");
-      const data = await response.json();
-      setIntegrityResult(data);
-      const total = data.vowelIssues.length + data.romajiIssues.length;
-      toast({ title: "整合性チェック完了", description: total === 0 ? "問題は検出されませんでした" : `${total}件の問題を検出しました` });
-    } catch {
-      toast({ title: "エラー", description: "整合性チェックに失敗しました", variant: "destructive" });
-    }
-    setIsIntegrityChecking(false);
-  }, [isIntegrityChecking, toast]);
+      const response = await fetch("/api/favorites/dedup-cleanup", { method: "POST", headers: { "Content-Type": "application/json" } });
+      if (response.ok) {
+        const reader = response.body?.getReader();
+        if (reader) {
+          const decoder = new TextDecoder();
+          let buffer = "";
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || "";
+            for (const line of lines) {
+              if (!line.startsWith("data: ")) continue;
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (data.type === "progress") setCleanupLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
+                else if (data.type === "result") {
+                  queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
+                  queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
+                  queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
+                  queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
+                }
+              } catch {}
+            }
+          }
+        }
+      }
+    } catch {}
+    setIsDedupRunning(false);
+    // Step 2: group-check
+    setIsGroupChecking(true);
+    try {
+      const response = await fetch("/api/favorites/group-check", { method: "POST", headers: { "Content-Type": "application/json" } });
+      if (response.ok) {
+        const reader = response.body?.getReader();
+        if (reader) {
+          const decoder = new TextDecoder();
+          let buffer = "";
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || "";
+            for (const line of lines) {
+              if (!line.startsWith("data: ")) continue;
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (data.type === "progress") setGroupCheckLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
+                else if (data.type === "result") {
+                  toast({ title: "全て整理完了", description: `ローマ字${data.aiFixed}語・グループ${data.vowelFixed}語修正` });
+                  queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
+                  queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
+                }
+              } catch {}
+            }
+          }
+        }
+      }
+    } catch {}
+    setIsGroupChecking(false);
+    setIsAllCleaning(false);
+  }, [isAllCleaning, isDedupRunning, isGroupChecking, isCleaningUp, toast, queryClient]);
 
   const addWordsDirect = useCallback(async (words: WordEntry[]): Promise<{ added: number; total: number }> => {
     if (words.length === 0) return { added: 0, total: 0 };
@@ -942,29 +955,45 @@ export default function Home() {
                   <Badge variant="secondary">{totalCount.toLocaleString()}件</Badge>
                 </div>
                 <div className="flex gap-2">
-                  <Button variant="outline" size="sm" onClick={runScrutiny} disabled={isScrutinizing || isCleaningUp || totalCount === 0} data-testid="button-scrutinize-favorites">
-                    {isScrutinizing ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Search className="w-3.5 h-3.5 mr-1" />}
-                    精査
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={runCleanup} disabled={isCleaningUp || isDedupRunning || isScrutinizing || totalCount === 0} data-testid="button-cleanup-favorites">
-                    {isCleaningUp ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Wrench className="w-3.5 h-3.5 mr-1" />}
-                    整理
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={runDedupCleanup} disabled={isDedupRunning || isCleaningUp || isScrutinizing || isGroupChecking || totalCount === 0} data-testid="button-dedup-cleanup">
-                    {isDedupRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Filter className="w-3.5 h-3.5 mr-1" />}
-                    重複整理
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={runGroupCheck} disabled={isGroupChecking || isCleaningUp || isDedupRunning || isScrutinizing || isIntegrityChecking || totalCount === 0} data-testid="button-group-check">
-                    {isGroupChecking ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <ScanLine className="w-3.5 h-3.5 mr-1" />}
-                    グループ検査
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={runIntegrityCheck} disabled={isIntegrityChecking || isGroupChecking || isCleaningUp || isDedupRunning || isScrutinizing || totalCount === 0} data-testid="button-integrity-check">
-                    {isIntegrityChecking ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <CheckSquare className="w-3.5 h-3.5 mr-1" />}
-                    整合性チェック
-                  </Button>
                   <Button variant="outline" size="sm" onClick={copyFavorites} data-testid="button-copy-favorites"><Copy className="w-3.5 h-3.5 mr-1" />エクスポート</Button>
-                  <Button variant="outline" size="sm" onClick={() => clearFavMutation.mutate()} disabled={clearFavMutation.isPending} data-testid="button-clear-favorites"><Trash2 className="w-3.5 h-3.5 mr-1" />全削除</Button>
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button variant="destructive" size="sm" disabled={clearFavMutation.isPending || totalCount === 0} data-testid="button-clear-favorites">
+                        {clearFavMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Trash2 className="w-3.5 h-3.5 mr-1" />}
+                        全削除
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>データベースを全削除しますか？</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          現在の{totalCount.toLocaleString()}件のワードが全て削除されます。この操作は取り消せません。
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>キャンセル</AlertDialogCancel>
+                        <AlertDialogAction onClick={() => clearFavMutation.mutate()} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+                          削除する
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
                 </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" size="sm" onClick={runDedupCleanup} disabled={isDedupRunning || isCleaningUp || isGroupChecking || isAllCleaning || totalCount === 0} data-testid="button-dedup-cleanup">
+                  {isDedupRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Filter className="w-3.5 h-3.5 mr-1" />}
+                  重複整理
+                </Button>
+                <Button variant="outline" size="sm" onClick={runGroupCheck} disabled={isGroupChecking || isCleaningUp || isDedupRunning || isAllCleaning || totalCount === 0} data-testid="button-group-check">
+                  {isGroupChecking ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <ScanLine className="w-3.5 h-3.5 mr-1" />}
+                  グループ検査
+                </Button>
+                <Button variant="default" size="sm" onClick={runAllCleanup} disabled={isAllCleaning || isDedupRunning || isGroupChecking || isCleaningUp || totalCount === 0} data-testid="button-all-cleanup">
+                  {isAllCleaning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Wrench className="w-3.5 h-3.5 mr-1" />}
+                  全て整理
+                </Button>
               </div>
 
               <div className="flex flex-wrap gap-1.5" data-testid="rhyme-filter-bar">
@@ -989,72 +1018,6 @@ export default function Home() {
                     削除
                   </Button>
                   <Button variant="ghost" size="sm" onClick={() => setSelectedFavIds(new Set())} data-testid="button-clear-selection"><X className="w-3.5 h-3.5 mr-1" />選択解除</Button>
-                </div>
-              )}
-
-              {scrutinyLogs.length > 0 && (
-                <div className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3 space-y-1" data-testid="scrutiny-logs">
-                  <div className="flex items-center gap-2 mb-1">
-                    <Search className="w-4 h-4 text-amber-500" />
-                    <span className="text-xs font-semibold text-amber-600 dark:text-amber-400">精査ログ</span>
-                    {!isScrutinizing && <Button variant="ghost" size="sm" className="h-5 px-1 text-xs" onClick={() => setScrutinyLogs([])}><X className="w-3 h-3" /></Button>}
-                  </div>
-                  <div className="max-h-32 overflow-y-auto space-y-0.5">
-                    {scrutinyLogs.map((log, i) => (
-                      <div key={i} className="text-xs flex gap-2">
-                        <span className="text-muted-foreground font-mono shrink-0">[{log.elapsed}]</span>
-                        <span>{log.detail}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {integrityResult && (
-                <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 space-y-2" data-testid="integrity-result">
-                  <div className="flex items-center gap-2">
-                    <CheckSquare className="w-4 h-4 text-emerald-400" />
-                    <span className="text-xs font-semibold text-emerald-400">整合性チェック結果 ({integrityResult.total}語検査)</span>
-                    <Button variant="ghost" size="sm" className="h-5 px-1 text-xs ml-auto" onClick={() => setIntegrityResult(null)}><X className="w-3 h-3" /></Button>
-                  </div>
-
-                  {integrityResult.vowelIssues.length === 0 && integrityResult.romajiIssues.length === 0 ? (
-                    <p className="text-xs text-emerald-500">✓ 問題は検出されませんでした</p>
-                  ) : (
-                    <>
-                      {integrityResult.vowelIssues.length > 0 && (
-                        <div>
-                          <p className="text-xs font-semibold text-amber-400 mb-1">⚠ 母音不足 ({integrityResult.vowelIssues.length}件)</p>
-                          <div className="max-h-32 overflow-y-auto space-y-0.5">
-                            {integrityResult.vowelIssues.map(issue => (
-                              <div key={issue.id} className="text-xs flex gap-1.5 items-baseline">
-                                <span className="font-medium shrink-0">「{issue.word}」</span>
-                                <span className="text-muted-foreground font-mono">{issue.romaji}</span>
-                                <span className="text-amber-400 shrink-0">母音{issue.actualVowels}/{issue.expectedVowels}</span>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                      {integrityResult.romajiIssues.length > 0 && (
-                        <div>
-                          <p className="text-xs font-semibold text-red-400 mb-1">✗ ローマ字不整合 ({integrityResult.romajiIssues.length}件)</p>
-                          <div className="max-h-32 overflow-y-auto space-y-0.5">
-                            {integrityResult.romajiIssues.map(issue => (
-                              <div key={issue.id} className="text-xs flex gap-1.5 items-baseline flex-wrap">
-                                <span className="font-medium shrink-0">「{issue.word}」</span>
-                                <span className="text-muted-foreground font-mono">{issue.romaji}</span>
-                                {issue.hasInvalidChars && <span className="text-red-400 shrink-0">不正文字</span>}
-                                {issue.storedVowels !== issue.computedVowels && (
-                                  <span className="text-red-400 shrink-0 font-mono">{issue.storedVowels}→{issue.computedVowels}</span>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </>
-                  )}
                 </div>
               )}
 

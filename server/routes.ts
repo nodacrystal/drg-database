@@ -829,30 +829,37 @@ ${wordList}
       const allWords = await getAllWords();
       const BATCH = 30;
       const PARALLEL = 5;
-      let fixed = 0;
+      let aiFixed = 0;
+      let vowelFixed = 0;
       let checked = 0;
 
+      // Step 1: AI romaji/reading validation
       type WordFix = { id: number; word: string; reading: string; romaji: string };
       const fixQueue: WordFix[] = [];
 
+      send("phase1", `ステップ1: アルファベット表記確認 (${allWords.length}語)...`);
       for (let b = 0; b < allWords.length; b += BATCH * PARALLEL) {
+        if (disconnected) break;
         const superBatch = allWords.slice(b, b + BATCH * PARALLEL);
         const batches: typeof allWords[] = [];
         for (let i = 0; i < superBatch.length; i += BATCH) batches.push(superBatch.slice(i, i + BATCH));
 
         const results = await Promise.all(batches.map(async batch => {
-          const wordList = batch.map(w => `ID:${w.id} 表記:${w.word} 読み:${w.reading} ローマ字:${w.romaji} 母音:${w.vowels}`).join("\n");
-          const prompt = `以下の日本語ワードリストについて、各ワードの以下を確認し修正せよ:
-1. 読み方(reading)がワードの正確なひらがな読みになっているか
-2. ローマ字(romaji)が読み方のヘボン式ローマ字として正確か（長音・促音・撥音に注意）
-3. 問題がある場合のみJSONで修正内容を出力
+          const wordList = batch.map(w => `ID:${w.id} 表記:${w.word} 読み:${w.reading} ローマ字:${w.romaji}`).join("\n");
+          const prompt = `以下の日本語ワードについて読み方とヘボン式ローマ字を厳密に検証せよ。
+ルール:
+- 促音(っ/ッ)=子音重複(kk,tt,ss等)
+- 撥音(ん/ン)=n(母音前はnn)
+- 長音(ー)=前の母音を繰り返す
+- 小書き(ゃゅょ)=前の子音と合体(sha,chi,fu等)
+- 読みとローマ字が厳密に対応しているか確認
 
-ワード一覧:
+ワード:
 ${wordList}
 
-問題がある場合のみ以下のJSON配列で出力（問題なければ空配列[]）:
-[{"id":数字,"reading":"正しい読み","romaji":"正しいローマ字"}]
-説明不要、JSONのみ出力。`;
+問題がある場合のみJSON配列で出力(問題なければ空配列[]):
+[{"id":数字,"reading":"正しいひらがな","romaji":"正しいローマ字"}]
+JSONのみ出力。`;
           try {
             const result = await aiGenerate(prompt);
             const text = result.text || "";
@@ -867,28 +874,57 @@ ${wordList}
           for (const fix of fixes) {
             const orig = allWords.find(w => w.id === fix.id);
             if (!orig) continue;
-            const newRomaji = fix.romaji || orig.romaji;
+            const newRomaji = (fix.romaji || orig.romaji).toLowerCase().replace(/[^a-z\-]/g, "");
             const newReading = fix.reading || orig.reading;
-            const newVowels = extractVowels(newRomaji);
             if (newRomaji !== orig.romaji || newReading !== orig.reading) {
               fixQueue.push({ id: fix.id, word: orig.word, reading: newReading, romaji: newRomaji });
-              send("check", `修正:「${orig.word}」 ${orig.romaji}→${newRomaji}`);
+              send("fix", `ローマ字修正:「${orig.word}」 ${orig.romaji}→${newRomaji}`);
             }
           }
         }
-        send("progress", `${checked}/${allWords.length}語チェック完了...`);
+        if (checked % (BATCH * PARALLEL) === 0) {
+          send("progress", `ステップ1: ${checked}/${allWords.length}語確認済み...`);
+        }
       }
 
+      // Apply AI fixes
+      const fixedRomajiMap = new Map<number, string>();
       for (const fix of fixQueue) {
         const orig = allWords.find(w => w.id === fix.id)!;
         const newVowels = extractVowels(fix.romaji);
         await updateWord(fix.id, { word: orig.word, reading: fix.reading, romaji: fix.romaji, vowels: newVowels, charCount: fix.reading.length });
-        fixed++;
+        fixedRomajiMap.set(fix.id, fix.romaji);
+        aiFixed++;
+      }
+      send("phase1done", `ステップ1完了: ${aiFixed}語のローマ字を修正`);
+
+      // Step 2: Local vowel/group consistency check (no exceptions)
+      send("phase2", "ステップ2: グループの母音とワードの母音の整合性を検査中...");
+      let vowelMismatchCount = 0;
+      const vowelFixUpdates: { id: number; word: string; reading: string; romaji: string; vowels: string; charCount: number }[] = [];
+
+      for (const w of allWords) {
+        // Use fixed romaji if available
+        const effectiveRomaji = fixedRomajiMap.get(w.id) ?? w.romaji;
+        const computedVowels = extractVowels(effectiveRomaji);
+        if (computedVowels !== w.vowels) {
+          vowelMismatchCount++;
+          vowelFixUpdates.push({
+            id: w.id, word: w.word, reading: w.reading, romaji: effectiveRomaji,
+            vowels: computedVowels, charCount: w.charCount,
+          });
+          send("vowel", `グループ再配属:「${w.word}」 ${w.vowels}→${computedVowels}`);
+        }
       }
 
-      send("done", `グループ検査完了: ${checked}語チェック、${fixed}語修正`);
+      for (const upd of vowelFixUpdates) {
+        await updateWord(upd.id, { word: upd.word, reading: upd.reading, romaji: upd.romaji, vowels: upd.vowels, charCount: upd.charCount });
+        vowelFixed++;
+      }
+
+      send("done", `グループ検査完了: ${allWords.length}語検査、ローマ字${aiFixed}語修正、グループ再配属${vowelFixed}語`);
       const elapsedMs = Date.now() - startTime;
-      if (!disconnected) res.write(`data: ${JSON.stringify({ type: "result", checked, fixed, elapsedMs })}\n\n`);
+      if (!disconnected) res.write(`data: ${JSON.stringify({ type: "result", checked: allWords.length, aiFixed, vowelFixed, elapsedMs })}\n\n`);
     } catch (error) {
       console.error("Group check error:", error);
       if (!disconnected) res.write(`data: ${JSON.stringify({ type: "error", error: "グループ検査に失敗しました" })}\n\n`);
@@ -971,7 +1007,7 @@ ${wordList}
 
     const groupsToScan = Object.entries(buckets)
       .map(([key, words]) => ({ key, words: words.filter(w => !toDelete.has(w.id)) }))
-      .filter(g => g.words.length >= 3);
+      .filter(g => g.words.length >= 2);
 
     const detectTasks: { key: string; words: TailDupItem[] }[] = [];
     for (const g of groupsToScan) {
@@ -1093,13 +1129,8 @@ JSON配列のみ出力（説明不要）:
       }
 
       if (result.ngSuffixes.size > 0) {
-        const existingNg = await getNgWordStrings();
-        const existingSet = new Set(existingNg);
-        const newNgs = [...result.ngSuffixes].filter(ng => !existingSet.has(ng));
-        if (newNgs.length > 0) {
-          await addNgWords(newNgs.map(ng => ({ word: ng, reading: "", romaji: "" })));
-        }
-        send("dedup", `NG単語追加: ${newNgs.length}個 (${newNgs.join(", ")})`);
+        const added = await addNgWords([...result.ngSuffixes].map(ng => ({ word: ng, reading: "", romaji: "" })));
+        send("dedup", `NG単語追加: ${added}個 (${[...result.ngSuffixes].join(", ")})`);
       }
 
       const remaining = await getWordCount();
