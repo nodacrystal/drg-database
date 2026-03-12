@@ -61,10 +61,10 @@ async function aiGenerate(contents: string, config?: any, maxRetries = 3): Promi
 interface WordEntry { word: string; reading: string; romaji: string; }
 
 const ENDING_PARTICLE_GROUPS: string[][] = [
-  ["だわ", "やな", "だな", "わな", "かな", "じゃな", "やんか", "だわな"],
-  ["だろ", "やろ", "じゃろ"],
-  ["だぜ", "やで", "じゃで"],
-  ["だよ", "やん"],
+  ["だわな", "だわ", "やわ", "やな", "だな", "わな", "かな", "じゃな", "やんか", "やんな", "やんや", "だなあ", "やなあ"],
+  ["だろな", "だろ", "やろな", "やろ", "じゃろ"],
+  ["だぜ", "やで", "じゃで", "だぞ"],
+  ["だよな", "だよ", "やん"],
   ["です", "っす"],
   ["だ", "や", "じゃ"],
 ];
@@ -107,6 +107,39 @@ function extractVowels(romaji: string): string {
     }
   }
   return result;
+}
+
+function countMoraVowels(reading: string): number {
+  const skipSet = new Set(["ん","っ","ゃ","ゅ","ょ","ぁ","ぃ","ぅ","ぇ","ぉ","ャ","ュ","ョ","ァ","ィ","ゥ","ェ","ォ","ッ","ン","ー","・"," ","　"]);
+  let count = 0;
+  for (const ch of reading) {
+    if (!skipSet.has(ch) && /[\u3040-\u30ff]/.test(ch)) count++;
+  }
+  return count;
+}
+
+function quickCharCheck(words: WordEntry[]): WordEntry[] {
+  return words.filter(w => {
+    if (!w.reading || !w.romaji) return false;
+    const normalizedRomaji = w.romaji
+      .toLowerCase()
+      .replace(/ā/g, "aa").replace(/ī/g, "ii").replace(/ū/g, "uu")
+      .replace(/ē/g, "ee").replace(/ō/g, "oo")
+      .replace(/'/g, "");
+    if (/[^a-z\-]/.test(normalizedRomaji)) {
+      console.log(`[CHAR-CHECK] 除外: "${w.word}" ローマ字に不正文字: ${w.romaji}`);
+      return false;
+    }
+    const expectedVowels = countMoraVowels(w.reading);
+    if (expectedVowels === 0) return true;
+    const actualVowels = (normalizedRomaji.match(/[aeiou]/g) || []).length;
+    const ratio = actualVowels / expectedVowels;
+    if (ratio < 0.6) {
+      console.log(`[CHAR-CHECK] 除外: "${w.word}" 読み:${w.reading} ローマ字:${w.romaji} 期待母音:${expectedVowels} 実際:${actualVowels}`);
+      return false;
+    }
+    return true;
+  });
 }
 
 function parseWordEntries(section: string): WordEntry[] {
@@ -649,7 +682,8 @@ ${wordListForFilter}
       const parsed = wordArraySchema.safeParse(req.body);
       if (!parsed.success) return res.status(400).json({ error: "不正なデータです" });
       const ngList = await getNgWordStrings();
-      const filtered = parsed.data.words.filter(w => !ngList.some(ng => w.word.endsWith(ng)));
+      const ngFiltered = parsed.data.words.filter(w => !ngList.some(ng => w.word.endsWith(ng)));
+      const filtered = quickCharCheck(ngFiltered);
       const added = await addWords(filtered.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji, vowels: extractVowels(w.romaji), charCount: w.reading.length })));
       res.json({ added, total: await getWordCount() });
     } catch (error) { res.status(500).json({ error: "お気に入りの追加に失敗しました" }); }
@@ -973,19 +1007,33 @@ ${wordList}
 
       send("init", "文字検査: 全ワードを取得中...");
       const allWords = await getAllWords();
-      const BATCH = 20;
-      const PARALLEL = 5;
       let fixed = 0;
-      let checked = 0;
 
       type CharFix = { id: number; reading: string; romaji: string; issues: string };
       const fixQueue: CharFix[] = [];
 
-      send("start", `文字検査開始 (${allWords.length}語)...`);
+      // Step 1: プログラム的チェック — 確定済みワードはスキップ、怪しいワードのみAIへ
+      const protectedWords = allWords.filter(w => w.protected);
+      const unprotectedWords = allWords.filter(w => !w.protected);
 
-      for (let b = 0; b < allWords.length; b += BATCH * PARALLEL) {
+      const suspiciousWords = unprotectedWords.filter(w => {
+        const expected = countMoraVowels(w.reading);
+        const actual = (w.romaji.toLowerCase().match(/[aeiou]/g) || []).length;
+        if (expected > 0 && actual / expected < 0.7) return true;
+        if (/[^a-z\-]/.test(w.romaji.toLowerCase())) return true;
+        return false;
+      });
+
+      send("start", `文字検査開始: ${allWords.length}語中 確定済み${protectedWords.length}語スキップ, 未確定${unprotectedWords.length}語検査 (要注意${suspiciousWords.length}語をAI検査)`);
+
+      // Step 2: 要注意ワードのみAI検査
+      const BATCH = 30;
+      const PARALLEL = 8;
+      let checked = 0;
+
+      for (let b = 0; b < suspiciousWords.length; b += BATCH * PARALLEL) {
         if (disconnected) break;
-        const superBatch = allWords.slice(b, b + BATCH * PARALLEL);
+        const superBatch = suspiciousWords.slice(b, b + BATCH * PARALLEL);
         const batches: typeof allWords[] = [];
         for (let i = 0; i < superBatch.length; i += BATCH) batches.push(superBatch.slice(i, i + BATCH));
 
@@ -1036,8 +1084,8 @@ JSONのみ出力（説明文・コードブロック不要）。`;
             }
           }
         }
-        if (checked % (BATCH * PARALLEL) === 0 || checked === allWords.length) {
-          send("progress", `${checked}/${allWords.length}語検査済み...`);
+        if (suspiciousWords.length > 0) {
+          send("progress", `${Math.min(checked, suspiciousWords.length)}/${suspiciousWords.length}語AI検査済み...`);
         }
       }
 
@@ -1135,11 +1183,11 @@ JSONのみ出力（説明文・コードブロック不要）。`;
   ): Promise<{ deletedCount: number; ngSuffixes: Set<string> }> {
     let tailDupCount = 0;
     const ngSuffixes = new Set<string>();
-    const PARALLEL = 5;
+    const PARALLEL = 8;
 
     const groupsToScan = Object.entries(buckets)
       .map(([key, words]) => ({ key, words: words.filter(w => !toDelete.has(w.id)) }))
-      .filter(g => g.words.length >= 2);
+      .filter(g => g.words.length >= 2 && g.words.some(w => !w.protected));
 
     const detectTasks: { key: string; words: TailDupItem[] }[] = [];
     for (const g of groupsToScan) {
@@ -1199,7 +1247,7 @@ JSON配列のみ出力（説明不要）:
     }
     const validEndings = new Set<string>();
     if (allCandidateEndings.length > 0) {
-      const VBATCH = 50;
+      const VBATCH = 100;
       for (let i = 0; i < allCandidateEndings.length; i += VBATCH) {
         const chunk = allCandidateEndings.slice(i, i + VBATCH);
         const validationPrompt = `以下の日本語の語について、「単独で辞書に載り得る完全な単語」かどうかを判定せよ。
@@ -1516,7 +1564,7 @@ ${chunk.map((e, idx) => `${idx + 1}. ${e}`).join("\n")}
       const groupsWithNewWords = groupsToCheck.filter(g => g.words.some(w => !w.protected));
       send("check5", `${groupsWithNewWords.length}/${groupsToCheck.length}グループに新規ワードあり`);
 
-      const SEMANTIC_PARALLEL = 5;
+      const SEMANTIC_PARALLEL = 8;
       for (let b = 0; b < groupsWithNewWords.length; b += SEMANTIC_PARALLEL) {
         const batch = groupsWithNewWords.slice(b, b + SEMANTIC_PARALLEL);
         await Promise.all(batch.map(async (g) => {
