@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import {
   Flame, Mic2, Sparkles, Zap, AlertTriangle, Loader2, Star,
-  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Heart, Plus, Wrench, Play, Search, Filter, ScanLine, Languages, Download, Upload, FileText, FileJson,
+  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Plus, Wrench, Play, Filter, Languages, Download, Upload, FileText, FileJson,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -53,22 +53,15 @@ const PATTERN_COLORS: Record<string, string> = {
 };
 
 const LEVEL_INFO: Record<number, { label: string; color: string }> = {
-  1: { label: "リスペクト", color: "text-blue-400" },
-  2: { label: "称賛", color: "text-cyan-400" },
-  3: { label: "親しみ", color: "text-green-400" },
-  4: { label: "軽口", color: "text-lime-400" },
-  5: { label: "毒舌", color: "text-yellow-400" },
-  6: { label: "辛辣", color: "text-amber-400" },
-  7: { label: "攻撃", color: "text-orange-400" },
-  8: { label: "過激", color: "text-red-400" },
-  9: { label: "暴言", color: "text-red-500" },
-  10: { label: "放禁", color: "text-red-600" },
+  1: { label: "毒舌", color: "text-yellow-400" },
+  2: { label: "辛辣", color: "text-orange-400" },
+  3: { label: "過激", color: "text-red-400" },
+  4: { label: "暴言", color: "text-red-500" },
+  5: { label: "禁忌🔞", color: "text-purple-400" },
 };
 
 const LEVEL_BAR_COLORS: Record<number, string> = {
-  1: "bg-blue-500", 2: "bg-cyan-500", 3: "bg-green-500", 4: "bg-lime-500",
-  5: "bg-yellow-500", 6: "bg-amber-500", 7: "bg-orange-500", 8: "bg-red-400",
-  9: "bg-red-500", 10: "bg-red-600",
+  1: "bg-yellow-500", 2: "bg-orange-500", 3: "bg-red-400", 4: "bg-red-500", 5: "bg-purple-500",
 };
 
 function getRomajiHighlightIndex(romaji: string, suffixLen: number): number {
@@ -102,7 +95,7 @@ export default function Home() {
   const queryClient = useQueryClient();
 
   const [target, setTarget] = useState("");
-  const [level, setLevel] = useState(5);
+  const [level, setLevel] = useState(3);
   const [ageConfirmed, setAgeConfirmed] = useState(false);
   const [genResult, setGenResult] = useState<GenerationResult | null>(null);
   const [activeTab, setActiveTab] = useState<"gen" | "fav" | "ng">("gen");
@@ -127,20 +120,15 @@ export default function Home() {
   const [prevCleanupTime, setPrevCleanupTime] = useState<number | null>(null);
   const [rhymeFilter, setRhymeFilter] = useState<RhymeFilter>("all");
   const [isDedupRunning, setIsDedupRunning] = useState(false);
-  const [isGroupChecking, setIsGroupChecking] = useState(false);
-  const [groupCheckLogs, setGroupCheckLogs] = useState<ProgressLog[]>([]);
   const [isAllCleaning, setIsAllCleaning] = useState(false);
   const [dedupResult, setDedupResult] = useState<{ deleted: number; total: number; ngAdded: string[] } | null>(null);
-  const [groupCheckResult, setGroupCheckResult] = useState<{ checked: number; vowelFixed: number } | null>(null);
   const [isCharChecking, setIsCharChecking] = useState(false);
   const [charCheckLogs, setCharCheckLogs] = useState<ProgressLog[]>([]);
   const [charCheckResult, setCharCheckResult] = useState<{ checked: number; fixed: number } | null>(null);
   const [dedupSecs, setDedupSecs] = useState(0);
   const [charCheckSecs, setCharCheckSecs] = useState(0);
-  const [groupCheckSecs, setGroupCheckSecs] = useState(0);
   const dedupTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const charCheckTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const groupCheckTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoModeRef = useRef(false);
   const isCleaningUpRef = useRef(false);
   const cleanupPromiseRef = useRef<Promise<void> | null>(null);
@@ -157,7 +145,6 @@ export default function Home() {
     if (timerRef.current) clearInterval(timerRef.current);
     if (dedupTimerRef.current) clearInterval(dedupTimerRef.current);
     if (charCheckTimerRef.current) clearInterval(charCheckTimerRef.current);
-    if (groupCheckTimerRef.current) clearInterval(groupCheckTimerRef.current);
   }; }, []);
 
   const startSecsTimer = (setter: (n: number) => void, ref: React.MutableRefObject<ReturnType<typeof setInterval> | null>) => {
@@ -570,35 +557,6 @@ export default function Home() {
     }
   }, []);
 
-  const runGroupCheck = useCallback(async () => {
-    if (isGroupChecking) return;
-    setIsGroupChecking(true);
-    setGroupCheckLogs([]);
-    setGroupCheckResult(null);
-    startSecsTimer(setGroupCheckSecs, groupCheckTimerRef);
-    try {
-      await readSSEStream(
-        "/api/favorites/group-check",
-        (data) => setGroupCheckLogs(prev => [...prev, { time: String(data.step), detail: String(data.detail), elapsed: String(data.elapsed || "") }]),
-        (data) => {
-          stopSecsTimer(groupCheckTimerRef);
-          setGroupCheckResult({ checked: Number(data.checked), vowelFixed: Number(data.vowelFixed) });
-          toast({
-            title: "グループ検査完了",
-            description: data.vowelFixed === 0
-              ? `${data.checked}語を検査→問題なし`
-              : `${data.checked}語検査　グループ再配属:${data.vowelFixed}語`,
-          });
-          queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
-        },
-        (data) => toast({ title: "エラー", description: String(data.error), variant: "destructive" }),
-      );
-    } catch {
-      toast({ title: "エラー", description: "グループ検査に失敗しました", variant: "destructive" });
-    }
-    stopSecsTimer(groupCheckTimerRef);
-    setIsGroupChecking(false);
-  }, [isGroupChecking, toast, queryClient, readSSEStream]);
 
   const runCharCheck = useCallback(async () => {
     if (isCharChecking) return;
@@ -614,7 +572,7 @@ export default function Home() {
           stopSecsTimer(charCheckTimerRef);
           setCharCheckResult({ checked: Number(data.checked), fixed: Number(data.fixed) });
           toast({
-            title: "文字検査完了",
+            title: "文字整理完了",
             description: data.fixed === 0
               ? `${data.checked}語を検査→問題なし`
               : `${data.checked}語検査　${data.fixed}語を修正しました`,
@@ -624,21 +582,19 @@ export default function Home() {
         (data) => toast({ title: "エラー", description: String(data.error), variant: "destructive" }),
       );
     } catch {
-      toast({ title: "エラー", description: "文字検査に失敗しました", variant: "destructive" });
+      toast({ title: "エラー", description: "文字整理に失敗しました", variant: "destructive" });
     }
     stopSecsTimer(charCheckTimerRef);
     setIsCharChecking(false);
   }, [isCharChecking, toast, queryClient, readSSEStream]);
 
   const runAllCleanup = useCallback(async () => {
-    if (isAllCleaning || isDedupRunning || isGroupChecking || isCleaningUp || isCharChecking) return;
+    if (isAllCleaning || isDedupRunning || isCleaningUp || isCharChecking) return;
     setIsAllCleaning(true);
     setCleanupLogs([]);
     setCharCheckLogs([]);
-    setGroupCheckLogs([]);
     setDedupResult(null);
     setCharCheckResult(null);
-    setGroupCheckResult(null);
 
     // Step 1: 重複整理
     setIsDedupRunning(true);
@@ -661,7 +617,7 @@ export default function Home() {
     stopSecsTimer(dedupTimerRef);
     setIsDedupRunning(false);
 
-    // Step 2: 文字検査
+    // Step 2: 文字整理
     setIsCharChecking(true);
     startSecsTimer(setCharCheckSecs, charCheckTimerRef);
     try {
@@ -671,27 +627,9 @@ export default function Home() {
         (data) => {
           stopSecsTimer(charCheckTimerRef);
           setCharCheckResult({ checked: Number(data.checked), fixed: Number(data.fixed) });
-          queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
-        },
-        () => {},
-      );
-    } catch {}
-    stopSecsTimer(charCheckTimerRef);
-    setIsCharChecking(false);
-
-    // Step 3: グループ検査
-    setIsGroupChecking(true);
-    startSecsTimer(setGroupCheckSecs, groupCheckTimerRef);
-    try {
-      await readSSEStream(
-        "/api/favorites/group-check",
-        (data) => setGroupCheckLogs(prev => [...prev, { time: String(data.step), detail: String(data.detail), elapsed: String(data.elapsed || "") }]),
-        (data) => {
-          stopSecsTimer(groupCheckTimerRef);
-          setGroupCheckResult({ checked: Number(data.checked), vowelFixed: Number(data.vowelFixed) });
           toast({
             title: "全て整理完了",
-            description: `重複整理・文字検査・グループ検査を完了しました`,
+            description: `重複整理・文字整理を完了しました`,
           });
           queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
           queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
@@ -699,10 +637,10 @@ export default function Home() {
         () => {},
       );
     } catch {}
-    stopSecsTimer(groupCheckTimerRef);
-    setIsGroupChecking(false);
+    stopSecsTimer(charCheckTimerRef);
+    setIsCharChecking(false);
     setIsAllCleaning(false);
-  }, [isAllCleaning, isDedupRunning, isGroupChecking, isCleaningUp, isCharChecking, toast, queryClient, readSSEStream]);
+  }, [isAllCleaning, isDedupRunning, isCleaningUp, isCharChecking, toast, queryClient, readSSEStream]);
 
   const handlePdfExport = useCallback(async () => {
     setIsPdfExporting(true);
@@ -846,8 +784,8 @@ export default function Home() {
         await delay(1000);
         if (!autoModeRef.current) break;
 
-        // === (2) レベル5〜10ランダム ===
-        const randomLvl = 5 + Math.floor(Math.random() * 6);
+        // === (2) レベル1〜5ランダム ===
+        const randomLvl = 1 + Math.floor(Math.random() * 5);
         setLevel(randomLvl);
         setAgeConfirmed(true);
         toast({ title: "(2) レベル設定", description: `Lv.${randomLvl} ${LEVEL_INFO[randomLvl].label}` });
@@ -872,40 +810,23 @@ export default function Home() {
         }
         emptyStreak = 0;
 
-        // === (4) データベースにすべて保存 ===
+        // === (4) データベースへ送信（文字整理→DB追加）===
         const allWords = getWordsFromResult(result);
         try {
           if (!addWordsDirectRef.current) break;
           const addResult = await addWordsDirectRef.current(allWords);
-          toast({ title: "(4) DB追加完了", description: `${addResult.added}個追加（合計 ${addResult.total}個）` });
+          toast({ title: "(4) DB送信完了", description: `${addResult.added}個追加（合計 ${addResult.total}個）` });
         } catch (err) {
-          toast({ title: "(4) DB追加エラー", description: err instanceof Error ? err.message : "追加に失敗", variant: "destructive" });
+          toast({ title: "(4) DB送信エラー", description: err instanceof Error ? err.message : "追加に失敗", variant: "destructive" });
         }
         await delay(1000);
         if (!autoModeRef.current) break;
 
-        // === (5) カウンター+1 ===
+        // === (5) カウンター+1 → そのまま次のサイクルへ ===
         cycleCounter++;
         setAutoModeCount(prev => prev + 1);
-
-        if (cycleCounter >= 5) {
-          toast({ title: "全て整理開始", description: `${cycleCounter}回完了 → データベースの全て整理を実行中...` });
-          setActiveTab("fav");
-          await delay(500);
-          try {
-            if (!runAllCleanupRef.current) break;
-            await runAllCleanupRef.current();
-            toast({ title: "全て整理完了", description: "整理が完了しました。生成を再開します..." });
-          } catch (cleanupErr) {
-            console.error("Auto mode cleanup error:", cleanupErr);
-            toast({ title: "整理エラー（続行）", description: "整理中にエラーが発生しましたが、生成を続行します", variant: "destructive" });
-          }
-          cycleCounter = 0;
-          await delay(2000);
-        } else {
-          toast({ title: `サイクル${cycleCounter}/5完了`, description: "次のサイクルへ..." });
-          await delay(1000);
-        }
+        toast({ title: `サイクル${cycleCounter}完了`, description: "次のサイクルへ..." });
+        await delay(1000);
         if (!autoModeRef.current) break;
       }
     } catch (err) {
@@ -924,7 +845,7 @@ export default function Home() {
 
   const handleGenerateDiss = useCallback(() => {
     if (!target) { toast({ title: "ターゲット未設定", description: "先にターゲットを選んでください" }); return; }
-    if (level >= 8 && !ageConfirmed) { toast({ title: "年齢確認", description: "レベル8以上は年齢確認が必要です", variant: "destructive" }); return; }
+    if (level >= 3 && !ageConfirmed) { toast({ title: "年齢確認", description: "レベル3以上は年齢確認が必要です", variant: "destructive" }); return; }
     generateDissSSE();
   }, [target, level, ageConfirmed, generateDissSSE, toast]);
 
@@ -1150,7 +1071,7 @@ export default function Home() {
                 </div>
                 <p className="text-xs text-muted-foreground">AIへの生成プロンプトに含まれる絶対ルール（原文そのまま）</p>
                 <pre className="text-xs bg-muted/50 border border-border rounded-lg p-3 whitespace-pre-wrap leading-relaxed font-sans overflow-x-auto">{`【絶対ルール】
-- 1ワード10文字以内（ひらがな換算）
+- 1ワード4文字以上10文字以内（ひらがな換算）
 - 小学生でもわかる簡単な言葉のみ
 - 同じ助詞・助動詞で終わるワードを重複させるな（例：〜だろ、〜だろ は禁止）
 - 関西弁・方言語尾は絶対禁止（やな/やわ/やろ/やで/やん/ねん/やんか/やんな/わな/じゃな/じゃろ/っちゃ等）→ 標準語のみ使用
@@ -1159,6 +1080,14 @@ export default function Home() {
 - 造語OK（ただし意味が通じること）
 - ありきたりな表現を避け、独自性のある言葉を生成せよ
 - 「〜野郎」「〜め」「〜だ」など同じ語尾パターンは最大2個まで
+- 全てのワードが攻撃・批判・挑発・煽りであること。褒め言葉・ポジティブ表現は絶対禁止
+
+【レベルシステム（5段階）】
+- Lv.1 毒舌: 有吉弘行レベルの毒舌。的確で鋭いが笑える毒。
+- Lv.2 辛辣: 痛い所を突く辛辣な言葉。笑いより痛さが勝る。
+- Lv.3 過激: 人格否定レベルの攻撃。下品な表現も可。【年齢確認必要】
+- Lv.4 暴言: 限界を超えた暴言。社会的に許されないレベルの罵倒。【年齢確認必要】
+- Lv.5 禁忌: 性的・差別的・思想的攻撃を含む全制限撤廃。【18禁・年齢確認必要】
 
 【末尾禁止単語】以下の単語で終わるワードは生成禁止: {NG単語リスト}（実行時に動的挿入）
 
@@ -1269,19 +1198,15 @@ JSON配列のみ出力:
               </div>
 
               <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" onClick={runDedupCleanup} disabled={isDedupRunning || isCleaningUp || isGroupChecking || isAllCleaning || isCharChecking || totalCount === 0} data-testid="button-dedup-cleanup">
+                <Button variant="outline" size="sm" onClick={runDedupCleanup} disabled={isDedupRunning || isCleaningUp || isAllCleaning || isCharChecking || totalCount === 0} data-testid="button-dedup-cleanup">
                   {isDedupRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Filter className="w-3.5 h-3.5 mr-1" />}
                   重複整理
                 </Button>
-                <Button variant="outline" size="sm" onClick={runGroupCheck} disabled={isGroupChecking || isCleaningUp || isDedupRunning || isAllCleaning || isCharChecking || totalCount === 0} data-testid="button-group-check">
-                  {isGroupChecking ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <ScanLine className="w-3.5 h-3.5 mr-1" />}
-                  グループ検査
-                </Button>
-                <Button variant="outline" size="sm" onClick={runCharCheck} disabled={isCharChecking || isGroupChecking || isDedupRunning || isAllCleaning || isCleaningUp || totalCount === 0} data-testid="button-char-check">
+                <Button variant="outline" size="sm" onClick={runCharCheck} disabled={isCharChecking || isDedupRunning || isAllCleaning || isCleaningUp || totalCount === 0} data-testid="button-char-check">
                   {isCharChecking ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Languages className="w-3.5 h-3.5 mr-1" />}
-                  文字検査
+                  文字整理
                 </Button>
-                <Button variant="default" size="sm" onClick={runAllCleanup} disabled={isAllCleaning || isDedupRunning || isGroupChecking || isCleaningUp || isCharChecking || totalCount === 0} data-testid="button-all-cleanup">
+                <Button variant="default" size="sm" onClick={runAllCleanup} disabled={isAllCleaning || isDedupRunning || isCleaningUp || isCharChecking || totalCount === 0} data-testid="button-all-cleanup">
                   {isAllCleaning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Wrench className="w-3.5 h-3.5 mr-1" />}
                   全て整理
                 </Button>
@@ -1316,7 +1241,7 @@ JSON配列のみ出力:
                 <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 space-y-1" data-testid="char-check-logs">
                   <div className="flex items-center gap-2 mb-1">
                     <Languages className="w-4 h-4 text-emerald-400" />
-                    <span className="text-xs font-semibold text-emerald-400">文字検査ログ</span>
+                    <span className="text-xs font-semibold text-emerald-400">文字整理ログ</span>
                     {isCharChecking && <span className="text-xs font-mono text-emerald-300 ml-1">{charCheckSecs}秒</span>}
                     {!isCharChecking && <Button variant="ghost" size="sm" className="h-5 px-1 text-xs ml-auto" onClick={() => { setCharCheckLogs([]); setCharCheckResult(null); }}><X className="w-3 h-3" /></Button>}
                     {isCharChecking && <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400 ml-auto" />}
@@ -1334,33 +1259,6 @@ JSON配列のみ出力:
                       <span>検査: {charCheckResult.checked}語</span>
                       <span className={charCheckResult.fixed > 0 ? "text-yellow-400" : ""}>修正: {charCheckResult.fixed}語</span>
                       {charCheckResult.fixed === 0 && <span className="text-green-400">✓ 問題なし</span>}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {groupCheckLogs.length > 0 && (
-                <div className="rounded-md border border-sky-500/30 bg-sky-500/5 p-3 space-y-1" data-testid="group-check-logs">
-                  <div className="flex items-center gap-2 mb-1">
-                    <ScanLine className="w-4 h-4 text-sky-400" />
-                    <span className="text-xs font-semibold text-sky-400">グループ検査ログ</span>
-                    {isGroupChecking && <span className="text-xs font-mono text-sky-300 ml-1">{groupCheckSecs}秒</span>}
-                    {!isGroupChecking && <Button variant="ghost" size="sm" className="h-5 px-1 text-xs ml-auto" onClick={() => { setGroupCheckLogs([]); setGroupCheckResult(null); }}><X className="w-3 h-3" /></Button>}
-                    {isGroupChecking && <Loader2 className="w-3.5 h-3.5 animate-spin text-sky-400 ml-auto" />}
-                  </div>
-                  <div className="max-h-32 overflow-y-auto space-y-0.5">
-                    {groupCheckLogs.map((log, i) => (
-                      <div key={i} className="text-xs flex gap-2">
-                        <span className="text-muted-foreground font-mono shrink-0">[{log.elapsed}]</span>
-                        <span>{log.detail}</span>
-                      </div>
-                    ))}
-                  </div>
-                  {!isGroupChecking && groupCheckResult && (
-                    <div className="mt-2 pt-2 border-t border-sky-500/20 text-xs font-semibold text-sky-300 flex gap-3">
-                      <span>検査: {groupCheckResult.checked}語</span>
-                      <span className={groupCheckResult.vowelFixed > 0 ? "text-orange-400" : ""}>グループ再配属: {groupCheckResult.vowelFixed}語</span>
-                      {groupCheckResult.vowelFixed === 0 && <span className="text-green-400">✓ 問題なし</span>}
                     </div>
                   )}
                 </div>
@@ -1508,7 +1406,7 @@ JSON配列のみ出力:
           <CardContent className="p-4 space-y-4">
             <div className="flex items-center gap-2 mb-1">
               <Target className="w-5 h-5 text-primary" />
-              <h2 className="text-base font-semibold">ターゲット設定</h2>
+              <h2 className="text-base font-semibold">ターゲット生成</h2>
             </div>
             <Button onClick={() => targetMutation.mutate()} disabled={targetMutation.isPending || isAutoMode} size="sm" data-testid="button-generate-target">
               {targetMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Sparkles className="w-4 h-4 mr-1" />}
@@ -1530,39 +1428,39 @@ JSON配列のみ出力:
           <CardContent className="p-4 space-y-4">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                {level <= 3 ? <Heart className="w-5 h-5 text-blue-400" /> : <Flame className="w-5 h-5 text-primary" />}
+                <Flame className="w-5 h-5 text-primary" />
                 <h2 className="text-base font-semibold">レベル</h2>
               </div>
               <div className="flex items-center gap-2">
                 <span className={`text-xl font-bold font-mono ${levelInfo.color}`} data-testid="text-level-number">{level}</span>
-                <span className="text-xs text-muted-foreground">/10</span>
+                <span className="text-xs text-muted-foreground">/5</span>
                 <Badge variant="secondary" className={`text-xs ${levelInfo.color}`} data-testid="text-level-label">{levelInfo.label}</Badge>
               </div>
             </div>
-            <Slider value={[level]} min={1} max={10} step={1} onValueChange={val => setLevel(val[0])} disabled={isAutoMode} data-testid="slider-level" />
+            <Slider value={[level]} min={1} max={5} step={1} onValueChange={val => { setLevel(val[0]); if (val[0] < 3) setAgeConfirmed(false); }} disabled={isAutoMode} data-testid="slider-level" />
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <Heart className="w-3 h-3 text-blue-400" />
-                <span>リスペクト</span>
+                <Flame className="w-3 h-3 text-yellow-400" />
+                <span>毒舌</span>
               </div>
-              <div className="flex gap-0.5">
-                {Array.from({ length: 10 }).map((_, i) => (
-                  <div key={i} className={`w-2 h-3 rounded-sm transition-colors ${i < level ? (LEVEL_BAR_COLORS[i + 1] || "bg-muted") : "bg-muted"}`} />
+              <div className="flex gap-1">
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <div key={i} className={`w-6 h-3 rounded-sm transition-colors ${i < level ? (LEVEL_BAR_COLORS[i + 1] || "bg-muted") : "bg-muted"}`} />
                 ))}
               </div>
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <span>ディスり</span>
-                <Flame className="w-3 h-3 text-red-500" />
+                <span>禁忌</span>
+                <Flame className="w-3 h-3 text-purple-500" />
               </div>
             </div>
             <AnimatePresence>
-              {level >= 8 && (
+              {level >= 3 && (
                 <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
                   <div className="flex items-start gap-2 rounded-md bg-destructive/10 border border-destructive/20 p-2.5">
                     <AlertTriangle className="w-4 h-4 text-destructive shrink-0 mt-0.5" />
                     <label className="flex items-center gap-2 cursor-pointer">
                       <Checkbox checked={ageConfirmed} onCheckedChange={v => setAgeConfirmed(!!v)} disabled={isAutoMode} data-testid="checkbox-age-confirm" />
-                      <span className="text-xs">18歳以上・過激な表現を許可</span>
+                      <span className="text-xs">{level >= 5 ? "18歳以上・過激・性的・差別的な表現を許可" : "18歳以上・過激な表現を許可"}</span>
                     </label>
                   </div>
                 </motion.div>
@@ -1572,7 +1470,7 @@ JSON配列のみ出力:
             <div className="rounded-md bg-muted/30 border border-border/50 p-2.5 text-xs text-muted-foreground">
               <div className="font-medium mb-1">3ステップ生成:</div>
               <div>STEP1: ディスワード300個を一括生成（6並列×50個）</div>
-              <div>STEP2: 品質フィルタ（子供でもわかるか？リリックとして成立するか？）</div>
+              <div>STEP2: 品質フィルタ（子供でもわかるか？4文字以上か？）</div>
               <div>STEP3: 母音パターン別にグルーピング（ae/oe/ua/an/ao/iu）</div>
             </div>
 
@@ -1669,8 +1567,8 @@ JSON配列のみ出力:
                   {!isAutoMode && (
                     <div className="mt-4">
                       <Button onClick={addToFavorites} disabled={checkedWords.size === 0 || addFavMutation.isPending} variant="destructive" className="w-full" data-testid="button-add-favorites">
-                        {addFavMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Star className="w-4 h-4 mr-2" />}
-                        選択ワードをデータベースに追加 {checkedWords.size > 0 && `(${checkedWords.size}個)`}
+                        {addFavMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Database className="w-4 h-4 mr-2" />}
+                        データベースへ送信 {checkedWords.size > 0 && `(${checkedWords.size}個)`}
                       </Button>
                     </div>
                   )}
