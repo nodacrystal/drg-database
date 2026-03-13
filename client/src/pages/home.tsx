@@ -771,7 +771,6 @@ export default function Home() {
         setProgressLogs([]);
         setCleanupLogs([]);
         setCharCheckLogs([]);
-        setGroupCheckLogs([]);
         setGenStatus("idle");
         setTimerSeconds(0);
         setIsGenerating(false);
