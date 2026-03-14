@@ -121,7 +121,7 @@ export default function Home() {
   const [rhymeFilter, setRhymeFilter] = useState<RhymeFilter>("all");
   const [isDedupRunning, setIsDedupRunning] = useState(false);
   const [isAllCleaning, setIsAllCleaning] = useState(false);
-  const [dedupResult, setDedupResult] = useState<{ deleted: number; total: number; ngAdded: string[] } | null>(null);
+  const [dedupResult, setDedupResult] = useState<{ deleted: number; total: number } | null>(null);
   const [isCharChecking, setIsCharChecking] = useState(false);
   const [charCheckLogs, setCharCheckLogs] = useState<ProgressLog[]>([]);
   const [charCheckResult, setCharCheckResult] = useState<{ checked: number; fixed: number } | null>(null);
@@ -516,14 +516,10 @@ export default function Home() {
             if (data.type === "progress") {
               setCleanupLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
             } else if (data.type === "result") {
-              const ngAdded: string[] = data.ngAdded || [];
-              setDedupResult({ deleted: data.deleted, total: data.total, ngAdded });
-              const ngDesc = ngAdded.length > 0 ? `　NG追加(${ngAdded.length}): ${ngAdded.join("、")}` : "　NG追加なし";
-              toast({ title: "重複整理完了", description: `削除${data.deleted}個 (残り${data.total}語)${ngDesc}` });
+              setDedupResult({ deleted: data.deleted, total: data.total });
+              toast({ title: "重複整理完了", description: `削除${data.deleted}個 (残り${data.total}語)` });
               queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
               queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
-              queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
-              queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
             } else if (data.type === "error") {
               toast({ title: "エラー", description: data.error, variant: "destructive" });
             }
@@ -614,12 +610,9 @@ export default function Home() {
         "/api/favorites/dedup-cleanup",
         (data) => setCleanupLogs(prev => [...prev, { time: String(data.step), detail: String(data.detail), elapsed: String(data.elapsed || "") }]),
         (data) => {
-          const ngAdded: string[] = Array.isArray(data.ngAdded) ? data.ngAdded as string[] : [];
-          setDedupResult({ deleted: Number(data.deleted), total: Number(data.total), ngAdded });
+          setDedupResult({ deleted: Number(data.deleted), total: Number(data.total) });
           queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
           queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
-          queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
-          queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
         },
         () => {},
       );
@@ -1353,11 +1346,6 @@ JSON配列のみ出力:
                     <div className="mt-2 pt-2 border-t border-border/30 text-xs font-semibold flex flex-wrap gap-3">
                       <span className={dedupResult.deleted > 0 ? "text-red-400" : "text-muted-foreground"}>削除: {dedupResult.deleted}語</span>
                       <span className="text-muted-foreground">残り: {dedupResult.total}語</span>
-                      {dedupResult.ngAdded.length > 0 ? (
-                        <span className="text-orange-400">NG追加({dedupResult.ngAdded.length}): {dedupResult.ngAdded.join("、")}</span>
-                      ) : (
-                        <span className="text-muted-foreground">NG追加なし</span>
-                      )}
                       {dedupResult.deleted === 0 && <span className="text-green-400">✓ 重複なし</span>}
                     </div>
                   )}

@@ -34,19 +34,20 @@ The application follows a client-server architecture with a clear separation of 
     - `extractVowels()`: Extracts vowels and 'n' for rhyming.
     - `countMoraFromRomaji()`: Counts morae from Romaji for length validation.
     - `parseWordEntries()`: Flexibly parses various word input formats.
-- **Generation System (3-Step Pipeline):**
-    1.  **Bulk Generation:** Parallel AI calls generate batches of diss words with diverse angles. Includes in-batch deduplication and regeneration if word count is low.
-    2.  **Quality Filter:** AI evaluates generated words for comprehensibility, lyrical validity, and meaningfulness.
-    3.  **Vowel Grouping:** Passing words are grouped by their last two vowels.
+- **Generation System (4-Step Pipeline with 300-word guarantee loop):**
+    1.  **Bulk Generation (STEP1):** Parallel AI calls generate batches of diss words. Ending-variant dedup applied against accumulating pool. Loops up to 4 times until 300 words achieved.
+    2.  **Quality Filter (STEP2):** AI evaluates generated words for comprehensibility, lyrical validity, 体言止め compliance, and shared-word deduplication (keeps strongest punchline per shared-word group).
+    3.  **Shared-Word Clustering (STEP2b):** Programmatic hiragana normalization (katakana→hiragana via `katakanaToHiragana()`). Groups words by common 3-5 hiragana substrings. AI picks strongest punchline per cluster. Removes duplicates before DB save.
+    4.  **Vowel Grouping (STEP3):** Passing words are grouped by their last two vowels for rhyme matching.
+- **DB Save:** `quickCharCheck()` + `countMoraVowels()` used for accurate mora-based charCount. All fields (word, reading, romaji, vowels, charCount) fully populated before save.
 - **Rhyme System:** A tiered system categorizes rhymes into Perfect, Legendary, Super Hard, and Hard based on vowel suffix matches. Words are sorted by tier and then by Romaji length.
 - **Deduplication and Cleanup:**
-    - **`重複整理 (Dedup Cleanup)`:** AI-powered tail-deduplication to detect and remove same-ending words across different scripts (漢字/ひらがな/カタカナ), saving common endings to the NG list.
+    - **`重複整理 (Dedup Cleanup)`:** AI-powered deduplication detects words sharing same prefix/suffix words within same vowel bucket. AI picks strongest punchline per group. **No automatic NG list addition** — NG list is manual only.
     - **`Auto-cleanup`:** Automatically triggers database cleanup upon adding new words.
-    - **`DB Cleanup (6-step)`:** A comprehensive process including: (1) vowel pattern correction, (2) script-variant deduplication, (2b) ending-particle variant dedup (だわ/やわ/やな/だな/だぞ etc.), (3) containment dedup, (4) AI tail-dedup (PARALLEL=8, all-protected groups skipped), (5) AI semantic dedup (PARALLEL=8).
+    - **`DB Cleanup (6-step)`:** A comprehensive process including: (1) vowel pattern correction, (2) script-variant deduplication, (2b) ending-particle variant dedup, (3) containment dedup, (4) AI tail-dedup (PARALLEL=8), (5) AI semantic dedup (PARALLEL=8). **No NG list auto-addition.**
     - **`Protected Word System`:** Words surviving cleanup are marked as protected to prevent accidental deletion.
-    - **`Pre-insert char check`:** `quickCharCheck()` validates romaji before every DB insert — rejects invalid characters, words with < 60% expected vowel count (mora-based), and words violating taigen-dome (TAIGEN_VIOLATION_ENDINGS list: てる/てた/てく/でる/でた/ている/だろ/やろ/やな etc.).
-    - **`文字検査 optimized`:** Protected words skipped, programmatic vowel-ratio pre-filter, only suspicious words sent to AI (BATCH=30, PARALLEL=8).
-- **NG Word Management:** A list of banned suffix/ending terms. Words ending with NG terms are blocked from generation and addition. Cleanup saves only the shared suffix to the NG list.
+    - **`Pre-insert char check`:** `quickCharCheck()` validates romaji before every DB insert — rejects invalid characters, words with < 60% expected vowel count, and words violating taigen-dome.
+- **NG Word Management:** Manual-only NG word list. Words ending with NG terms are blocked from generation and addition. NG words are NEVER auto-added by dedup/cleanup operations.
 - **`DB精査 (Scrutiny)`:** An AI-powered quality scan checks for vowel group mismatches, duplicate rhyme endings, and identifies prohibited/discriminatory/trademarked words.
 - **Full Auto Mode:** An automated loop for continuous word generation, addition, and cleanup, with strict sequential execution of steps and rate limit management.
 - **Rate Limit Management:** All Gemini API calls are wrapped with exponential backoff retry logic and reduced parallelism to prevent rate limiting issues.

@@ -93,6 +93,10 @@ function getEndingBase(reading: string): string | null {
   return null;
 }
 
+function katakanaToHiragana(str: string): string {
+  return str.replace(/[\u30a1-\u30f6]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60));
+}
+
 function extractVowels(romaji: string): string {
   const r = romaji.toLowerCase();
   let result = "";
@@ -416,51 +420,17 @@ ${ngEndingNote}${extraExclusionNote}
         return words;
       };
 
-      const rawGenWords = await runStep1Generation(300);
-      logTiming("step1-generate");
+      // ─── 生成ループ: 300個保証 ───
+      const TARGET_COUNT = 300;
+      const MAX_GEN_ITERATIONS = 4;
+      let genPool: WordEntry[] = [];
+      let genIteration = 0;
 
-      const endingBaseMap = new Map<string, WordEntry>();
-      let endingDupCount = 0;
-      let finalRawWords: WordEntry[] = [];
-      for (const w of rawGenWords) {
-        const base = getEndingBase(w.reading);
-        if (base) {
-          if (endingBaseMap.has(base)) {
-            endingDupCount++;
-            const existing = endingBaseMap.get(base)!;
-            console.log(`[STEP1:ending-dedup] "${w.word}" → "${existing.word}" (同語尾パターン除去)`);
-            continue;
-          }
-          endingBaseMap.set(base, w);
-        }
-        finalRawWords.push(w);
-      }
-      console.log(`[STEP1] Initial: ${rawGenWords.length}, ending-dedup removed: ${endingDupCount}, dup tails: ${[...dupTailWords].join(",") || "none"}`);
-
-      if (finalRawWords.length < 200) {
-        const needed = 300 - finalRawWords.length;
-        send("step1", `STEP1: 生成数${finalRawWords.length}個 < 200 → 追加${needed}個を再生成中... (除外末尾: ${[...dupTailWords].join(",") || "なし"})`);
-        console.log(`[STEP1] Count ${finalRawWords.length} < 200, regenerating ${needed} more (excluding tails: ${[...dupTailWords].join(",")})`);
-        const extraWords = await runStep1Generation(needed, [...dupTailWords]);
-        logTiming("step1-regen");
-        const existingSet = new Set(finalRawWords.map(w => w.word));
-        let extraAdded = 0;
-        for (const w of extraWords) {
-          if (existingSet.has(w.word)) continue;
-          existingSet.add(w.word);
-          finalRawWords.push(w);
-          extraAdded++;
-        }
-        console.log(`[STEP1] Regeneration added ${extraAdded} words, total now: ${finalRawWords.length}`);
-      }
-
-      send("step1", `STEP1完了: ${finalRawWords.length}個のワード生成`);
-      console.log(`[STEP1] Total raw words: ${finalRawWords.length}`);
-
-      send("step2", `STEP2: 品質フィルタリング中... (${finalRawWords.length}個を評価)`);
-
-      const wordListForFilter = finalRawWords.map(w => w.word).join("\n");
-      const step2Prompt = `以下のワード一覧が絶対ルールを守っているか検証し、合格ワードのみ出力せよ。
+      const runStep2Filter = async (words: WordEntry[]): Promise<WordEntry[]> => {
+        if (words.length === 0) return [];
+        const rawSet = new Set(words.map(w => w.word));
+        const wordList = words.map(w => w.word).join("\n");
+        const prompt = `以下のワード一覧が絶対ルールを守っているか検証し、合格ワードのみ出力せよ。
 
 【絶対ルール（違反ワードは削除）】
 - 1ワード10文字以内、4文字以上（ひらがな換算）
@@ -475,41 +445,160 @@ ${ngEndingNote}${extraExclusionNote}
 ・放送禁止用語、差別用語、商標名（IP）を使用している場合は削除せよ。
 
 【ワード一覧】
-${wordListForFilter}
+${wordList}
 
 【出力】合格ワードのみ、1行1個。元の表記そのまま出力。番号・説明不要:`;
-
-      let filteredWordSet: Set<string>;
-      const rawWordSet = new Set(finalRawWords.map(w => w.word));
-      try {
-        const filterResult = await aiGenerate(step2Prompt, { ...geminiConfig, maxOutputTokens: 8192 });
-        const filterText = filterResult.text || "";
-        const passedWords = filterText.split("\n")
-          .map(l => l.trim().replace(/^\d+[\.\)）、]\s*/, "").replace(/^[・●▸►\-]\s*/, "").replace(/^「/, "").replace(/」$/, "").trim())
-          .filter(l => l.length > 0 && rawWordSet.has(l));
-        filteredWordSet = new Set(passedWords);
-        if (filteredWordSet.size < finalRawWords.length * 0.1) {
-          console.log(`[STEP2] Filter pass rate too low (${filteredWordSet.size}/${finalRawWords.length}), keeping all words`);
-          filteredWordSet = rawWordSet;
-        } else {
-          console.log(`[STEP2] Filter passed: ${filteredWordSet.size}/${finalRawWords.length}`);
+        try {
+          const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 8192 });
+          const text = result.text || "";
+          const passed = text.split("\n")
+            .map(l => l.trim().replace(/^\d+[\.\)）、]\s*/, "").replace(/^[・●▸►\-]\s*/, "").replace(/^「/, "").replace(/」$/, "").trim())
+            .filter(l => l.length > 0 && rawSet.has(l));
+          const passedSet = new Set(passed);
+          if (passedSet.size < words.length * 0.1) {
+            console.log(`[STEP2] Pass rate too low (${passedSet.size}/${words.length}), keeping all`);
+            return words;
+          }
+          console.log(`[STEP2] Filter: ${passedSet.size}/${words.length} passed`);
+          return words.filter(w => passedSet.has(w.word));
+        } catch (err) {
+          console.log(`[STEP2] Filter error, keeping all:`, err);
+          return words;
         }
-      } catch (err) {
-        console.log(`[STEP2] Filter failed, using all words:`, err);
-        filteredWordSet = rawWordSet;
+      };
+
+      // 共通単語クラスタリング: ひらがな読みで共通部分文字列(3-5文字)を検出し最強パンチライン残し
+      const clusterBySharedWord = async (words: WordEntry[]): Promise<WordEntry[]> => {
+        if (words.length < 2) return words;
+        const withHira = words.map(w => ({ ...w, hira: katakanaToHiragana(w.reading) }));
+        const subToWords = new Map<string, typeof withHira>();
+        for (const w of withHira) {
+          const r = w.hira;
+          const seen = new Set<string>();
+          for (let len = 3; len <= Math.min(5, r.length - 1); len++) {
+            for (let start = 0; start <= r.length - len; start++) {
+              const sub = r.slice(start, start + len);
+              if (seen.has(sub)) continue;
+              seen.add(sub);
+              if (!/^[ぁ-ゟー]+$/.test(sub)) continue;
+              const list = subToWords.get(sub) ?? [];
+              if (!list.find(x => x.word === w.word)) list.push(w);
+              subToWords.set(sub, list);
+            }
+          }
+        }
+        const toDeleteWords = new Set<string>();
+        const processedGroups = new Set<string>();
+        const clusterTasks: { candidates: WordEntry[]; shared: string }[] = [];
+        const sorted = [...subToWords.entries()]
+          .filter(([, ws]) => ws.length >= 2)
+          .sort((a, b) => b[0].length - a[0].length || b[1].length - a[1].length);
+        for (const [sub, groupWords] of sorted) {
+          const alive = groupWords.filter(w => !toDeleteWords.has(w.word));
+          if (alive.length < 2) continue;
+          const key = alive.map(w => w.word).sort().join(",");
+          if (processedGroups.has(key)) continue;
+          processedGroups.add(key);
+          clusterTasks.push({ candidates: alive, shared: sub });
+        }
+        if (clusterTasks.length === 0) return words;
+        const CLUSTER_PARALLEL = 8;
+        for (let p = 0; p < clusterTasks.length; p += CLUSTER_PARALLEL) {
+          const batch = clusterTasks.slice(p, p + CLUSTER_PARALLEL);
+          const results = await Promise.all(batch.map(async t => {
+            const candidates = t.candidates.filter(w => !toDeleteWords.has(w.word));
+            if (candidates.length < 2) return null;
+            const prompt = `以下のワードから最も辛辣・強烈なパンチラインのワードを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${candidates.map(w => w.word).join("\n")}`;
+            try {
+              const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 64 });
+              const best = (result?.text || "").trim().replace(/^「/, "").replace(/」$/, "").trim();
+              const bestMatch = candidates.find(w => w.word === best);
+              return { keepWord: bestMatch?.word ?? candidates[0].word, candidates };
+            } catch { return { keepWord: candidates[0].word, candidates }; }
+          }));
+          for (const r of results) {
+            if (!r) continue;
+            for (const w of r.candidates) {
+              if (w.word !== r.keepWord && !toDeleteWords.has(w.word)) toDeleteWords.add(w.word);
+            }
+          }
+        }
+        return words.filter(w => !toDeleteWords.has(w.word));
+      };
+
+      while (genPool.length < TARGET_COUNT && genIteration < MAX_GEN_ITERATIONS) {
+        genIteration++;
+        const needed = TARGET_COUNT - genPool.length;
+        const batchTarget = Math.ceil(needed * (genIteration === 1 ? 1.2 : 1.5));
+        send("step1", `STEP1: ${genIteration > 1 ? `[ループ${genIteration}] ` : ""}ワード${batchTarget}個を生成中...`);
+
+        const rawBatch = await runStep1Generation(batchTarget);
+        logTiming(`step1-gen-${genIteration}`);
+
+        // 語尾バリエーション重複除去（プール全体と合わせて）
+        const endingBaseMap = new Map<string, WordEntry>();
+        for (const w of genPool) {
+          const base = getEndingBase(w.reading);
+          if (base && !endingBaseMap.has(base)) endingBaseMap.set(base, w);
+        }
+        const poolWords = new Set(genPool.map(w => w.word));
+        const newBatch: WordEntry[] = [];
+        for (const w of rawBatch) {
+          if (poolWords.has(w.word)) continue;
+          const base = getEndingBase(w.reading);
+          if (base && endingBaseMap.has(base)) continue;
+          if (base) endingBaseMap.set(base, w);
+          poolWords.add(w.word);
+          newBatch.push(w);
+        }
+        console.log(`[GEN:${genIteration}] raw=${rawBatch.length}, new after dedup=${newBatch.length}`);
+
+        if (newBatch.length === 0) break;
+
+        send("step2", `STEP2: 品質フィルタリング中... (${newBatch.length}個を評価)`);
+        const filtered = await runStep2Filter(newBatch);
+        const charChecked = quickCharCheck(filtered);
+        logTiming(`step2-filter-${genIteration}`);
+        send("step2", `STEP2完了: ${charChecked.length}/${newBatch.length}個が合格`);
+
+        genPool = [...genPool, ...charChecked];
+        console.log(`[GEN:${genIteration}] pool after filter: ${genPool.length}`);
       }
-      logTiming("step2-filter");
 
-      const qualityWords = finalRawWords.filter(w => filteredWordSet.has(w.word));
-      send("step2", `STEP2完了: ${qualityWords.length}/${finalRawWords.length}個が合格`);
+      // ─── 共通単語クラスタリング（全プール対象）───
+      send("step2b", `STEP2b: 共通単語クラスタリング中... (${genPool.length}個)`);
+      const clusteredWords = await clusterBySharedWord(genPool);
+      logTiming("step2b-cluster");
+      send("step2b", `STEP2b完了: ${clusteredWords.length}/${genPool.length}個残（${genPool.length - clusteredWords.length}個重複削除）`);
 
+      // ─── 300個未達の場合、追加生成 ───
+      let finalQualityWords = clusteredWords;
+      if (finalQualityWords.length < TARGET_COUNT && genIteration < MAX_GEN_ITERATIONS) {
+        const stillNeeded = TARGET_COUNT - finalQualityWords.length;
+        send("step1", `[補充] ${stillNeeded}個を追加生成中...`);
+        const extraRaw = await runStep1Generation(stillNeeded, [...dupTailWords]);
+        const existingSet = new Set(finalQualityWords.map(w => w.word));
+        const extraNew = extraRaw.filter(w => !existingSet.has(w.word));
+        const extraFiltered = await runStep2Filter(extraNew);
+        const extraChecked = quickCharCheck(extraFiltered);
+        finalQualityWords = [...finalQualityWords, ...extraChecked];
+        send("step1", `[補充完了] 合計${finalQualityWords.length}個`);
+        logTiming("step1-refill");
+      }
+
+      // 300個を超えた場合はトリム
+      if (finalQualityWords.length > TARGET_COUNT) {
+        finalQualityWords = finalQualityWords.slice(0, TARGET_COUNT);
+      }
+
+      console.log(`[GEN] Final count before grouping: ${finalQualityWords.length}`);
       send("step3", `STEP3: 母音パターンでグルーピング中...`);
 
       const groups: Record<string, WordEntry[]> = {};
       for (const suffix of ALLOWED_VOWEL_SUFFIXES) groups[suffix] = [];
       const ungrouped: WordEntry[] = [];
 
-      for (const w of qualityWords) {
+      for (const w of finalQualityWords) {
         const vowels = extractVowels(w.romaji);
         const suffix = vowels.length >= 2 ? vowels.slice(-2) : "";
         if (suffix && ALLOWED_VOWEL_SUFFIXES.includes(suffix)) {
@@ -657,7 +746,13 @@ ${wordListForFilter}
       const ngList = await getNgWordStrings();
       const ngFiltered = parsed.data.words.filter(w => !ngList.some(ng => w.word.endsWith(ng)));
       const filtered = quickCharCheck(ngFiltered);
-      const added = await addWords(filtered.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji, vowels: extractVowels(w.romaji), charCount: w.reading.length })));
+      const added = await addWords(filtered.map(w => ({
+        word: w.word,
+        reading: w.reading,
+        romaji: w.romaji,
+        vowels: extractVowels(w.romaji),
+        charCount: countMoraVowels(w.reading),
+      })));
       res.json({ added, total: await getWordCount() });
     } catch (error) { res.status(500).json({ error: "お気に入りの追加に失敗しました" }); }
   });
@@ -1265,9 +1360,8 @@ JSONのみ出力（説明文・コードブロック不要）。`;
     toDelete: Set<number>,
     send: (step: string, detail: string) => void,
     protectNone: boolean
-  ): Promise<{ deletedCount: number; ngSuffixes: Set<string> }> {
+  ): Promise<{ deletedCount: number }> {
     let tailDupCount = 0;
-    const ngSuffixes = new Set<string>();
     const PARALLEL = 8;
 
     // ─── PHASE 0: Programmatic reading-suffix AND prefix detection ───
@@ -1494,14 +1588,13 @@ positionはsuffixまたはprefix。一致なしは[]。`;
           if (w.id !== keepId && !isProtected) { toDelete.add(w.id); tailDupCount++; anyDeleted = true; }
         }
         if (anyDeleted) {
-          ngSuffixes.add(pickBatch[j].ending);
           const kept = pickBatch[j].candidates.find(w => w.id === keepId);
           send("check4", `「${pickBatch[j].ending}」→「${kept?.word || "?"}」残し、${pickBatch[j].candidates.length - 1}個削除`);
         }
       }
     }
 
-    return { deletedCount: tailDupCount, ngSuffixes };
+    return { deletedCount: tailDupCount };
   }
 
   app.post("/api/favorites/dedup-cleanup", async (req, res) => {
@@ -1541,14 +1634,9 @@ positionはsuffixまたはprefix。一致なしは[]。`;
         await deleteWords([...toDelete]);
       }
 
-      if (result.ngSuffixes.size > 0) {
-        const added = await addNgWords([...result.ngSuffixes].map(ng => ({ word: ng, reading: "", romaji: "" })));
-        send("dedup", `NG単語追加: ${added}個 (${[...result.ngSuffixes].join(", ")})`);
-      }
-
       const remaining = await getWordCount();
       const elapsedMs = Date.now() - startTime;
-      res.write(`data: ${JSON.stringify({ type: "result", deleted: toDelete.size, total: remaining, elapsedMs, ngAdded: [...result.ngSuffixes] })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: "result", deleted: toDelete.size, total: remaining, elapsedMs })}\n\n`);
     } catch (error) {
       console.error("Dedup cleanup error:", error);
       if (!disconnected) res.write(`data: ${JSON.stringify({ type: "error", error: "重複整理に失敗しました" })}\n\n`);
@@ -1609,7 +1697,6 @@ positionはsuffixまたはprefix。一致なしは[]。`;
       send("init", `${Object.keys(buckets).length}グループ, ${items.length}語を分析`);
 
       const toDelete = new Set<number>();
-      const ngSuffixes = new Set<string>();
 
       // check1: DBのvowelsフィールドがromajiから計算した値と一致するか検査
       send("check1", "チェック1: DBのvowelsフィールドとromaji計算値の不一致を検出中...");
@@ -1731,7 +1818,6 @@ positionはsuffixまたはprefix。一致なしは[]。`;
 
       send("check4", "チェック4: 末尾単語一致をAI検出中...");
       const check4Result = await aiTailDedup(buckets, toDelete, send, false);
-      for (const ng of check4Result.ngSuffixes) ngSuffixes.add(ng);
       send("check4", `末尾重複: ${check4Result.deletedCount}個`);
 
       send("check5", "チェック5: 意味的重複をAI検出中...");
@@ -1798,13 +1884,7 @@ ${wordList}`);
       let totalDeleted = 0;
       if (deleteArray.length > 0) {
         totalDeleted = await deleteWords(deleteArray);
-        if (ngSuffixes.size > 0) {
-          const suffixEntries = Array.from(ngSuffixes).map(s => ({ word: s, reading: "", romaji: "" }));
-          const addedNg = await addNgWords(suffixEntries);
-          send("delete", `合計${totalDeleted}個を削除（NG単語${addedNg}個追加: ${Array.from(ngSuffixes).join("、")}）`);
-        } else {
-          send("delete", `合計${totalDeleted}個を削除`);
-        }
+        send("delete", `合計${totalDeleted}個を削除`);
       }
 
       const survivingIds = items.filter(w => !toDelete.has(w.id)).map(w => w.id);
