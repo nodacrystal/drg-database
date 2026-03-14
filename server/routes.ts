@@ -420,13 +420,13 @@ ${ngEndingNote}${extraExclusionNote}
         return words;
       };
 
-      // ─── 生成ループ: 300個保証 ───
       const TARGET_COUNT = 300;
-      const MAX_GEN_ITERATIONS = 4;
-      let genPool: WordEntry[] = [];
-      let genIteration = 0;
+      // フィルタリング損失を考慮: Step2で約30%削除、クラスタリングで約20%削除 → 300/(0.7*0.8)≈535
+      // 余裕を持って660個を初期目標に設定
+      const RAW_TARGET = Math.ceil(TARGET_COUNT * 2.2);
 
-      const runStep2Filter = async (words: WordEntry[]): Promise<WordEntry[]> => {
+      // ─── STEP2: 品質フィルタ（1回のAI呼び出しで全ワードを評価）───
+      const runStep2Filter = async (words: WordEntry[], label = ""): Promise<WordEntry[]> => {
         if (words.length === 0) return [];
         const rawSet = new Set(words.map(w => w.word));
         const wordList = words.map(w => w.word).join("\n");
@@ -439,10 +439,7 @@ ${ngEndingNote}${extraExclusionNote}
 - 関西弁・方言語尾は絶対禁止（やな/やわ/やろ/やで/やん/ねん/やんか/やんな/わな/じゃな/じゃろ/っちゃ等）→ 標準語のみ使用
 - 【体言止め必須】各ワードは必ず名詞・名詞句で終わらせること。助詞（〜な/〜だ/〜わ/〜よ/〜ね）、助動詞（〜てる/〜てた/〜です/〜ます）、形容詞語尾（〜い）、動詞活用形（〜する/〜いる）で終わるワードは絶対禁止
 - 造語OK（ただし意味が通じること）
-- 生成されたワードで同じ単語を使用している場合は「より強烈なパンチライン」なワードを残し、それ以外は削除すること。
-・ワードの意味を理解すること。
-・ひらがな・カタカナ・漢字、表現が違えど同じ言葉であった場合、より「強烈なパンチライン」である方を残してそれ以外を削除せよ。
-・放送禁止用語、差別用語、商標名（IP）を使用している場合は削除せよ。
+- 放送禁止用語、差別用語、商標名（IP）を使用している場合は削除せよ。
 
 【ワード一覧】
 ${wordList}
@@ -455,138 +452,156 @@ ${wordList}
             .map(l => l.trim().replace(/^\d+[\.\)）、]\s*/, "").replace(/^[・●▸►\-]\s*/, "").replace(/^「/, "").replace(/」$/, "").trim())
             .filter(l => l.length > 0 && rawSet.has(l));
           const passedSet = new Set(passed);
-          if (passedSet.size < words.length * 0.1) {
-            console.log(`[STEP2] Pass rate too low (${passedSet.size}/${words.length}), keeping all`);
+          if (passedSet.size < words.length * 0.15) {
+            console.log(`[STEP2${label}] Pass rate too low (${passedSet.size}/${words.length}), keeping all`);
             return words;
           }
-          console.log(`[STEP2] Filter: ${passedSet.size}/${words.length} passed`);
+          console.log(`[STEP2${label}] Filter: ${passedSet.size}/${words.length} passed`);
           return words.filter(w => passedSet.has(w.word));
         } catch (err) {
-          console.log(`[STEP2] Filter error, keeping all:`, err);
+          console.log(`[STEP2${label}] Filter error, keeping all:`, err);
           return words;
         }
       };
 
-      // 共通単語クラスタリング: ひらがな読みで共通部分文字列(3-5文字)を検出し最強パンチライン残し
-      const clusterBySharedWord = async (words: WordEntry[]): Promise<WordEntry[]> => {
+      // ─── STEP2b: 共通単語クラスタリング（1回のAI呼び出し）───
+      // ひらがな・カタカナ・漢字問わず読みが同じなら「同じ単語」とみなし最強パンチラインのみ残す
+      const clusterBySharedWordAI = async (words: WordEntry[], label = ""): Promise<WordEntry[]> => {
         if (words.length < 2) return words;
-        const withHira = words.map(w => ({ ...w, hira: katakanaToHiragana(w.reading) }));
-        const subToWords = new Map<string, typeof withHira>();
-        for (const w of withHira) {
-          const r = w.hira;
-          const seen = new Set<string>();
-          for (let len = 3; len <= Math.min(5, r.length - 1); len++) {
-            for (let start = 0; start <= r.length - len; start++) {
-              const sub = r.slice(start, start + len);
-              if (seen.has(sub)) continue;
-              seen.add(sub);
-              if (!/^[ぁ-ゟー]+$/.test(sub)) continue;
-              const list = subToWords.get(sub) ?? [];
-              if (!list.find(x => x.word === w.word)) list.push(w);
-              subToWords.set(sub, list);
-            }
+        const rawSet = new Set(words.map(w => w.word));
+        const wordList = words.map(w => w.word).join("\n");
+        const prompt = `以下の悪口ワードリストを精査せよ。
+
+【ルール】
+同じ名詞・単語（ひらがな・カタカナ・漢字いずれの表記でも読みが同じなら同一とみなす）が、先頭・中間・末尾いずれの位置であっても複数のワードで使われている場合、そのグループで最も辛辣・強烈なパンチラインのワードを1個だけ残し、他を全て削除せよ。
+
+【例】
+・「クソ顔」「汚い顔」「ブス顔」→「顔(かお)」が共通 → 最強1個を残す
+・「カス野郎」「ゴミ野郎」「クズ野郎」→「野郎(やろう)」が共通 → 最強1個を残す
+・「生きる価値ゼロ」「存在価値なし」→「価値(かち)」が共通 → 最強1個を残す
+・「脳ミソ腐れ」「脳なし」→「脳(のう)」が共通 → 最強1個を残す
+
+【注意】
+・共通名詞を持たないワードは全て残せ
+・削除するのは「共通名詞グループ内の弱い方」のみ
+
+ワードリスト:
+${wordList}
+
+残すワードのみ出力（1行1個、元の表記そのまま、番号・説明一切不要）:`;
+        try {
+          const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 8192 });
+          const text = result?.text || "";
+          const kept = text.split("\n")
+            .map(l => l.trim().replace(/^「/, "").replace(/」$/, "").replace(/^\d+[\.\)）、]\s*/, "").replace(/^[・●▸►\-]\s*/, "").trim())
+            .filter(l => l.length > 0 && rawSet.has(l));
+          const keptSet = new Set(kept);
+          if (keptSet.size < words.length * 0.2) {
+            console.log(`[CLUSTER${label}] AI returned too few (${keptSet.size}/${words.length}), keeping all`);
+            return words;
           }
+          console.log(`[CLUSTER${label}] ${keptSet.size}/${words.length} kept after shared-word dedup`);
+          return words.filter(w => keptSet.has(w.word));
+        } catch (err) {
+          console.log(`[CLUSTER${label}] AI failed, keeping all:`, err);
+          return words;
         }
-        const toDeleteWords = new Set<string>();
-        const processedGroups = new Set<string>();
-        const clusterTasks: { candidates: WordEntry[]; shared: string }[] = [];
-        const sorted = [...subToWords.entries()]
-          .filter(([, ws]) => ws.length >= 2)
-          .sort((a, b) => b[0].length - a[0].length || b[1].length - a[1].length);
-        for (const [sub, groupWords] of sorted) {
-          const alive = groupWords.filter(w => !toDeleteWords.has(w.word));
-          if (alive.length < 2) continue;
-          const key = alive.map(w => w.word).sort().join(",");
-          if (processedGroups.has(key)) continue;
-          processedGroups.add(key);
-          clusterTasks.push({ candidates: alive, shared: sub });
-        }
-        if (clusterTasks.length === 0) return words;
-        const CLUSTER_PARALLEL = 8;
-        for (let p = 0; p < clusterTasks.length; p += CLUSTER_PARALLEL) {
-          const batch = clusterTasks.slice(p, p + CLUSTER_PARALLEL);
-          const results = await Promise.all(batch.map(async t => {
-            const candidates = t.candidates.filter(w => !toDeleteWords.has(w.word));
-            if (candidates.length < 2) return null;
-            const prompt = `以下のワードから最も辛辣・強烈なパンチラインのワードを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${candidates.map(w => w.word).join("\n")}`;
-            try {
-              const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 64 });
-              const best = (result?.text || "").trim().replace(/^「/, "").replace(/」$/, "").trim();
-              const bestMatch = candidates.find(w => w.word === best);
-              return { keepWord: bestMatch?.word ?? candidates[0].word, candidates };
-            } catch { return { keepWord: candidates[0].word, candidates }; }
-          }));
-          for (const r of results) {
-            if (!r) continue;
-            for (const w of r.candidates) {
-              if (w.word !== r.keepWord && !toDeleteWords.has(w.word)) toDeleteWords.add(w.word);
-            }
-          }
-        }
-        return words.filter(w => !toDeleteWords.has(w.word));
       };
 
-      while (genPool.length < TARGET_COUNT && genIteration < MAX_GEN_ITERATIONS) {
-        genIteration++;
-        const needed = TARGET_COUNT - genPool.length;
-        const batchTarget = Math.ceil(needed * (genIteration === 1 ? 1.2 : 1.5));
-        send("step1", `STEP1: ${genIteration > 1 ? `[ループ${genIteration}] ` : ""}ワード${batchTarget}個を生成中...`);
+      // ─── Phase 1: 大量生成（quickCharCheckのみ、Step2なし）───
+      let rawPool: WordEntry[] = [];
+      let rawIter = 0;
+      while (rawPool.length < RAW_TARGET && rawIter < 5) {
+        rawIter++;
+        const needed = RAW_TARGET - rawPool.length;
+        const batchTarget = Math.ceil(needed * 1.3);
+        send("step1", `STEP1: [${rawIter}] ${batchTarget}個を生成中... (目標プール: ${rawPool.length}/${RAW_TARGET})`);
 
         const rawBatch = await runStep1Generation(batchTarget);
-        logTiming(`step1-gen-${genIteration}`);
+        logTiming(`step1-raw-${rawIter}`);
 
-        // 語尾バリエーション重複除去（プール全体と合わせて）
-        const endingBaseMap = new Map<string, WordEntry>();
-        for (const w of genPool) {
+        // 重複除去（プール全体 vs 新バッチ）
+        const poolSet = new Set(rawPool.map(w => w.word));
+        const endingMap = new Map<string, WordEntry>();
+        for (const w of rawPool) {
           const base = getEndingBase(w.reading);
-          if (base && !endingBaseMap.has(base)) endingBaseMap.set(base, w);
+          if (base && !endingMap.has(base)) endingMap.set(base, w);
         }
-        const poolWords = new Set(genPool.map(w => w.word));
-        const newBatch: WordEntry[] = [];
+        let addedCount = 0;
         for (const w of rawBatch) {
-          if (poolWords.has(w.word)) continue;
+          if (poolSet.has(w.word)) continue;
           const base = getEndingBase(w.reading);
-          if (base && endingBaseMap.has(base)) continue;
-          if (base) endingBaseMap.set(base, w);
-          poolWords.add(w.word);
-          newBatch.push(w);
+          if (base && endingMap.has(base)) continue;
+          if (base) endingMap.set(base, w);
+          poolSet.add(w.word);
+          rawPool.push(w);
+          addedCount++;
         }
-        console.log(`[GEN:${genIteration}] raw=${rawBatch.length}, new after dedup=${newBatch.length}`);
-
-        if (newBatch.length === 0) break;
-
-        send("step2", `STEP2: 品質フィルタリング中... (${newBatch.length}個を評価)`);
-        const filtered = await runStep2Filter(newBatch);
-        const charChecked = quickCharCheck(filtered);
-        logTiming(`step2-filter-${genIteration}`);
-        send("step2", `STEP2完了: ${charChecked.length}/${newBatch.length}個が合格`);
-
-        genPool = [...genPool, ...charChecked];
-        console.log(`[GEN:${genIteration}] pool after filter: ${genPool.length}`);
+        // quickCharCheckでrawPoolをフィルタ
+        rawPool = quickCharCheck(rawPool);
+        console.log(`[PHASE1:${rawIter}] raw=${rawBatch.length}, added=${addedCount}, pool=${rawPool.length}`);
+        send("step1", `STEP1: [${rawIter}] プール${rawPool.length}個 (目標${RAW_TARGET}個)`);
       }
 
-      // ─── 共通単語クラスタリング（全プール対象）───
-      send("step2b", `STEP2b: 共通単語クラスタリング中... (${genPool.length}個)`);
-      const clusteredWords = await clusterBySharedWord(genPool);
-      logTiming("step2b-cluster");
-      send("step2b", `STEP2b完了: ${clusteredWords.length}/${genPool.length}個残（${genPool.length - clusteredWords.length}個重複削除）`);
+      logTiming("step1-generate");
+      send("step1", `STEP1完了: ${rawPool.length}個の候補ワードを収集`);
 
-      // ─── 300個未達の場合、追加生成 ───
-      let finalQualityWords = clusteredWords;
-      if (finalQualityWords.length < TARGET_COUNT && genIteration < MAX_GEN_ITERATIONS) {
-        const stillNeeded = TARGET_COUNT - finalQualityWords.length;
-        send("step1", `[補充] ${stillNeeded}個を追加生成中...`);
-        const extraRaw = await runStep1Generation(stillNeeded, [...dupTailWords]);
-        const existingSet = new Set(finalQualityWords.map(w => w.word));
-        const extraNew = extraRaw.filter(w => !existingSet.has(w.word));
-        const extraFiltered = await runStep2Filter(extraNew);
-        const extraChecked = quickCharCheck(extraFiltered);
-        finalQualityWords = [...finalQualityWords, ...extraChecked];
-        send("step1", `[補充完了] 合計${finalQualityWords.length}個`);
-        logTiming("step1-refill");
+      // ─── Phase 2: Step2品質フィルタ（全ワード一括）───
+      send("step2", `STEP2: 品質フィルタリング中... (${rawPool.length}個を一括評価)`);
+      let qualityPool = await runStep2Filter(rawPool);
+      qualityPool = quickCharCheck(qualityPool);
+      logTiming("step2-filter");
+      send("step2", `STEP2完了: ${qualityPool.length}/${rawPool.length}個が合格`);
+
+      // ─── Phase 3: 共通単語クラスタリング（全ワード一括・1回のAI呼び出し）───
+      send("step2b", `STEP2b: 共通単語クラスタリング中... (${qualityPool.length}個を一括評価)`);
+      let clusteredPool = await clusterBySharedWordAI(qualityPool);
+      logTiming("step2b-cluster");
+      send("step2b", `STEP2b完了: ${clusteredPool.length}/${qualityPool.length}個残（${qualityPool.length - clusteredPool.length}個重複削除）`);
+
+      // ─── Phase 4: 300個未達の場合、補充ループ（最大3回）───
+      let fillIter = 0;
+      while (clusteredPool.length < TARGET_COUNT && fillIter < 3) {
+        fillIter++;
+        const deficit = TARGET_COUNT - clusteredPool.length;
+        const extraRawTarget = Math.ceil(deficit * 2.5);
+        send("step1", `[補充${fillIter}] あと${deficit}個必要 → ${extraRawTarget}個を追加生成中...`);
+
+        // 既存プールに対して重複チェックしながら追加生成
+        const existingSet = new Set(clusteredPool.map(w => w.word));
+        const existingEndingMap = new Map<string, WordEntry>();
+        for (const w of clusteredPool) {
+          const base = getEndingBase(w.reading);
+          if (base && !existingEndingMap.has(base)) existingEndingMap.set(base, w);
+        }
+
+        const extraRaw = await runStep1Generation(extraRawTarget, [...dupTailWords]);
+        const extraNew: WordEntry[] = [];
+        for (const w of extraRaw) {
+          if (existingSet.has(w.word)) continue;
+          const base = getEndingBase(w.reading);
+          if (base && existingEndingMap.has(base)) continue;
+          if (base) existingEndingMap.set(base, w);
+          existingSet.add(w.word);
+          extraNew.push(w);
+        }
+        const extraChecked = quickCharCheck(extraNew);
+        if (extraChecked.length === 0) { send("step1", `[補充${fillIter}] 新規ワードなし、終了`); break; }
+
+        // 新規ワードにStep2フィルタを適用
+        const extraFiltered = await runStep2Filter(extraChecked, `:fill${fillIter}`);
+        logTiming(`step2-fill-${fillIter}`);
+
+        // 全体に共通単語クラスタリングを再適用
+        const combined = [...clusteredPool, ...extraFiltered];
+        send("step2b", `[補充${fillIter}] 合計${combined.length}個を再クラスタリング中...`);
+        clusteredPool = await clusterBySharedWordAI(combined, `:fill${fillIter}`);
+        logTiming(`step2b-fill-${fillIter}`);
+        send("step1", `[補充${fillIter}完了] 合計${clusteredPool.length}個`);
       }
 
       // 300個を超えた場合はトリム
+      let finalQualityWords = clusteredPool;
       if (finalQualityWords.length > TARGET_COUNT) {
         finalQualityWords = finalQualityWords.slice(0, TARGET_COUNT);
       }
