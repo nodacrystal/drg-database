@@ -232,6 +232,47 @@ function countMoraFromRomaji(romaji: string): number {
 
 const ALLOWED_VOWEL_SUFFIXES = ["ae", "oe", "ua", "an", "ao", "iu"];
 
+// 攻撃角度一覧（各バッチに異なる角度を割り当てることで語彙の多様性を保証）
+const DISS_ANGLES = [
+  "外見・顔の造形（目・鼻・口・輪郭・その他顔パーツのひどさ）",
+  "体型・体格（太り方・痩せ方・姿勢・体の醜さ）",
+  "知能・頭脳の低さ（頭の悪さ・無知・学力の低さ）",
+  "性格の歪み・人格的欠陥（意地悪・ずるさ・卑屈さ・狡猾さ）",
+  "自意識過剰・勘違い（思い上がり・プライドの高さと実力のなさのギャップ）",
+  "社会的不適合・人間関係の破綻（友達ゼロ・浮いてる・嫌われ者）",
+  "仕事・能力の無能さ（役立たず・何もできない・足を引っ張る存在）",
+  "清潔感・衛生の欠如（不潔・臭い・身だしなみのひどさ）",
+  "精神的弱さ・メンタルの脆さ（豆腐メンタル・逃げ癖・根性なし）",
+  "存在価値・社会への悪影響（邪魔者・いない方がまし・空気を汚す存在）",
+  "口・発言の中身のなさ（嘘・言い訳・的外れ・つまらない話）",
+  "行動・態度のひどさ（マナー違反・非常識・空気を読めない）",
+  "お金・生活力の欠如（ビンボー・だらしない生活・金の管理ができない）",
+  "ファッション・センスの終わり（ダサい・時代遅れ・センスゼロ）",
+];
+
+// 複数ワードに共通して現れるひらがな部分文字列を抽出（使用済み単語の追跡用）
+function extractCommonSubstrings(words: WordEntry[]): string[] {
+  const subCount = new Map<string, number>();
+  for (const w of words) {
+    const hira = katakanaToHiragana(w.reading);
+    const seen = new Set<string>();
+    for (let len = 2; len <= 4; len++) {
+      for (let start = 0; start <= hira.length - len; start++) {
+        const sub = hira.slice(start, start + len);
+        if (!/^[ぁ-ゟ]+$/.test(sub)) continue;
+        if (seen.has(sub)) continue;
+        seen.add(sub);
+        subCount.set(sub, (subCount.get(sub) ?? 0) + 1);
+      }
+    }
+  }
+  return [...subCount.entries()]
+    .filter(([, count]) => count >= 2)
+    .sort((a, b) => b[1] - a[1] || b[0].length - a[0].length)
+    .slice(0, 60)
+    .map(([sub]) => sub);
+}
+
 function formatElapsed(ms: number): string {
   const s = Math.floor(ms / 1000);
   const m = Math.floor(s / 60);
@@ -343,79 +384,103 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       const dupTailWords = new Set<string>();
 
+      // 角度ごとの除外済みワードリストを管理（累積）
+      const accumulatedExclusions = new Set<string>();
+
       const runStep1Generation = async (targetCount: number, extraExclusions: string[] = []): Promise<WordEntry[]> => {
         const batchCount = Math.max(2, Math.ceil(targetCount / 50));
+        const words: WordEntry[] = [];
+        const batchSeen = new Set<string>();
 
-        const extraExclusionNote = extraExclusions.length > 0
-          ? `\n【追加禁止末尾】以下の末尾単語で終わるワードは生成禁止: ${extraExclusions.join("、")}`
-          : "";
-
-        const makePrompt = (_batchIndex: number) => `「${targetName}」をディスるワードを50個生成せよ。
+        // バッチプロンプト生成（角度指定 + 累積除外リスト付き）
+        const makePrompt = (batchIndex: number, usedWordsList: string[]) => {
+          const angle = DISS_ANGLES[batchIndex % DISS_ANGLES.length];
+          const usedNote = usedWordsList.length > 0
+            ? `\n【使用済み単語（絶対使用禁止）】以下のワードに含まれる名詞・単語は、ひらがな・カタカナ・漢字いずれの表記でも絶対に使用するな:\n${usedWordsList.slice(-150).join("、")}`
+            : "";
+          return `「${targetName}」をディスるワードを50個生成せよ。
 
 【ターゲット情報】
 ${target}
 
 【Lv.${level} ${levelConfig.label}】${levelConfig.instruction}
 
+【このバッチの攻撃角度】
+${angle}
+この角度に特化したワードのみ生成せよ。他の角度のワードは生成するな。
+
 【絶対ルール】
 - 1ワード10文字以内、4文字以上（ひらがな換算）
 - 小学生でもわかる簡単な言葉のみ
-- 同じ助詞・助動詞で終わるワードを重複させるな（例：〜だろ、〜だろ は禁止）
-- 関西弁・方言語尾は絶対禁止（やな/やわ/やろ/やで/やん/ねん/やんか/やんな/わな/じゃな/じゃろ/っちゃ等）→ 標準語のみ使用
-- 【体言止め必須】各ワードは必ず名詞・名詞句で終わらせること。助詞（〜な/〜だ/〜わ/〜よ/〜ね）、助動詞（〜てる/〜てた/〜です/〜ます）、形容詞語尾（〜い）、動詞活用形（〜する/〜いる）で終わるワードは絶対禁止
+- 同じ助詞・助動詞で終わるワードを重複させるな
+- 関西弁・方言語尾は絶対禁止（やな/やわ/やろ/やで/やん/ねん/やんか/やんな/わな/じゃな/じゃろ/っちゃ等）→ 標準語のみ
+- 【体言止め必須】名詞・名詞句で終わること。助詞・助動詞・形容詞語尾・動詞活用形で終わるワードは絶対禁止
 - ターゲット「${targetName}」に特化した内容
 - 造語OK（ただし意味が通じること）
-- 末尾単語がNG単語リストに記載されている単語は生成してはいけない。同じグループ内で同じ単語を使用してはいけない。
-- 生成後、これらの絶対ルールを全てのワードが守っているか検証。守られていないワードは削除せよ。
-- 生成されたワードで同じ単語を使用している場合は「より強烈なパンチライン」なワードを残し、それ以外は削除すること。
-・ワードの意味を理解すること。
-・ひらがな・カタカナ・漢字、表現が違えど同じ言葉であった場合、より「強烈なパンチライン」である方を残してそれ以外を削除せよ。
-・放送禁止用語、差別用語、商標名（IP）を使用している場合は削除せよ。
-- 生成数が300になるまで作業を繰り返すこと。
-${ngEndingNote}${extraExclusionNote}
-既出（生成するな）: ${shortHistory}
+- このバッチ内で同じ単語を使用するな
+- 放送禁止用語・差別用語・商標名（IP）は削除せよ
+- 生成後、全ルールを自己チェックし違反ワードを削除せよ${ngEndingNote}${usedNote}
+既出DB（生成するな）: ${shortHistory}
 
 【出力形式】1行1個:
 ワード/よみ(romaji)
 例: ポンコツ野郎/ぽんこつやろう(ponkotsuyarou)
 ※必ず「/」の後にひらがな読みを書き、(romaji)を付けること`;
+        };
 
-        const results: PromiseSettledResult<any>[] = [];
-        for (let batch = 0; batch < Math.ceil(batchCount / 2); batch++) {
-          const indices = [batch * 2, batch * 2 + 1].filter(i => i < batchCount);
-          const batchResults = await Promise.allSettled(
-            indices.map(i => aiGenerate(makePrompt(i), { ...geminiConfig, maxOutputTokens: 4096 }))
+        // ペア単位で逐次実行（各ペアが前ペアの結果を参照して同じ単語を避ける）
+        for (let pair = 0; pair < Math.ceil(batchCount / 2); pair++) {
+          const i0 = pair * 2;
+          const i1 = pair * 2 + 1;
+          const indices = [i0, i1].filter(i => i < batchCount);
+
+          // 現時点の累積除外リスト（このペアで生成するAIに渡す）
+          const currentUsedWords = [...accumulatedExclusions, ...extraExclusions];
+
+          const pairResults = await Promise.allSettled(
+            indices.map(i => aiGenerate(makePrompt(i, currentUsedWords), { ...geminiConfig, maxOutputTokens: 4096 }))
           );
-          results.push(...batchResults);
-        }
 
-        const words: WordEntry[] = [];
-        const batchSeen = new Set<string>();
-        for (let i = 0; i < results.length; i++) {
-          const result = results[i];
-          if (result.status !== "fulfilled") {
-            console.log(`[STEP1] Batch ${i + 1} FAILED`);
-            continue;
-          }
-          const text = result.value.text || "";
-          const entries = parseWordEntries(text);
-          let batchAdded = 0;
-          for (const e of entries) {
-            if (batchSeen.has(e.word)) {
-              const tail = e.reading.slice(-2);
-              if (tail.length >= 2) dupTailWords.add(tail);
+          const pairWords: WordEntry[] = [];
+          for (let r = 0; r < pairResults.length; r++) {
+            const result = pairResults[r];
+            const batchNum = pair * 2 + r + 1;
+            const angleLabel = DISS_ANGLES[(pair * 2 + r) % DISS_ANGLES.length].split("（")[0];
+            if (result.status !== "fulfilled") {
+              console.log(`[STEP1] Batch ${batchNum} (${angleLabel}) FAILED`);
               continue;
             }
-            if (ngWordList.length > 0 && ngWordList.some(ng => e.word.endsWith(ng))) continue;
-            const isHiragana = /^[ぁ-ゟー]+$/.test(e.reading);
-            const len = isHiragana ? e.reading.length : countMoraFromRomaji(e.romaji);
-            if (len < 3 || len > 10) continue;
-            if (!isHiragana) e.reading = e.word;
-            batchSeen.add(e.word);
-            words.push(e);
-            batchAdded++;
+            const text = result.value.text || "";
+            const entries = parseWordEntries(text);
+            let batchAdded = 0;
+            for (const e of entries) {
+              if (batchSeen.has(e.word)) {
+                const tail = e.reading.slice(-2);
+                if (tail.length >= 2) dupTailWords.add(tail);
+                continue;
+              }
+              if (ngWordList.length > 0 && ngWordList.some(ng => e.word.endsWith(ng))) continue;
+              const isHiragana = /^[ぁ-ゟー]+$/.test(e.reading);
+              const len = isHiragana ? e.reading.length : countMoraFromRomaji(e.romaji);
+              if (len < 3 || len > 10) continue;
+              if (!isHiragana) e.reading = e.word;
+              batchSeen.add(e.word);
+              pairWords.push(e);
+              batchAdded++;
+            }
+            console.log(`[STEP1] Batch ${batchNum} [${angleLabel}]: parsed=${entries.length} added=${batchAdded}`);
           }
-          console.log(`[STEP1] Batch ${i + 1}: parsed=${entries.length} added=${batchAdded}`);
+
+          words.push(...pairWords);
+
+          // このペアで生成したワードのワード名を累積除外リストに追加
+          // → 次のペアはこれらに含まれる単語を避ける
+          for (const w of pairWords) {
+            accumulatedExclusions.add(w.word);
+          }
+          // さらに共通部分文字列も除外リストに追加
+          const commonSubs = extractCommonSubstrings(pairWords);
+          for (const s of commonSubs) accumulatedExclusions.add(s);
         }
         return words;
       };
@@ -472,18 +537,23 @@ ${wordList}
         const wordList = words.map(w => w.word).join("\n");
         const prompt = `以下の悪口ワードリストを精査せよ。
 
-【ルール】
-同じ名詞・単語（ひらがな・カタカナ・漢字いずれの表記でも読みが同じなら同一とみなす）が、先頭・中間・末尾いずれの位置であっても複数のワードで使われている場合、そのグループで最も辛辣・強烈なパンチラインのワードを1個だけ残し、他を全て削除せよ。
+【作業手順】
+STEP1: 全ワードを読み、各ワードに含まれる「名詞・固有名詞」をリストアップせよ。
+STEP2: 同じ名詞（ひらがな・カタカナ・漢字問わず、読みが同じなら同一）が複数のワードに現れているグループを特定せよ。
+STEP3: 各グループの中で最も辛辣・強烈・パンチラインのワードを1個だけ選び、他を削除せよ。
+STEP4: 共通名詞グループに属さないワードは全て残せ。
 
-【例】
-・「クソ顔」「汚い顔」「ブス顔」→「顔(かお)」が共通 → 最強1個を残す
-・「カス野郎」「ゴミ野郎」「クズ野郎」→「野郎(やろう)」が共通 → 最強1個を残す
-・「生きる価値ゼロ」「存在価値なし」→「価値(かち)」が共通 → 最強1個を残す
-・「脳ミソ腐れ」「脳なし」→「脳(のう)」が共通 → 最強1個を残す
+【共通単語の例】
+・「クソ顔」「汚い顔」「ブス顔」→「顔(かお)」共通 → 最強1個だけ残す
+・「カス野郎」「ゴミ野郎」「クズ野郎」→「野郎(やろう)」共通 → 最強1個だけ残す
+・「価値ゼロ」「価値なし」「存在価値ゼロ」→「価値(かち)」共通 → 最強1個だけ残す
+・「脳ミソ腐れ」「脳なし野郎」→「脳(のう)」共通 → 最強1個だけ残す
+・「ゴミ人間」「社会のゴミ」「生ゴミ」→「ゴミ(ごみ)」共通 → 最強1個だけ残す
 
-【注意】
-・共通名詞を持たないワードは全て残せ
-・削除するのは「共通名詞グループ内の弱い方」のみ
+【厳守事項】
+・先頭・中間・末尾いずれの位置に名詞が現れても対象
+・共通名詞を持たないワードは削除禁止
+・出力は元の表記そのまま（変換・書き換え禁止）
 
 ワードリスト:
 ${wordList}
@@ -496,7 +566,8 @@ ${wordList}
             .map(l => l.trim().replace(/^「/, "").replace(/」$/, "").replace(/^\d+[\.\)）、]\s*/, "").replace(/^[・●▸►\-]\s*/, "").trim())
             .filter(l => l.length > 0 && rawSet.has(l));
           const keptSet = new Set(kept);
-          if (keptSet.size < words.length * 0.2) {
+          // クラスタリングで通常除去されるのは20-30%程度。50%以上除去されたらAIの誤動作とみなし全保持
+          if (keptSet.size < words.length * 0.4) {
             console.log(`[CLUSTER${label}] AI returned too few (${keptSet.size}/${words.length}), keeping all`);
             return words;
           }
