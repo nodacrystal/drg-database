@@ -279,6 +279,70 @@ function formatElapsed(ms: number): string {
   return m > 0 ? `${m}分${s % 60}秒` : `${s}秒`;
 }
 
+// ─── Perfect Rhyme: 母音4つ以上一致 + 子音グループ一致 ───────────────────────
+
+const CONSONANT_RHYME_GROUP: Record<string, number> = {};
+for (const c of ["k","s","p","t","ch","ts","ky","sh","py","hy"]) CONSONANT_RHYME_GROUP[c] = 1; // 無声音・破裂/摩擦音
+for (const c of ["g","z","d","b","gy","zy","by"])               CONSONANT_RHYME_GROUP[c] = 2; // 有声音・破裂/摩擦音
+for (const c of ["n","m","ny"])                                  CONSONANT_RHYME_GROUP[c] = 3; // 鼻音
+for (const c of ["y","r","w","ry"])                              CONSONANT_RHYME_GROUP[c] = 4; // 半母音・流音
+for (const c of ["h","i"])                                       CONSONANT_RHYME_GROUP[c] = 5; // 特殊・独立
+
+interface RomajiSyllable { consonant: string; vowel: string; }
+
+function parseRomajiSyllables(romaji: string): RomajiSyllable[] {
+  const s = romaji.toLowerCase().replace(/[^a-z]/g, "");
+  const syllables: RomajiSyllable[] = [];
+  const MULTI_CONS = ["ch","ts","sh","ky","gy","ny","ry","zy","by","py","hy","sy"];
+  const VOWELS = new Set(["a","e","i","o","u"]);
+  let idx = 0;
+  while (idx < s.length) {
+    // Standalone n before non-vowel or end
+    if (s[idx] === "n" && (idx + 1 >= s.length || !VOWELS.has(s[idx + 1]))) {
+      syllables.push({ consonant: "", vowel: "n" });
+      idx++; continue;
+    }
+    // Multi-char consonant + vowel
+    let matched = false;
+    for (const mc of MULTI_CONS) {
+      if (s.startsWith(mc, idx) && idx + mc.length < s.length && VOWELS.has(s[idx + mc.length])) {
+        syllables.push({ consonant: mc, vowel: s[idx + mc.length] });
+        idx += mc.length + 1; matched = true; break;
+      }
+    }
+    if (matched) continue;
+    // Single consonant + vowel
+    if (!VOWELS.has(s[idx]) && idx + 1 < s.length && VOWELS.has(s[idx + 1])) {
+      syllables.push({ consonant: s[idx], vowel: s[idx + 1] });
+      idx += 2; continue;
+    }
+    // Standalone vowel
+    if (VOWELS.has(s[idx])) {
+      syllables.push({ consonant: "", vowel: s[idx] });
+      idx++; continue;
+    }
+    idx++; // skip (double consonant etc.)
+  }
+  return syllables;
+}
+
+function computePerfectRhymeKey(romaji: string): string | null {
+  const syllables = parseRomajiSyllables(romaji);
+  let vowelCount = 0;
+  let startIdx = syllables.length;
+  for (let j = syllables.length - 1; j >= 0; j--) {
+    if (syllables[j].vowel !== "n") vowelCount++;
+    startIdx = j;
+    if (vowelCount >= 4) break;
+  }
+  if (vowelCount < 4) return null;
+  const suffix = syllables.slice(startIdx);
+  return suffix.map(syl => {
+    const g = syl.consonant ? (CONSONANT_RHYME_GROUP[syl.consonant] ?? 9) : 0;
+    return `${g}${syl.vowel}`;
+  }).join("");
+}
+
 const LEVEL_CONFIGS: Record<number, { label: string; wordType: string; instruction: string; examples: string; ageCheck: boolean }> = {
   1: {
     label: "毒舌",
@@ -764,26 +828,22 @@ ${wordList}
           return bkts;
         };
 
+        // Perfect Rhyme: 母音4つ以上一致 + 子音グループ一致
         const perfectBuckets: Record<string, typeof items> = {};
         for (const w of words) {
-          if (w.vowels.length >= 7) {
-            for (let len = w.vowels.length; len >= 7; len--) {
-              const s = w.vowels.slice(-len);
-              (perfectBuckets[s] ??= []).push(w);
-            }
-          }
+          const key = computePerfectRhymeKey(w.romaji);
+          if (key !== null) (perfectBuckets[key] ??= []).push(w);
         }
         const perfectEntries = Object.entries(perfectBuckets)
-          .filter(([s, g]) => {
-            const uniqueIds = [...new Set(g.map(w => w.id))];
-            return uniqueIds.length >= 2;
-          })
-          .sort((a, b) => b[0].length - a[0].length);
+          .filter(([, g]) => [...new Set(g.map(w => w.id))].length >= 2)
+          .sort((a, b) => b[0].length - a[0].length || b[1].length - a[1].length);
         for (const [ps, pWords] of perfectEntries) {
           const uniqueWords = [...new Map(pWords.map(w => [w.id, w])).values()]
             .filter(w => !assigned.has(w.id));
           if (uniqueWords.length >= 2) {
-            rhymeGroups.push({ suffix: ps, words: sortByRomaji(uniqueWords), tier: "perfect" });
+            // Display suffix = vowels extracted from key (remove group numbers)
+            const displaySuffix = ps.replace(/[0-9]/g, "");
+            rhymeGroups.push({ suffix: displaySuffix, words: sortByRomaji(uniqueWords), tier: "perfect" });
             for (const w of uniqueWords) assigned.add(w.id);
           }
         }
