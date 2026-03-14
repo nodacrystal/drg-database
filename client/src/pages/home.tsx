@@ -1063,7 +1063,14 @@ export default function Home() {
                   <div className="text-center py-8 text-muted-foreground text-sm" data-testid="text-empty-ng">NG単語はまだありません。</div>
                 ) : (
                   <div className="flex flex-wrap gap-1.5 max-h-96 overflow-y-auto" data-testid="ng-words-container">
-                    {ngWordsQuery.data.words.map(w => (
+                    {[...ngWordsQuery.data.words]
+                      .sort((a, b) => {
+                        const lenA = [...a.word].length;
+                        const lenB = [...b.word].length;
+                        if (lenA !== lenB) return lenA - lenB;
+                        return a.word.localeCompare(b.word, "ja");
+                      })
+                      .map(w => (
                       <button key={w.id} onClick={() => toggleNgSelection(w.id)}
                         className={`inline-flex items-center gap-1 text-xs rounded px-2 py-1 cursor-pointer transition-all ${selectedNgIds.has(w.id) ? "bg-primary text-primary-foreground border border-primary ring-2 ring-primary/30" : "bg-destructive/10 border border-destructive/20 hover:bg-destructive/20"}`}
                         data-testid={`ng-word-${w.id}`}>
@@ -1167,6 +1174,38 @@ JSON配列のみ出力:
 {候補ワード一覧}`}</pre>
                   </div>
                 </div>
+              </CardContent>
+            </Card>
+
+            {/* NG単語リスト（ルールタブ） */}
+            <Card>
+              <CardContent className="p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Ban className="w-5 h-5 text-destructive" />
+                  <h2 className="text-base font-semibold">NG単語リスト</h2>
+                  <Badge variant="secondary">{ngCount.toLocaleString()}件</Badge>
+                </div>
+                <p className="text-xs text-muted-foreground">文字数順・あいうえお順。末尾がこのリストと一致するワードは生成・追加されません。</p>
+                {ngWordsQuery.isLoading ? (
+                  <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-6 w-full rounded-md" />)}</div>
+                ) : !ngWordsQuery.data || ngWordsQuery.data.words.length === 0 ? (
+                  <div className="text-center py-4 text-muted-foreground text-sm">NG単語はまだありません。</div>
+                ) : (
+                  <div className="flex flex-wrap gap-1.5" data-testid="rules-ng-words-container">
+                    {[...ngWordsQuery.data.words]
+                      .sort((a, b) => {
+                        const lenA = [...a.word].length;
+                        const lenB = [...b.word].length;
+                        if (lenA !== lenB) return lenA - lenB;
+                        return a.word.localeCompare(b.word, "ja");
+                      })
+                      .map(w => (
+                        <span key={w.id} className="inline-flex items-center text-xs rounded px-2 py-0.5 bg-destructive/10 border border-destructive/20 font-medium" data-testid={`rules-ng-word-${w.id}`}>
+                          {w.word}
+                        </span>
+                      ))}
+                  </div>
+                )}
               </CardContent>
             </Card>
           </div>
