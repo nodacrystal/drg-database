@@ -1270,11 +1270,9 @@ JSONのみ出力（説明文・コードブロック不要）。`;
     const ngSuffixes = new Set<string>();
     const PARALLEL = 8;
 
-    // ─── PHASE 0: Programmatic reading-suffix detection ───
-    // Group words by reading suffix (2-7 hiragana chars) within each bucket.
-    // This reliably catches ALL same-ending words regardless of kanji/kana surface form.
-    // Key: readingSuffix → canonical reading suffix
-    // Value: array of TailDupItem sharing that reading suffix
+    // ─── PHASE 0: Programmatic reading-suffix AND prefix detection ───
+    // Group words by reading suffix OR prefix (2-7 hiragana chars) within each bucket.
+    // Keys: "suffix:XXX" for tail matches, "prefix:XXX" for head matches
     const readingSuffixGroups: Map<string, TailDupItem[]> = new Map();
 
     for (const [, bucketWords] of Object.entries(buckets)) {
@@ -1283,47 +1281,67 @@ JSONのみ出力（説明文・コードブロック不要）。`;
 
       // Build suffix → words map for this bucket
       const localSufMap: Record<string, Set<number>> = {};
+      // Build prefix → words map for this bucket
+      const localPreMap: Record<string, Set<number>> = {};
       for (const w of words) {
         const r = w.reading;
         for (let len = 2; len <= Math.min(7, r.length - 1); len++) {
-          const suf = r.slice(-len);
-          (localSufMap[suf] ??= new Set()).add(w.id);
+          localSufMap[r.slice(-len)] ??= new Set();
+          localSufMap[r.slice(-len)].add(w.id);
+          localPreMap[r.slice(0, len)] ??= new Set();
+          localPreMap[r.slice(0, len)].add(w.id);
         }
       }
 
-      // For each suffix with 2+ words, record the group
-      // Prefer the LONGEST suffix that covers a given set of words
-      const usedIds = new Set<string>(); // key = sorted id combo
-      const suffixes = Object.entries(localSufMap)
+      // For each suffix with 2+ words, record the group (longest first)
+      const usedIds = new Set<string>();
+      for (const [suf, idSet] of Object.entries(localSufMap)
         .filter(([, ids]) => ids.size >= 2)
-        .sort((a, b) => b[0].length - a[0].length); // longest suffix first
-
-      for (const [suf, idSet] of suffixes) {
+        .sort((a, b) => b[0].length - a[0].length)) {
         const ids = [...idSet].sort().join(",");
-        if (usedIds.has(ids)) continue; // already covered by a longer suffix
+        if (usedIds.has(ids)) continue;
         usedIds.add(ids);
-        const groupKey = `reading:${suf}`;
+        const groupKey = `suffix:${suf}`;
+        const existing = readingSuffixGroups.get(groupKey) ?? [];
+        const toAdd = words.filter(w => idSet.has(w.id) && !existing.some(e => e.id === w.id));
+        readingSuffixGroups.set(groupKey, [...existing, ...toAdd]);
+      }
+
+      // For each prefix with 2+ words, record the group (longest first)
+      const usedPreIds = new Set<string>();
+      for (const [pre, idSet] of Object.entries(localPreMap)
+        .filter(([, ids]) => ids.size >= 2)
+        .sort((a, b) => b[0].length - a[0].length)) {
+        const ids = [...idSet].sort().join(",");
+        if (usedPreIds.has(ids)) continue;
+        usedPreIds.add(ids);
+        const groupKey = `prefix:${pre}`;
         const existing = readingSuffixGroups.get(groupKey) ?? [];
         const toAdd = words.filter(w => idSet.has(w.id) && !existing.some(e => e.id === w.id));
         readingSuffixGroups.set(groupKey, [...existing, ...toAdd]);
       }
     }
 
-    // ─── PHASE 1: Validate reading suffixes as complete standalone words ───
-    const candidateReadingSuffixes = [...readingSuffixGroups.keys()]
-      .map(k => k.slice("reading:".length))
-      .filter(s => readingSuffixGroups.get(`reading:${s}`)!.length >= 2);
+    // ─── PHASE 1: Validate reading suffixes/prefixes as complete standalone words ───
+    // Extract the raw strings from both "suffix:XXX" and "prefix:XXX" keys
+    const candidateStrings = [...readingSuffixGroups.keys()]
+      .map(k => ({
+        key: k,
+        str: k.startsWith("suffix:") ? k.slice("suffix:".length) : k.slice("prefix:".length)
+      }))
+      .filter(({ key, str }) => readingSuffixGroups.get(key)!.length >= 2 && str.length > 0);
 
-    const validReadingSuffixes = new Set<string>();
-    if (candidateReadingSuffixes.length > 0) {
-      send("validate", `読み末尾を単語検証中 (${candidateReadingSuffixes.length}候補)...`);
+    const validStrings = new Set<string>();
+    if (candidateStrings.length > 0) {
+      send("validate", `単語検証中 (${candidateStrings.length}候補: 末尾+先頭)...`);
       const VBATCH = 80;
-      for (let i = 0; i < candidateReadingSuffixes.length; i += VBATCH) {
-        const chunk = candidateReadingSuffixes.slice(i, i + VBATCH);
+      const dedupStrs = [...new Set(candidateStrings.map(c => c.str))];
+      for (let i = 0; i < dedupStrs.length; i += VBATCH) {
+        const chunk = dedupStrs.slice(i, i + VBATCH);
         const validationPrompt = `以下のひらがな文字列が「単独で辞書に載る完全な日本語単語の読み」かどうか判定せよ。
 
 【合格（完全な単語の読み）】: 名詞・代名詞・よく知られた表現の読み
-合格例: おとこ（男）、かお（顔）、おんな（女）、かたまり（塊）、やろう（野郎）、のう（脳）、からだ（体）、ぬけがら（抜け殻）、かべ（壁）、ぶた（豚）、かがみ（鏡）、くず（屑）、おう（王）、じん（人）、めん（面）、だん（弾）、さん（山）、もの（者・物）
+合格例: おとこ（男）、かお（顔）、おんな（女）、かたまり（塊）、やろう（野郎）、のう（脳）、からだ（体）、ぬけがら（抜け殻）、かべ（壁）、ぶた（豚）、かがみ（鏡）、くず（屑）、おう（王）、じん（人）、めん（面）、だん（弾）、さん（山）、もの（者・物）、ごみ（ゴミ）、あほ（アホ）、ばか（バカ）
 
 【不合格（断片・活用形・助詞）】: 完全な単語でない
 不合格例: のかたまり（の＋かたまり）、なかたまり、くかたまり、ぐん、でん、りや、いた、ぶん、てる、てた、よ、の、な、か、わ、さ
@@ -1339,12 +1357,12 @@ ${chunk.map((e, idx) => `${idx + 1}. ${e}`).join("\n")}
           if (vMatch) {
             const validIdxs = JSON.parse(vMatch[0]) as number[];
             for (const idx of validIdxs) {
-              if (idx >= 1 && idx <= chunk.length) validReadingSuffixes.add(chunk[idx - 1]);
+              if (idx >= 1 && idx <= chunk.length) validStrings.add(chunk[idx - 1]);
             }
           }
         } catch {}
       }
-      send("validate", `読み末尾検証完了: ${candidateReadingSuffixes.length}候補中 ${validReadingSuffixes.size}語採用`);
+      send("validate", `単語検証完了: ${dedupStrs.length}候補中 ${validStrings.size}語採用`);
     }
 
     // ─── PHASE 2: AI-based surface-form detection (cross-script variants) ───
@@ -1354,43 +1372,50 @@ ${chunk.map((e, idx) => `${idx + 1}. ${e}`).join("\n")}
       .map(([key, words]) => ({ key, words: words.filter(w => !toDelete.has(w.id)) }))
       .filter(g => g.words.length >= 2 && g.words.some(w => !w.protected));
 
-    type EndingGroup = { ending: string; words: string[]; readingSuffix?: string };
+    type EndingGroup = { shared: string; reading?: string; position?: "suffix" | "prefix"; ending?: string; words: string[]; readingSuffix?: string };
     const aiEndingGroups: { key: string; endings: EndingGroup[]; srcWords: TailDupItem[] }[] = [];
 
     for (let b = 0; b < groupsToScan.length; b += PARALLEL) {
       const batch = groupsToScan.slice(b, b + PARALLEL);
       const results = await Promise.all(batch.map(async g => {
         const wordList = g.words.map(w => `${w.word}/${w.reading}`).join("\n");
-        const prompt = `以下の悪口ワードリストで、末尾単語が完全に一致（同一単語）するものをグループ化せよ。
+        const prompt = `以下の悪口ワードリストで、先頭または末尾に同じ名詞単語が一致するものをグループ化せよ。
 
-【対象となる末尾単語（例）】
-単独でも意味が完結する名詞のみ対象:
-・1文字: 体(からだ/たい)・顔(かお)・脳(のう)・腹(はら)・肉・男・女・者・王・面・玉・虫・人・金
-・2文字以上: 野郎・面倒・ゴミ・アホ・人間・固まり・塊(かたまり)・抜け殻・機関車・化身・呪い・宝物・成功
-・表記違い（漢字/ひらがな/カタカナ）でも読みが同じなら同一グループに入れること
-  例: 固まり(かたまり) = 塊(かたまり) = かたまり → 同一グループ
+【グループ化の対象】
+・末尾一致(suffix): ワードの末尾に同じ名詞がある（例: ゴミ顔、汚い顔 → 末尾「顔」が共通）
+・先頭一致(prefix): ワードの先頭に同じ名詞がある（例: ゴミ顔、ゴミ野郎 → 先頭「ゴミ」が共通）
+・表記違い（漢字/ひらがな/カタカナ）でも読みが同じなら同一グループ
 
-【除外する末尾】
+【対象となる単語（例）】
+単独でも意味が完結する名詞のみ:
+・1文字: 体・顔・脳・腹・肉・男・女・者・王・面・玉・虫・人・金
+・2文字以上: 野郎・面倒・ゴミ・アホ・人間・固まり・塊・抜け殻・バカ・クズ・豚
+
+【除外する単語（先頭・末尾どちらも）】
 助詞・助動詞・断片: の・な・だ・わ・よ・て・で・か・を・は・が・に・ない・ぶん・ぐん
-動詞活用形: めろ・みろ・しろ・いけ・かけ・られ・てる・てた
+動詞活用形: める・みる・する・いる・なる・られ・てる・てた
 
 ワード一覧（表記/読み）:
 ${wordList}
 
 JSON配列のみ出力:
-[{"ending":"末尾単語（代表表記）","readingSuffix":"読み","words":["ワード1","ワード2"]}]
-一致なしは[]。`;
+[{"shared":"共通単語（代表表記）","reading":"読み","position":"suffix","words":["ワード1","ワード2"]}]
+positionはsuffixまたはprefix。一致なしは[]。`;
         try {
           const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 2048 });
           const text = result?.text || "";
           const jsonMatch = text.match(/\[[\s\S]*\]/);
           if (!jsonMatch) return [];
-          return JSON.parse(jsonMatch[0]) as EndingGroup[];
+          return (JSON.parse(jsonMatch[0]) as EndingGroup[]).map(e => ({
+            ...e,
+            ending: e.shared || e.ending || "",
+            readingSuffix: e.reading || e.readingSuffix || ""
+          }));
         } catch { return []; }
       }));
       for (let i = 0; i < batch.length; i++) {
-        const endings = (results[i] || []).filter(e =>
-          e.words && e.words.length >= 2 && e.ending && [...e.ending].length >= 1
+        const endings = (results[i] || []).filter((e: EndingGroup) =>
+          e.words && e.words.length >= 2 && (e.shared || e.ending) && [...(e.shared || e.ending || "")].length >= 1
         );
         if (endings.length > 0) {
           aiEndingGroups.push({ key: batch[i].key, endings, srcWords: batch[i].words });
@@ -1403,43 +1428,49 @@ JSON配列のみ出力:
     const pickTasks: PickTask[] = [];
     const processedGroupKeys = new Set<string>(); // prevent double-processing same word sets
 
-    // Fallback: if AI validation returned 0 (likely glitch), treat all reading suffixes as valid
-    const useAllReadingSuffixes = validReadingSuffixes.size === 0 && candidateReadingSuffixes.length > 0;
-    if (useAllReadingSuffixes) {
-      send("validate", "読み末尾バリデーション0件のためフォールバック: 全候補を採用");
-      for (const s of candidateReadingSuffixes) validReadingSuffixes.add(s);
+    // Fallback: if AI validation returned 0 (likely glitch), treat all candidates as valid
+    const useAllStrings = validStrings.size === 0 && candidateStrings.length > 0;
+    if (useAllStrings) {
+      send("validate", "単語バリデーション0件のためフォールバック: 全候補を採用");
+      for (const { str } of candidateStrings) validStrings.add(str);
     }
 
-    // From programmatic reading-suffix detection
+    // From programmatic suffix/prefix detection
     for (const [groupKey, groupWords] of readingSuffixGroups) {
-      const readingSuffix = groupKey.slice("reading:".length);
-      if (!validReadingSuffixes.has(readingSuffix)) continue;
+      const isPrefix = groupKey.startsWith("prefix:");
+      const readingStr = isPrefix ? groupKey.slice("prefix:".length) : groupKey.slice("suffix:".length);
+      if (!validStrings.has(readingStr)) continue;
       const candidates = groupWords.filter(w => !toDelete.has(w.id));
       if (candidates.length < 2) continue;
       const key = candidates.map(w => w.id).sort().join(",");
       if (processedGroupKeys.has(key)) continue;
       processedGroupKeys.add(key);
-      send("check4", `「${readingSuffix}」系(読み一致) ${candidates.length}個検出`);
-      pickTasks.push({ candidates, ending: readingSuffix });
+      const posLabel = isPrefix ? "先頭" : "末尾";
+      send("check4", `「${readingStr}」系(${posLabel}一致) ${candidates.length}個検出`);
+      pickTasks.push({ candidates, ending: readingStr });
     }
 
     // From AI surface-form detection
     for (const eg of aiEndingGroups) {
       for (const ending of eg.endings) {
-        // Match by word name OR reading suffix
-        const rsuffix = ending.readingSuffix || "";
+        const sharedStr = ending.shared || ending.ending || "";
+        const rsuffix = ending.readingSuffix || ending.reading || "";
+        const isPrefix = ending.position === "prefix";
         const candidates = eg.srcWords.filter(w => {
           if (toDelete.has(w.id)) return false;
           if (ending.words.includes(w.word)) return true;
-          if (rsuffix && w.reading.endsWith(rsuffix)) return true;
+          if (rsuffix) {
+            if (isPrefix ? w.reading.startsWith(rsuffix) : w.reading.endsWith(rsuffix)) return true;
+          }
           return false;
         });
         if (candidates.length < 2) continue;
         const key = candidates.map(w => w.id).sort().join(",");
         if (processedGroupKeys.has(key)) continue;
         processedGroupKeys.add(key);
-        send("check4", `「${ending.ending}」系(AI検出) ${candidates.length}個検出`);
-        pickTasks.push({ candidates, ending: ending.ending });
+        const posLabel = isPrefix ? "先頭" : "末尾";
+        send("check4", `「${sharedStr}」系(AI ${posLabel}検出) ${candidates.length}個検出`);
+        pickTasks.push({ candidates, ending: sharedStr });
       }
     }
 
@@ -1845,6 +1876,54 @@ ${wordList}`);
       const added = await addNgWords(entries);
       res.json({ added, total: await getNgWordCount() });
     } catch { res.status(500).json({ error: "インポートに失敗しました" }); }
+  });
+
+  app.post("/api/ng-words/cleanup", async (req, res) => {
+    try {
+      const allNgWords = await getAllNgWords();
+      if (allNgWords.length === 0) return res.json({ deleted: 0, remaining: 0 });
+
+      const BATCH = 80;
+      const toDeleteIds: number[] = [];
+
+      for (let i = 0; i < allNgWords.length; i += BATCH) {
+        const chunk = allNgWords.slice(i, i + BATCH);
+        const prompt = `以下の単語リストを判定せよ。「辞書に載っている独立した単語」であれば合格。
+
+【合格（単独で意味が通る単語）】
+名詞・固有表現: 顔、野郎、人間、ゴミ、脳みそ、アホ、バカ、クズ、豚、塊、者、面、玉 など
+単独で意味が完結する言葉なら合格。
+
+【不合格（それ単体では意味不明・断片）】
+・助詞・助動詞: な、だ、わ、よ、ね、て、で、か、の、を、は、が、に
+・意味のない断片: ぐん、ぶん、くりん、りん、のう（単体では脳だが文脈なければ断片）など
+・活用形の末尾だけ: てる、てた、られ、する、いる
+
+判定対象:
+${chunk.map((w, idx) => `${idx + 1}. ${w.word}`).join("\n")}
+
+合格のもの番号のみJSON配列で返せ（例: [1,3,5]）。全て不合格なら[]:`;
+
+        try {
+          const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 512 });
+          const text = result?.text || "";
+          const match = text.match(/\[[\s\S]*?\]/);
+          if (match) {
+            const validIdxs = JSON.parse(match[0]) as number[];
+            const validIds = new Set(
+              validIdxs.filter(idx => idx >= 1 && idx <= chunk.length).map(idx => chunk[idx - 1].id)
+            );
+            for (const w of chunk) {
+              if (!validIds.has(w.id)) toDeleteIds.push(w.id);
+            }
+          }
+        } catch { /* keep all on error */ }
+      }
+
+      if (toDeleteIds.length > 0) await deleteNgWords(toDeleteIds);
+      const remaining = await getNgWordCount();
+      res.json({ deleted: toDeleteIds.length, remaining });
+    } catch { res.status(500).json({ error: "NG整理に失敗しました" }); }
   });
 
   app.get("/api/favorites/export-pdf", async (_req, res) => {

@@ -335,6 +335,16 @@ export default function Home() {
     },
   });
 
+  const ngCleanupMutation = useMutation({
+    mutationFn: async () => { const res = await apiRequest("POST", "/api/ng-words/cleanup"); return res.json(); },
+    onSuccess: (data) => {
+      toast({ title: "NG整理完了", description: `${data.deleted}個の断片を削除しました（残り${data.remaining}件）` });
+      queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
+    },
+    onError: () => toast({ title: "エラー", description: "NG整理に失敗しました", variant: "destructive" }),
+  });
+
   const addToFavorites = useCallback(async () => {
     if (checkedWords.size === 0) { toast({ title: "未選択", description: "ワードを選択してください" }); return; }
     const allEntries = getAllEntries();
@@ -1012,6 +1022,10 @@ export default function Home() {
                     <Badge variant="secondary">{ngCount.toLocaleString()}件</Badge>
                   </div>
                   <div className="flex flex-wrap gap-1.5">
+                    <Button variant="outline" size="sm" onClick={() => ngCleanupMutation.mutate()} disabled={ngCleanupMutation.isPending || ngCount === 0} data-testid="button-ng-cleanup">
+                      {ngCleanupMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Sparkles className="w-3.5 h-3.5 mr-1" />}
+                      NG整理
+                    </Button>
                     <Button variant="outline" size="sm" onClick={copyNgWords} disabled={ngCount === 0} data-testid="button-copy-ng"><Copy className="w-3.5 h-3.5 mr-1" />コピー</Button>
                     <Button variant="outline" size="sm" onClick={handleNgJsonExport} disabled={ngCount === 0} data-testid="button-ng-export-json"><FileJson className="w-3.5 h-3.5 mr-1" />JSON保存</Button>
                     <Button variant="outline" size="sm" onClick={() => ngJsonInputRef.current?.click()} data-testid="button-ng-import-json"><Upload className="w-3.5 h-3.5 mr-1" />JSON読込</Button>
