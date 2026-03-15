@@ -39,19 +39,43 @@ export function parseRomajiSyllables(romaji: string): RomajiSyllable[] {
   return syllables;
 }
 
+/** 旧関数：後方互換のため残す（現在はcomputePerfectRhymeDataに移行） */
 export function computePerfectRhymeKey(romaji: string): string | null {
+  const data = computePerfectRhymeData(romaji);
+  if (!data) return null;
+  return data.syllables.map(syl => {
+    const g = syl.consonant ? (CONSONANT_RHYME_GROUP[syl.consonant] ?? 9) : 0;
+    return `${g}${syl.vowel}`;
+  }).join("");
+}
+
+/** Perfect Rhyme用: 6母音以上の末尾音節列を返す */
+export function computePerfectRhymeData(romaji: string): { vowelKey: string; syllables: RomajiSyllable[] } | null {
   const syllables = parseRomajiSyllables(romaji);
   let vowelCount = 0;
   let startIdx = syllables.length;
   for (let j = syllables.length - 1; j >= 0; j--) {
     if (syllables[j].vowel !== "n") vowelCount++;
     startIdx = j;
-    if (vowelCount >= 4) break;
+    if (vowelCount >= 6) break;
   }
-  if (vowelCount < 4) return null;
+  if (vowelCount < 6) return null;
   const suffix = syllables.slice(startIdx);
-  return suffix.map(syl => {
-    const g = syl.consonant ? (CONSONANT_RHYME_GROUP[syl.consonant] ?? 9) : 0;
-    return `${g}${syl.vowel}`;
-  }).join("");
+  const vowelKey = suffix.map(s => s.vowel).join("");
+  return { vowelKey, syllables: suffix };
+}
+
+/** 2つの音節列の一致率を計算（右端揃え・子音グループ比較） */
+export function syllableMatchRate(a: RomajiSyllable[], b: RomajiSyllable[]): number {
+  const maxLen = Math.max(a.length, b.length);
+  if (maxLen === 0) return 1;
+  let matches = 0;
+  for (let i = 1; i <= Math.min(a.length, b.length); i++) {
+    const sa = a[a.length - i];
+    const sb = b[b.length - i];
+    const ga = sa.consonant ? (CONSONANT_RHYME_GROUP[sa.consonant] ?? 9) : 0;
+    const gb = sb.consonant ? (CONSONANT_RHYME_GROUP[sb.consonant] ?? 9) : 0;
+    if (ga === gb && sa.vowel === sb.vowel) matches++;
+  }
+  return matches / maxLen;
 }

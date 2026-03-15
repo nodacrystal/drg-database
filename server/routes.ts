@@ -15,7 +15,7 @@ import {
   countMoraFromRomaji, extractCommonSubstrings, formatElapsed, getEndingBase,
   type WordEntry,
 } from "./lib/words";
-import { computePerfectRhymeKey, CONSONANT_RHYME_GROUP } from "./lib/rhyme";
+import { computePerfectRhymeData, syllableMatchRate, CONSONANT_RHYME_GROUP } from "./lib/rhyme";
 import { ALLOWED_VOWEL_SUFFIXES, DISS_ANGLES, LEVEL_CONFIGS } from "./lib/generate";
 
 const dissRequestSchema = z.object({
@@ -679,27 +679,45 @@ JSON配列で出力（全ワード分必須）:
           return bkts;
         };
 
-        const perfectBuckets: Record<string, typeof items> = {};
-        for (const w of words) {
-          const key = computePerfectRhymeKey(w.romaji);
-          if (key !== null) (perfectBuckets[key] ??= []).push(w);
+        // Perfect Rhyme: 6母音以上・90%以上一致率
+        const wordsWithPRData = words
+          .filter(w => !assigned.has(w.id))
+          .map(w => ({ word: w, data: computePerfectRhymeData(w.romaji) }))
+          .filter(x => x.data !== null) as Array<{ word: typeof items[0]; data: NonNullable<ReturnType<typeof computePerfectRhymeData>> }>;
+
+        // 母音列で一次バケット
+        const vowelBuckets: Record<string, typeof wordsWithPRData> = {};
+        for (const x of wordsWithPRData) {
+          (vowelBuckets[x.data.vowelKey] ??= []).push(x);
         }
-        const perfectEntries = Object.entries(perfectBuckets)
-          .filter(([, g]) => [...new Set(g.map(w => w.id))].length >= 2)
-          .sort((a, b) => b[0].length - a[0].length || b[1].length - a[1].length);
-        for (const [ps, pWords] of perfectEntries) {
-          const uniqueWords = [...new Map(pWords.map(w => [w.id, w])).values()]
-            .filter(w => !assigned.has(w.id));
-          if (uniqueWords.length >= 2) {
-            const syllableCount = (ps.match(/[0-9]/g) || []).length;
+
+        for (const [vowelKey, vBucket] of Object.entries(vowelBuckets)) {
+          if (vBucket.length < 2) continue;
+
+          // 90%以上一致率でのGreedyグループ化
+          const subGroups: typeof vBucket[] = [];
+          for (const item of vBucket) {
+            let placed = false;
+            for (const grp of subGroups) {
+              const rate = syllableMatchRate(grp[0].data.syllables, item.data.syllables);
+              if (rate >= 0.9) { grp.push(item); placed = true; break; }
+            }
+            if (!placed) subGroups.push([item]);
+          }
+
+          for (const grp of subGroups) {
+            const uniqueWords = [...new Map(grp.map(x => [x.word.id, x.word])).values()]
+              .filter(w => !assigned.has(w.id));
+            if (uniqueWords.length < 2) continue;
+
+            const suffixLen = grp[0].data.syllables.length;
             const readingSuffixes = uniqueWords.map(w => {
               const chars = [...w.reading];
-              return chars.slice(Math.max(0, chars.length - syllableCount)).join("");
+              return chars.slice(Math.max(0, chars.length - suffixLen)).join("");
             });
             if (new Set(readingSuffixes).size === 1) continue;
 
-            const displaySuffix = ps.replace(/[0-9]/g, "");
-            rhymeGroups.push({ suffix: displaySuffix, words: sortByRomaji(uniqueWords), tier: "perfect" });
+            rhymeGroups.push({ suffix: vowelKey, words: sortByRomaji(uniqueWords), tier: "perfect" });
             for (const w of uniqueWords) assigned.add(w.id);
           }
         }
