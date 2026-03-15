@@ -93,7 +93,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       send("init", `準備完了 (DB: ${existingWords.length}語, NG: ${ngWordList.length}語)`);
 
       const shortHistory = existingWords.slice(-80).join(",") || "なし";
-      const ngEndingNote = ngWordList.length > 0 ? `\n【末尾禁止単語】以下の単語で終わるワードは生成禁止: ${ngWordList.join("、")}` : "";
+      const ngEndingNote = ngWordList.length > 0 ? `\n【禁止単語（含有禁止）】以下の単語を1文字でも含むワードは生成禁止（位置問わず）: ${ngWordList.join("、")}` : "";
 
       send("step1", `STEP1: ディスワード300個を生成中... (並列バッチ生成)`);
 
@@ -108,7 +108,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         const makePrompt = (batchIndex: number, usedWordsList: string[]) => {
           const angle = DISS_ANGLES[batchIndex % DISS_ANGLES.length];
           const usedNote = usedWordsList.length > 0
-            ? `\n【使用済み単語（絶対使用禁止）】以下のワードに含まれる名詞・単語は、ひらがな・カタカナ・漢字いずれの表記でも絶対に使用するな:\n${usedWordsList.slice(-150).join("、")}`
+            ? `\n【使用済み名詞・概念（絶対使用禁止）】以下の名詞・キーワードはすでに他のワードで使用済み。これらの名詞を含むワードは絶対に生成するな（全角・半角・ひらがな・漢字表記問わず）:\n${usedWordsList.slice(-200).join("、")}`
             : "";
           return `「${targetName}」をディスるワードを50個生成せよ。
 
@@ -137,10 +137,15 @@ ${angle}
 - 生成後、全ルールを自己チェックし違反ワードを削除せよ${ngEndingNote}${usedNote}
 既出DB（生成するな）: ${shortHistory}
 
-【出力形式】1行1個:
+【出力形式】
+全ワードを出力した後、必ず末尾に「【使用名詞】」セクションを追加し、生成した全ワードに含まれる主要な名詞・キーワードを列挙せよ。
+
+ワード出力（1行1個）:
 ワード/よみ(romaji)
 例: ポンコツ野郎/ぽんこつやろう(ponkotsuyarou)
-※必ず「/」の後にひらがな読みを書き、(romaji)を付けること`;
+※必ず「/」の後にひらがな読みを書き、(romaji)を付けること
+
+【使用名詞】名詞1、名詞2、名詞3...（このバッチで使用した全ての主要名詞）`;
         };
 
         for (let pair = 0; pair < Math.ceil(batchCount / 2); pair++) {
@@ -164,6 +169,15 @@ ${angle}
               continue;
             }
             const text = result.value.text || "";
+
+            // 【使用名詞】セクションを抽出してexclusionsに追加
+            const nounMatch = text.match(/【使用名詞】([^\n]+)/);
+            if (nounMatch) {
+              const nouns = nounMatch[1].split(/[、,，\s]+/).map((n: string) => n.trim()).filter((n: string) => n.length >= 2 && n.length <= 10);
+              for (const n of nouns) accumulatedExclusions.add(n);
+              console.log(`[STEP1] Batch ${batchNum} 使用名詞: ${nouns.join("、")}`);
+            }
+
             const entries = parseWordEntries(text);
             let batchAdded = 0;
             for (const e of entries) {
@@ -172,7 +186,11 @@ ${angle}
                 if (tail.length >= 2) dupTailWords.add(tail);
                 continue;
               }
-              if (ngWordList.length > 0 && ngWordList.some(ng => e.word.endsWith(ng))) continue;
+              // NG単語チェック: 含有判定（位置問わず）
+              if (ngWordList.length > 0 && ngWordList.some(ng => e.word.includes(ng) || e.reading.includes(ng))) {
+                console.log(`[STEP1] NG単語含有除外: "${e.word}"`);
+                continue;
+              }
               const isHiragana = /^[ぁ-ゟー]+$/.test(e.reading);
               const len = isHiragana ? e.reading.length : countMoraFromRomaji(e.romaji);
               if (len < 3 || len > 10) continue;
@@ -186,6 +204,7 @@ ${angle}
 
           words.push(...pairWords);
 
+          // 文字列ベースのcommonSubsも引き続き追加
           for (const w of pairWords) {
             accumulatedExclusions.add(w.word);
           }
@@ -1687,6 +1706,73 @@ positionはsuffixまたはprefix。一致なしは[]。`;
       }
       send("check3", `ローマ字完全一致重複: ${romajiDupCount}個`);
 
+      // ─── チェック3b: バケツ内「意味のまとまり単語」重複をAI検出 ───
+      send("check3b", "チェック3b: 意味単位（名詞）重複をAI検出中...");
+      let meaningUnitDupCount = 0;
+      const groupsForMU = Object.entries(buckets)
+        .map(([key, bWords]) => ({ key, words: bWords.filter(w => !toDelete.has(w.id)) }))
+        .filter(g => g.words.length >= 3);
+
+      const MU_PARALLEL = 6;
+      for (let mb = 0; mb < groupsForMU.length; mb += MU_PARALLEL) {
+        if (disconnected) break;
+        const muBatch = groupsForMU.slice(mb, mb + MU_PARALLEL);
+        await Promise.all(muBatch.map(async (g) => {
+          try {
+            const rawSet = new Set(g.words.map(w => w.word));
+            const wordList = g.words.map(w => `${w.word}${w.protected ? " [確定]" : ""}`).join("\n");
+            const muResult = await aiGenerate(`以下の悪口ワードリストを精査せよ。
+
+【作業手順】
+STEP1: 全ワードを読み、各ワードに含まれる「意味のまとまりとしての単語（名詞・固有名詞・造語を含む）」をリストアップせよ。
+STEP2: 同じ名詞・単語（ひらがな・カタカナ・漢字問わず、読みが同じなら同一）が複数のワードに現れているグループを特定せよ。
+STEP3: 各グループの中で最もわかりやすく辛辣なパンチラインのワードを1個だけ選び、他を削除せよ。[確定]マークが付いたワードは削除禁止。[確定]でない方を優先的に削除せよ。
+STEP4: どのグループにも属さないワードは全て残せ。
+
+【共通単語の例】
+・「クソ顔」「汚い顔」「ブス顔」→「顔」共通 → 最もパンチライン1個だけ残す
+・「役立たず野郎」「使えない野郎」→「野郎」共通 → 最もパンチライン1個だけ残す
+・「豆腐メンタル」「豆腐精神」→「豆腐」共通 → 最もパンチライン1個だけ残す
+
+【厳守事項】
+・先頭・中間・末尾いずれの位置に名詞が現れても対象
+・どのグループにも属さないワードは削除禁止
+・出力は元の表記そのまま（変換・書き換え禁止）
+
+ワードリスト:
+${wordList}
+
+残すワードのみ出力（1行1個、元の表記そのまま、[確定]マーク・番号・説明一切不要）:`,
+              { ...geminiConfig, maxOutputTokens: 4096 });
+            const text = muResult?.text || "";
+            const kept = text.split("\n")
+              .map((l: string) => l.trim().replace(/^「/, "").replace(/」$/, "").replace(/^\d+[\.\)）、]\s*/, "").replace(/^[・●▸►\-]\s*/, "").replace(/\s*\[確定\]/, "").trim())
+              .filter((l: string) => l.length > 0 && rawSet.has(l));
+            const keptSet = new Set(kept);
+            if (keptSet.size < g.words.length * 0.35) {
+              console.log(`[CHECK3b:${g.key}] AI returned too few (${keptSet.size}/${g.words.length}), skipping`);
+              return;
+            }
+            let deleted = 0;
+            for (const w of g.words) {
+              if (!keptSet.has(w.word) && !w.protected && !toDelete.has(w.id)) {
+                toDelete.add(w.id);
+                deleted++;
+                meaningUnitDupCount++;
+                console.log(`[CHECK3b:${g.key}] "${w.word}" → 意味単位重複削除`);
+              }
+            }
+            if (deleted > 0) send("check3b", `[${g.key}] ${deleted}個削除（意味単位重複）`);
+          } catch (err) {
+            console.log(`[CHECK3b] AI failed for group ${g.key}:`, err);
+          }
+        }));
+        if (mb + MU_PARALLEL < groupsForMU.length) {
+          send("check3b", `意味単位重複検出中... (${Math.min(mb + MU_PARALLEL, groupsForMU.length)}/${groupsForMU.length}グループ完了)`);
+        }
+      }
+      send("check3b", `意味単位（名詞）重複: ${meaningUnitDupCount}個`);
+
       send("check4", "チェック4: 末尾単語一致をAI検出中...");
       const check4Result = await aiTailDedup(buckets, toDelete, send, false);
       send("check4", `末尾重複: ${check4Result.deletedCount}個`);
@@ -1766,7 +1852,7 @@ ${wordList}`);
 
       if (heartbeat) clearInterval(heartbeat);
       const finalCount = await getWordCount();
-      const summary = `母音不一致${wrongVowelCount} + 表記重複${scriptDupCount} + 語尾バリエーション${endingVarCount} + ローマ字重複${romajiDupCount} + 末尾重複${check4Result.deletedCount} + 意味重複${semanticDupCount} = ${totalDeleted}個削除`;
+      const summary = `母音不一致${wrongVowelCount} + 表記重複${scriptDupCount} + 語尾バリエーション${endingVarCount} + ローマ字重複${romajiDupCount} + 意味単位重複${meaningUnitDupCount} + 末尾重複${check4Result.deletedCount} + 意味重複${semanticDupCount} = ${totalDeleted}個削除`;
       send("done", `整理完了: ${summary} (残り${finalCount}語, ${formatElapsed(Date.now() - startTime)})`);
 
       if (!disconnected) {
