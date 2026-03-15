@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import {
   Flame, Mic2, Sparkles, Zap, AlertTriangle, Loader2, Star,
-  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Plus, Wrench, Play, Filter, Languages, Download, Upload, FileText, FileJson,
+  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Plus, Play, Filter, Download, Upload, FileText, FileJson, Layers,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -108,34 +108,16 @@ export default function Home() {
   const logEndRef = useRef<HTMLDivElement>(null);
   const [pasteTextFav, setPasteTextFav] = useState("");
   const [pasteTextNg, setPasteTextNg] = useState("");
-  const [isCleaningUp, setIsCleaningUp] = useState(false);
-  const [cleanupLogs, setCleanupLogs] = useState<ProgressLog[]>([]);
   const [isAutoMode, setIsAutoMode] = useState(false);
   const [autoModeCount, setAutoModeCount] = useState(0);
   const [selectedFavIds, setSelectedFavIds] = useState<Set<number>>(new Set());
   const [selectedNgIds, setSelectedNgIds] = useState<Set<number>>(new Set());
   const [lastGenTime, setLastGenTime] = useState<number | null>(null);
   const [prevGenTime, setPrevGenTime] = useState<number | null>(null);
-  const [lastCleanupTime, setLastCleanupTime] = useState<number | null>(null);
-  const [prevCleanupTime, setPrevCleanupTime] = useState<number | null>(null);
   const [rhymeFilter, setRhymeFilter] = useState<RhymeFilter>("all");
-  const [isDedupRunning, setIsDedupRunning] = useState(false);
-  const [isAllCleaning, setIsAllCleaning] = useState(false);
-  const [dedupResult, setDedupResult] = useState<{ deleted: number; total: number } | null>(null);
-  const [isCharChecking, setIsCharChecking] = useState(false);
-  const [charCheckLogs, setCharCheckLogs] = useState<ProgressLog[]>([]);
-  const [charCheckResult, setCharCheckResult] = useState<{ checked: number; fixed: number } | null>(null);
-  const [dedupSecs, setDedupSecs] = useState(0);
-  const [charCheckSecs, setCharCheckSecs] = useState(0);
-  const dedupTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const charCheckTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoModeRef = useRef(false);
-  const isCleaningUpRef = useRef(false);
-  const cleanupPromiseRef = useRef<Promise<void> | null>(null);
   const generateDissSSERef = useRef<typeof generateDissSSE | null>(null);
   const addWordsDirectRef = useRef<typeof addWordsDirect | null>(null);
-  const runCleanupRef = useRef<typeof runCleanup | null>(null);
-  const runAllCleanupRef = useRef<typeof runAllCleanup | null>(null);
   const [isPdfExporting, setIsPdfExporting] = useState(false);
   const pdfInputRef = useRef<HTMLInputElement>(null);
   const ngJsonInputRef = useRef<HTMLInputElement>(null);
@@ -143,19 +125,7 @@ export default function Home() {
   useEffect(() => { if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: "smooth" }); }, [progressLogs]);
   useEffect(() => { return () => {
     if (timerRef.current) clearInterval(timerRef.current);
-    if (dedupTimerRef.current) clearInterval(dedupTimerRef.current);
-    if (charCheckTimerRef.current) clearInterval(charCheckTimerRef.current);
   }; }, []);
-
-  const startSecsTimer = (setter: (n: number) => void, ref: React.MutableRefObject<ReturnType<typeof setInterval> | null>) => {
-    setter(0);
-    if (ref.current) clearInterval(ref.current);
-    const t0 = Date.now();
-    ref.current = setInterval(() => setter(Math.floor((Date.now() - t0) / 1000)), 500);
-  };
-  const stopSecsTimer = (ref: React.MutableRefObject<ReturnType<typeof setInterval> | null>) => {
-    if (ref.current) { clearInterval(ref.current); ref.current = null; }
-  };
 
   const favQuery = useQuery<{ groups: FavGroup[]; total: number }>({ queryKey: ["/api/favorites"] });
   const favCountQuery = useQuery<{ total: number }>({ queryKey: ["/api/favorites/count"] });
@@ -335,16 +305,6 @@ export default function Home() {
     },
   });
 
-  const ngCleanupMutation = useMutation({
-    mutationFn: async () => { const res = await apiRequest("POST", "/api/ng-words/cleanup"); return res.json(); },
-    onSuccess: (data) => {
-      toast({ title: "NG整理完了", description: `${data.deleted}個の断片を削除しました（残り${data.remaining}件）` });
-      queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
-    },
-    onError: () => toast({ title: "エラー", description: "NG整理に失敗しました", variant: "destructive" }),
-  });
-
   const addToFavorites = useCallback(async () => {
     if (checkedWords.size === 0) { toast({ title: "未選択", description: "ワードを選択してください" }); return; }
     const allEntries = getAllEntries();
@@ -434,104 +394,6 @@ export default function Home() {
     onError: (err: Error) => { toast({ title: "エラー", description: err.message || "追加に失敗しました", variant: "destructive" }); },
   });
 
-  const runCleanup = useCallback(async () => {
-    if (isCleaningUpRef.current) {
-      if (cleanupPromiseRef.current) await cleanupPromiseRef.current;
-      return;
-    }
-    isCleaningUpRef.current = true;
-    setIsCleaningUp(true);
-    setCleanupLogs([]);
-
-    const doCleanup = async () => {
-      try {
-        const response = await fetch("/api/favorites/cleanup", { method: "POST", headers: { "Content-Type": "application/json" } });
-        if (!response.ok) throw new Error("整理に失敗しました");
-        const reader = response.body?.getReader();
-        if (!reader) throw new Error("No reader");
-        const decoder = new TextDecoder();
-        let buffer = "";
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (data.type === "progress") {
-                setCleanupLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
-              } else if (data.type === "result") {
-                const elapsedMs = data.elapsedMs || 0;
-                if (elapsedMs) {
-                  setLastCleanupTime(prev => { setPrevCleanupTime(prev); return elapsedMs; });
-                }
-                toast({ title: "整理完了", description: `重複削除${data.deleted}個 (残り${data.total}語)` });
-                queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
-                queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
-                queryClient.invalidateQueries({ queryKey: ["/api/ng-words"] });
-                queryClient.invalidateQueries({ queryKey: ["/api/ng-words/count"] });
-              } else if (data.type === "error") {
-                toast({ title: "エラー", description: data.error, variant: "destructive" });
-              }
-            } catch {}
-          }
-        }
-      } catch {
-        toast({ title: "エラー", description: "整理に失敗しました", variant: "destructive" });
-      }
-      isCleaningUpRef.current = false;
-      setIsCleaningUp(false);
-      cleanupPromiseRef.current = null;
-    };
-
-    cleanupPromiseRef.current = doCleanup();
-    await cleanupPromiseRef.current;
-  }, [toast, queryClient]);
-
-  const runDedupCleanup = useCallback(async () => {
-    if (isDedupRunning || isCleaningUp) return;
-    setIsDedupRunning(true);
-    setCleanupLogs([]);
-    startSecsTimer(setDedupSecs, dedupTimerRef);
-    try {
-      const response = await fetch("/api/favorites/dedup-cleanup", { method: "POST", headers: { "Content-Type": "application/json" } });
-      if (!response.ok) throw new Error("重複整理に失敗しました");
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error("No reader");
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const data = JSON.parse(line.slice(6));
-            if (data.type === "progress") {
-              setCleanupLogs(prev => [...prev, { time: data.step, detail: data.detail, elapsed: data.elapsed || "" }]);
-            } else if (data.type === "result") {
-              setDedupResult({ deleted: data.deleted, total: data.total });
-              toast({ title: "重複整理完了", description: `削除${data.deleted}個 (残り${data.total}語)` });
-              queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
-              queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
-            } else if (data.type === "error") {
-              toast({ title: "エラー", description: data.error, variant: "destructive" });
-            }
-          } catch {}
-        }
-      }
-    } catch {
-      toast({ title: "エラー", description: "重複整理に失敗しました", variant: "destructive" });
-    }
-    stopSecsTimer(dedupTimerRef);
-    setIsDedupRunning(false);
-  }, [isDedupRunning, isCleaningUp, toast, queryClient]);
 
   const readSSEStream = useCallback(async (
     url: string,
@@ -564,86 +426,6 @@ export default function Home() {
   }, []);
 
 
-  const runCharCheck = useCallback(async () => {
-    if (isCharChecking) return;
-    setIsCharChecking(true);
-    setCharCheckLogs([]);
-    setCharCheckResult(null);
-    startSecsTimer(setCharCheckSecs, charCheckTimerRef);
-    try {
-      await readSSEStream(
-        "/api/favorites/char-check",
-        (data) => setCharCheckLogs(prev => [...prev, { time: String(data.step), detail: String(data.detail), elapsed: String(data.elapsed || "") }]),
-        (data) => {
-          stopSecsTimer(charCheckTimerRef);
-          setCharCheckResult({ checked: Number(data.checked), fixed: Number(data.fixed) });
-          toast({
-            title: "文字整理完了",
-            description: data.fixed === 0
-              ? `${data.checked}語を検査→問題なし`
-              : `${data.checked}語検査　${data.fixed}語を修正しました`,
-          });
-          queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
-        },
-        (data) => toast({ title: "エラー", description: String(data.error), variant: "destructive" }),
-      );
-    } catch {
-      toast({ title: "エラー", description: "文字整理に失敗しました", variant: "destructive" });
-    }
-    stopSecsTimer(charCheckTimerRef);
-    setIsCharChecking(false);
-  }, [isCharChecking, toast, queryClient, readSSEStream]);
-
-  const runAllCleanup = useCallback(async () => {
-    if (isAllCleaning || isDedupRunning || isCleaningUp || isCharChecking) return;
-    setIsAllCleaning(true);
-    setCleanupLogs([]);
-    setCharCheckLogs([]);
-    setDedupResult(null);
-    setCharCheckResult(null);
-
-    // Step 1: 重複整理
-    setIsDedupRunning(true);
-    startSecsTimer(setDedupSecs, dedupTimerRef);
-    try {
-      await readSSEStream(
-        "/api/favorites/dedup-cleanup",
-        (data) => setCleanupLogs(prev => [...prev, { time: String(data.step), detail: String(data.detail), elapsed: String(data.elapsed || "") }]),
-        (data) => {
-          setDedupResult({ deleted: Number(data.deleted), total: Number(data.total) });
-          queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
-          queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
-        },
-        () => {},
-      );
-    } catch {}
-    stopSecsTimer(dedupTimerRef);
-    setIsDedupRunning(false);
-
-    // Step 2: 文字整理
-    setIsCharChecking(true);
-    startSecsTimer(setCharCheckSecs, charCheckTimerRef);
-    try {
-      await readSSEStream(
-        "/api/favorites/char-check",
-        (data) => setCharCheckLogs(prev => [...prev, { time: String(data.step), detail: String(data.detail), elapsed: String(data.elapsed || "") }]),
-        (data) => {
-          stopSecsTimer(charCheckTimerRef);
-          setCharCheckResult({ checked: Number(data.checked), fixed: Number(data.fixed) });
-          toast({
-            title: "全て整理完了",
-            description: `重複整理・文字整理を完了しました`,
-          });
-          queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
-          queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
-        },
-        () => {},
-      );
-    } catch {}
-    stopSecsTimer(charCheckTimerRef);
-    setIsCharChecking(false);
-    setIsAllCleaning(false);
-  }, [isAllCleaning, isDedupRunning, isCleaningUp, isCharChecking, toast, queryClient, readSSEStream]);
 
   const handlePdfExport = useCallback(async () => {
     setIsPdfExporting(true);
@@ -751,8 +533,6 @@ export default function Home() {
 
   useEffect(() => { generateDissSSERef.current = generateDissSSE; }, [generateDissSSE]);
   useEffect(() => { addWordsDirectRef.current = addWordsDirect; }, [addWordsDirect]);
-  useEffect(() => { runCleanupRef.current = runCleanup; }, [runCleanup]);
-  useEffect(() => { runAllCleanupRef.current = runAllCleanup; }, [runAllCleanup]);
 
   const startAutoMode = useCallback(async () => {
     if (autoModeRef.current) return;
@@ -772,8 +552,6 @@ export default function Home() {
         setGenResult(null);
         setCheckedWords(new Set());
         setProgressLogs([]);
-        setCleanupLogs([]);
-        setCharCheckLogs([]);
         setGenStatus("idle");
         setTimerSeconds(0);
         setIsGenerating(false);
@@ -978,7 +756,7 @@ export default function Home() {
               variant="default"
               size="lg"
               onClick={startAutoMode}
-              disabled={isGenerating || isCleaningUp}
+              disabled={isGenerating}
               className="text-base px-8 py-3 font-semibold shadow-lg hover:shadow-xl transition-shadow"
               data-testid="button-start-auto"
             >
@@ -1015,10 +793,6 @@ export default function Home() {
                     <Badge variant="secondary">{ngCount.toLocaleString()}件</Badge>
                   </div>
                   <div className="flex flex-wrap gap-1.5">
-                    <Button variant="outline" size="sm" onClick={() => ngCleanupMutation.mutate()} disabled={ngCleanupMutation.isPending || ngCount === 0} data-testid="button-ng-cleanup">
-                      {ngCleanupMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Sparkles className="w-3.5 h-3.5 mr-1" />}
-                      NG整理
-                    </Button>
                     <Button variant="outline" size="sm" onClick={copyNgWords} disabled={ngCount === 0} data-testid="button-copy-ng"><Copy className="w-3.5 h-3.5 mr-1" />コピー</Button>
                     <Button variant="outline" size="sm" onClick={handleNgJsonExport} disabled={ngCount === 0} data-testid="button-ng-export-json"><FileJson className="w-3.5 h-3.5 mr-1" />JSON保存</Button>
                     <Button variant="outline" size="sm" onClick={() => ngJsonInputRef.current?.click()} data-testid="button-ng-import-json"><Upload className="w-3.5 h-3.5 mr-1" />JSON読込</Button>
@@ -1026,7 +800,7 @@ export default function Home() {
                     <Button variant="outline" size="sm" onClick={() => clearNgMutation.mutate()} disabled={clearNgMutation.isPending || ngCount === 0} data-testid="button-clear-ng"><Trash2 className="w-3.5 h-3.5 mr-1" />全削除</Button>
                   </div>
                 </div>
-                <p className="text-xs text-muted-foreground">ワードの末尾がNG単語と一致する場合、生成・追加されません。整理や精査で検出された末尾単語が自動追加されます。</p>
+                <p className="text-xs text-muted-foreground">ワードの末尾がNG単語と一致する場合、生成・追加されません。手動で管理してください。</p>
 
                 {selectedNgIds.size > 0 && (
                   <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }}
@@ -1112,93 +886,43 @@ export default function Home() {
               </CardContent>
             </Card>
 
-            {/* 重複整理のルール */}
+            {/* 重複ルール */}
             <Card>
               <CardContent className="p-4 space-y-3">
                 <div className="flex items-center gap-2">
                   <Filter className="w-5 h-5 text-primary" />
-                  <h2 className="text-base font-semibold">重複整理のルール</h2>
+                  <h2 className="text-base font-semibold">重複ルール</h2>
                 </div>
-                <p className="text-xs text-muted-foreground">重複整理で使用するAIプロンプト（原文そのまま・全フェーズ）</p>
-
-                <div className="space-y-3">
-                  <div>
-                    <p className="text-xs font-semibold text-muted-foreground mb-1">▍フェーズ1：読み末尾バリデーション</p>
-                    <pre className="text-xs bg-muted/50 border border-border rounded-lg p-3 whitespace-pre-wrap leading-relaxed font-sans overflow-x-auto">{`以下のひらがな文字列が「単独で辞書に載る完全な日本語単語の読み」かどうか判定せよ。
-
-【合格（完全な単語の読み）】: 名詞・代名詞・よく知られた表現の読み
-合格例: おとこ（男）、かお（顔）、おんな（女）、かたまり（塊）、やろう（野郎）、のう（脳）、からだ（体）、ぬけがら（抜け殻）、かべ（壁）、ぶた（豚）、かがみ（鏡）、くず（屑）、おう（王）、じん（人）、めん（面）、だん（弾）、さん（山）、もの（者・物）
-
-【不合格（断片・活用形・助詞）】: 完全な単語でない
-不合格例: のかたまり（の＋かたまり）、なかたまり、くかたまり、ぐん、でん、りや、いた、ぶん、てる、てた、よ、の、な、か、わ、さ
-
-判定対象:
-{候補リスト}
-
-合格のもののみ番号をJSON配列で返せ（例: [1,3,5]）。全て不合格なら[]。数字のみ出力。`}</pre>
-                  </div>
-
-                  <div>
-                    <p className="text-xs font-semibold text-muted-foreground mb-1">▍フェーズ2：AI表記ゆれ・異体字グループ化</p>
-                    <pre className="text-xs bg-muted/50 border border-border rounded-lg p-3 whitespace-pre-wrap leading-relaxed font-sans overflow-x-auto">{`以下の悪口ワードリストで、末尾単語が完全に一致（同一単語）するものをグループ化せよ。
-
-【対象となる末尾単語（例）】
-単独でも意味が完結する名詞のみ対象:
-・1文字: 体(からだ/たい)・顔(かお)・脳(のう)・腹(はら)・肉・男・女・者・王・面・玉・虫・人・金
-・2文字以上: 野郎・面倒・ゴミ・アホ・人間・固まり・塊(かたまり)・抜け殻・機関車・化身・呪い・宝物・成功
-・表記違い（漢字/ひらがな/カタカナ）でも読みが同じなら同一グループに入れること
-  例: 固まり(かたまり) = 塊(かたまり) = かたまり → 同一グループ
-
-【除外する末尾】
-助詞・助動詞・断片: の・な・だ・わ・よ・て・で・か・を・は・が・に・ない・ぶん・ぐん
-動詞活用形: めろ・みろ・しろ・いけ・かけ・られ・てる・てた
-
-ワード一覧（表記/読み）:
-{ワードリスト}
-
-JSON配列のみ出力:
-[{"ending":"末尾単語（代表表記）","readingSuffix":"読み","words":["ワード1","ワード2"]}]
-一致なしは[]。`}</pre>
-                  </div>
-
-                  <div>
-                    <p className="text-xs font-semibold text-muted-foreground mb-1">▍フェーズ4：最良ワード選択</p>
-                    <pre className="text-xs bg-muted/50 border border-border rounded-lg p-3 whitespace-pre-wrap leading-relaxed font-sans overflow-x-auto">{`以下のワードから最も辛辣・強烈なパンチラインのワードを1個だけ選べ。選んだワードだけを出力（説明不要）:
-{候補ワード一覧}`}</pre>
-                  </div>
-                </div>
+                <pre className="text-xs bg-muted/50 border border-border rounded-lg p-3 whitespace-pre-wrap leading-relaxed font-sans overflow-x-auto">{`【重複ルール】
+・「母音」の一致箇所に含まれている「単語」は異なる意味や役割を持つこと。
+・例え「漢字」「ひらがな」「カタカナ」など文字が違くても母音・子音が一致しており「役割・意味」が全く同じ場合、それは「同じ言葉」であり「韻」を踏んだことにはならない。
+・同じ言葉がグループ内に存在した場合は「より強烈なパンチライン」である方を残し、それ以外はグループから外すこと。`}</pre>
               </CardContent>
             </Card>
 
-            {/* NG単語リスト（ルールタブ） */}
+            {/* データベース送信ルール */}
             <Card>
               <CardContent className="p-4 space-y-3">
                 <div className="flex items-center gap-2">
-                  <Ban className="w-5 h-5 text-destructive" />
-                  <h2 className="text-base font-semibold">NG単語リスト</h2>
-                  <Badge variant="secondary">{ngCount.toLocaleString()}件</Badge>
+                  <Database className="w-5 h-5 text-primary" />
+                  <h2 className="text-base font-semibold">データベース送信ルール</h2>
                 </div>
-                <p className="text-xs text-muted-foreground">文字数順・あいうえお順。末尾がこのリストと一致するワードは生成・追加されません。</p>
-                {ngWordsQuery.isLoading ? (
-                  <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-6 w-full rounded-md" />)}</div>
-                ) : !ngWordsQuery.data || ngWordsQuery.data.words.length === 0 ? (
-                  <div className="text-center py-4 text-muted-foreground text-sm">NG単語はまだありません。</div>
-                ) : (
-                  <div className="flex flex-wrap gap-1.5" data-testid="rules-ng-words-container">
-                    {[...ngWordsQuery.data.words]
-                      .sort((a, b) => {
-                        const lenA = [...a.word].length;
-                        const lenB = [...b.word].length;
-                        if (lenA !== lenB) return lenA - lenB;
-                        return a.word.localeCompare(b.word, "ja");
-                      })
-                      .map(w => (
-                        <span key={w.id} className="inline-flex items-center text-xs rounded px-2 py-0.5 bg-destructive/10 border border-destructive/20 font-medium" data-testid={`rules-ng-word-${w.id}`}>
-                          {w.word}
-                        </span>
-                      ))}
-                  </div>
-                )}
+                <pre className="text-xs bg-muted/50 border border-border rounded-lg p-3 whitespace-pre-wrap leading-relaxed font-sans overflow-x-auto">{`300個の生成されたワードを送信する際に以下の項目を確認せよ。
+・「ん」以外の全ての文字に母音が含まれているか？
+・アルファベット表記が正しいか？
+・「ん」の「n」は母音扱いである。`}</pre>
+              </CardContent>
+            </Card>
+
+            {/* グループ分けルール */}
+            <Card>
+              <CardContent className="p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Layers className="w-5 h-5 text-primary" />
+                  <h2 className="text-base font-semibold">グループ分けルール</h2>
+                </div>
+                <pre className="text-xs bg-muted/50 border border-border rounded-lg p-3 whitespace-pre-wrap leading-relaxed font-sans overflow-x-auto">{`300個のワードをデータベース内のグループに分けていく際に以下のルールを守ること。
+「母音」の一致箇所に含まれている「単語」がグループ内に存在する「一致箇所に含まれている単語」と異なる意味や役割を持つこと。すでにグループに「同じ役割や同じ意味を持つ単語」が存在した場合はそのグループには入れない。`}</pre>
               </CardContent>
             </Card>
           </div>
@@ -1246,21 +970,6 @@ JSON配列のみ出力:
                 </div>
               </div>
 
-              <div className="flex flex-wrap gap-2">
-                <Button variant="outline" size="sm" onClick={runDedupCleanup} disabled={isDedupRunning || isCleaningUp || isAllCleaning || isCharChecking || totalCount === 0} data-testid="button-dedup-cleanup">
-                  {isDedupRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Filter className="w-3.5 h-3.5 mr-1" />}
-                  重複整理
-                </Button>
-                <Button variant="outline" size="sm" onClick={runCharCheck} disabled={isCharChecking || isDedupRunning || isAllCleaning || isCleaningUp || totalCount === 0} data-testid="button-char-check">
-                  {isCharChecking ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Languages className="w-3.5 h-3.5 mr-1" />}
-                  文字整理
-                </Button>
-                <Button variant="default" size="sm" onClick={runAllCleanup} disabled={isAllCleaning || isDedupRunning || isCleaningUp || isCharChecking || totalCount === 0} data-testid="button-all-cleanup">
-                  {isAllCleaning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Wrench className="w-3.5 h-3.5 mr-1" />}
-                  全て整理
-                </Button>
-              </div>
-
               <div className="flex flex-wrap gap-1.5" data-testid="rhyme-filter-bar">
                 {([
                   ["all", "すべて"],
@@ -1283,72 +992,6 @@ JSON配列のみ出力:
                     削除
                   </Button>
                   <Button variant="ghost" size="sm" onClick={() => setSelectedFavIds(new Set())} data-testid="button-clear-selection"><X className="w-3.5 h-3.5 mr-1" />選択解除</Button>
-                </div>
-              )}
-
-              {charCheckLogs.length > 0 && (
-                <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 space-y-1" data-testid="char-check-logs">
-                  <div className="flex items-center gap-2 mb-1">
-                    <Languages className="w-4 h-4 text-emerald-400" />
-                    <span className="text-xs font-semibold text-emerald-400">文字整理ログ</span>
-                    {isCharChecking && <span className="text-xs font-mono text-emerald-300 ml-1">{charCheckSecs}秒</span>}
-                    {!isCharChecking && <Button variant="ghost" size="sm" className="h-5 px-1 text-xs ml-auto" onClick={() => { setCharCheckLogs([]); setCharCheckResult(null); }}><X className="w-3 h-3" /></Button>}
-                    {isCharChecking && <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400 ml-auto" />}
-                  </div>
-                  <div className="max-h-40 overflow-y-auto space-y-0.5">
-                    {charCheckLogs.map((log, i) => (
-                      <div key={i} className="text-xs flex gap-2">
-                        <span className="text-muted-foreground font-mono shrink-0">[{log.elapsed}]</span>
-                        <span>{log.detail}</span>
-                      </div>
-                    ))}
-                  </div>
-                  {!isCharChecking && charCheckResult && (
-                    <div className="mt-2 pt-2 border-t border-emerald-500/20 text-xs font-semibold text-emerald-300 flex gap-3">
-                      <span>検査: {charCheckResult.checked}語</span>
-                      <span className={charCheckResult.fixed > 0 ? "text-yellow-400" : ""}>修正: {charCheckResult.fixed}語</span>
-                      {charCheckResult.fixed === 0 && <span className="text-green-400">✓ 問題なし</span>}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {cleanupLogs.length > 0 && (
-                <div className="rounded-md border border-border/50 bg-muted/20 p-3 space-y-1" data-testid="cleanup-logs">
-                  <div className="flex items-center gap-2 mb-1">
-                    <Filter className="w-4 h-4 text-primary" />
-                    <span className="text-xs font-semibold">重複整理ログ</span>
-                    {isDedupRunning && <span className="text-xs font-mono text-primary/70 ml-1">{dedupSecs}秒</span>}
-                    {lastCleanupTime && !isCleaningUp && !isDedupRunning && (
-                      <span className="text-xs font-mono text-green-400 ml-auto" data-testid="text-cleanup-time">
-                        {formatTimer(Math.round(lastCleanupTime / 1000))}
-                        {prevCleanupTime && (() => {
-                          const diff = lastCleanupTime - prevCleanupTime;
-                          const sign = diff > 0 ? "+" : "";
-                          return <span className={diff <= 0 ? "text-green-300 ml-1" : "text-red-300 ml-1"}>({sign}{formatTimer(Math.abs(Math.round(diff / 1000)))})</span>;
-                        })()}
-                      </span>
-                    )}
-                    {isCleaningUp && <Loader2 className="w-3.5 h-3.5 animate-spin text-primary ml-auto" />}
-                    {isDedupRunning && !isCleaningUp && <Loader2 className="w-3.5 h-3.5 animate-spin text-primary ml-auto" />}
-                    {!isCleaningUp && !isDedupRunning && <Button variant="ghost" size="sm" className="h-5 px-1 text-xs" onClick={() => { setCleanupLogs([]); setDedupResult(null); }}><X className="w-3 h-3" /></Button>}
-                  </div>
-                  <div className="max-h-32 overflow-y-auto space-y-0.5">
-                    {cleanupLogs.map((log, i) => (
-                      <div key={i} className="text-xs flex gap-2">
-                        <span className="text-muted-foreground font-mono shrink-0">[{log.elapsed}]</span>
-                        <span className="text-muted-foreground shrink-0">{log.time}</span>
-                        <span>{log.detail}</span>
-                      </div>
-                    ))}
-                  </div>
-                  {!isDedupRunning && dedupResult && (
-                    <div className="mt-2 pt-2 border-t border-border/30 text-xs font-semibold flex flex-wrap gap-3">
-                      <span className={dedupResult.deleted > 0 ? "text-red-400" : "text-muted-foreground"}>削除: {dedupResult.deleted}語</span>
-                      <span className="text-muted-foreground">残り: {dedupResult.total}語</span>
-                      {dedupResult.deleted === 0 && <span className="text-green-400">✓ 重複なし</span>}
-                    </div>
-                  )}
                 </div>
               )}
 
