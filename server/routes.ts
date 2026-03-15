@@ -378,6 +378,66 @@ ${wordList}
         finalQualityWords = finalQualityWords.slice(0, TARGET_COUNT);
       }
 
+      // ─── STEP2c: ローマ字全数検証・修正 ───
+      send("step2c", `STEP2c: ローマ字全数検証中... (${finalQualityWords.length}個)`);
+      const ROMAJI_BATCH = 80;
+      const ROMAJI_PARALLEL = 4;
+      const correctedWords: WordEntry[] = [];
+      const romajiBatches: WordEntry[][] = [];
+      for (let i = 0; i < finalQualityWords.length; i += ROMAJI_BATCH) {
+        romajiBatches.push(finalQualityWords.slice(i, i + ROMAJI_BATCH));
+      }
+      let romajiFixCount = 0;
+      for (let r = 0; r < Math.ceil(romajiBatches.length / ROMAJI_PARALLEL); r++) {
+        if (disconnected) break;
+        const chunk = romajiBatches.slice(r * ROMAJI_PARALLEL, (r + 1) * ROMAJI_PARALLEL);
+        const results = await Promise.all(chunk.map(async (batch) => {
+          const lines = batch.map((w, i) => `${i + 1}. ${w.word}/${w.reading}(${w.romaji})`).join("\n");
+          const prompt = `以下のワードのヘボン式ローマ字を検証し、誤りがあれば修正せよ。
+
+【ルール】
+- 読みの各モーラを正確にヘボン式ローマ字で表す
+- 「ん」→n、「っ」→次子音重複(tt/kk/ss等)、「ー」→前母音重複(aa/oo等)
+- 半角小文字英字のみ（ハイフン・スペース不可）
+- ん・っ以外の全モーラに母音(aeiou)が1つ対応すること
+
+ワード一覧（番号.ワード/よみ（現在のローマ字））:
+${lines}
+
+修正が必要なもののみJSON配列で出力。不要なら[]のみ:
+[{"idx":1,"romaji":"修正後ローマ字"}]
+番号は1始まり。`;
+          try {
+            const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 1024 });
+            const text = result?.text || "";
+            const jsonMatch = text.match(/\[[\s\S]*?\]/);
+            if (!jsonMatch) return batch;
+            type RC = { idx: number; romaji: string };
+            const corrections = JSON.parse(jsonMatch[0]) as RC[];
+            const corrBatch = [...batch];
+            for (const c of corrections) {
+              const idx = c.idx - 1;
+              if (idx >= 0 && idx < corrBatch.length && c.romaji) {
+                const newRomaji = c.romaji.toLowerCase().replace(/[^a-z]/g, "");
+                if (newRomaji && newRomaji !== corrBatch[idx].romaji) {
+                  console.log(`[STEP2c] "${corrBatch[idx].word}" ${corrBatch[idx].romaji}→${newRomaji}`);
+                  corrBatch[idx] = { ...corrBatch[idx], romaji: newRomaji };
+                  romajiFixCount++;
+                }
+              }
+            }
+            return corrBatch;
+          } catch { return batch; }
+        }));
+        for (const batch of results) correctedWords.push(...batch);
+        send("step2c", `STEP2c: ${Math.min((r + 1) * ROMAJI_PARALLEL, romajiBatches.length)}/${romajiBatches.length}バッチ完了...`);
+      }
+      const verifiedWords = quickCharCheck(correctedWords);
+      const removedByVerify = correctedWords.length - verifiedWords.length;
+      send("step2c", `STEP2c完了: ${romajiFixCount}個修正, ${removedByVerify}個除外 → 残${verifiedWords.length}語`);
+      finalQualityWords = verifiedWords;
+      logTiming("step2c-romaji");
+
       console.log(`[GEN] Final count before grouping: ${finalQualityWords.length}`);
       send("step3", `STEP3: 母音パターンでグルーピング中...`);
 
@@ -1378,30 +1438,75 @@ positionはsuffixまたはprefix。一致なしは[]。`;
         res.write(`data: ${JSON.stringify({ type: "progress", step, detail, elapsed })}\n\n`);
       };
 
-      send("dedup", "重複整理: 末尾単語一致を検出中...");
+      send("dedup", "重複整理: 全ワードを取得中...");
       const allWords = await getAllWords();
-      const items = allWords.map(w => ({
-        id: w.id, word: w.word, reading: w.reading, romaji: w.romaji,
-        vowels: extractVowels(w.romaji), charCount: w.charCount
-      }));
-
-      const buckets: Record<string, typeof items> = {};
-      for (const item of items) {
-        const key = item.vowels.length >= 2 ? item.vowels.slice(-2) : item.vowels || "_";
-        (buckets[key] ??= []).push(item);
-      }
+      send("dedup", `${allWords.length}件を分析中（ワード完全一致・よみ完全一致・ローマ字完全一致）...`);
 
       const toDelete = new Set<number>();
-      const result = await aiTailDedup(buckets, toDelete, send, true);
 
-      if (toDelete.size > 0) {
-        send("dedup", `${toDelete.size}個を削除中...`);
+      // チェック1: ワード（表記）の完全一致
+      const seenWord = new Map<string, number>(); // normWord → first id
+      let wordDupCount = 0;
+      for (const w of allWords) {
+        const norm = w.word.replace(/[\s\u3000]/g, "").toLowerCase();
+        if (seenWord.has(norm)) {
+          toDelete.add(w.id);
+          wordDupCount++;
+          console.log(`[DEDUP:word] "${w.word}" (id:${w.id}) 重複 → id:${seenWord.get(norm)}`);
+        } else {
+          seenWord.set(norm, w.id);
+        }
+      }
+      send("check1", `ワード表記一致: ${wordDupCount}件`);
+
+      // チェック2: 読み（ひらがな）の完全一致
+      function normReading(s: string): string {
+        return s.replace(/[ー・\s\u3000]/g, "").replace(/っ/g, "").replace(/を/g, "お").toLowerCase();
+      }
+      const seenReading = new Map<string, number>();
+      let readingDupCount = 0;
+      for (const w of allWords) {
+        if (toDelete.has(w.id)) continue;
+        const norm = normReading(w.reading);
+        if (norm.length === 0) continue;
+        if (seenReading.has(norm)) {
+          toDelete.add(w.id);
+          readingDupCount++;
+          console.log(`[DEDUP:reading] "${w.word}" (${w.reading}) 読み重複 → id:${seenReading.get(norm)}`);
+        } else {
+          seenReading.set(norm, w.id);
+        }
+      }
+      send("check2", `読み一致: ${readingDupCount}件`);
+
+      // チェック3: ローマ字（romaji）の完全一致
+      const seenRomaji = new Map<string, number>();
+      let romajiDupCount = 0;
+      for (const w of allWords) {
+        if (toDelete.has(w.id)) continue;
+        const norm = w.romaji.replace(/[-\s]/g, "").toLowerCase();
+        if (norm.length === 0) continue;
+        if (seenRomaji.has(norm)) {
+          toDelete.add(w.id);
+          romajiDupCount++;
+          console.log(`[DEDUP:romaji] "${w.word}" (${w.romaji}) ローマ字重複 → id:${seenRomaji.get(norm)}`);
+        } else {
+          seenRomaji.set(norm, w.id);
+        }
+      }
+      send("check3", `ローマ字一致: ${romajiDupCount}件`);
+
+      const total = wordDupCount + readingDupCount + romajiDupCount;
+      if (total === 0) {
+        send("done", "重複なし。データベースはクリーンな状態です。");
+      } else {
+        send("delete", `合計 ${total}件 (表記:${wordDupCount} + 読み:${readingDupCount} + ローマ字:${romajiDupCount}) を削除中...`);
         await deleteWords([...toDelete]);
       }
 
       const remaining = await getWordCount();
       const elapsedMs = Date.now() - startTime;
-      res.write(`data: ${JSON.stringify({ type: "result", deleted: toDelete.size, total: remaining, elapsedMs })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: "result", deleted: total, total: remaining, elapsedMs })}\n\n`);
     } catch (error) {
       console.error("Dedup cleanup error:", error);
       if (!disconnected) res.write(`data: ${JSON.stringify({ type: "error", error: "重複整理に失敗しました" })}\n\n`);
@@ -1559,25 +1664,28 @@ positionはsuffixまたはprefix。一致なしは[]。`;
       }
       send("check2b", `語尾バリエーション重複: ${endingVarCount}個`);
 
-      send("check3", "チェック3: 包含関係の重複を検出中...");
-      let containCount = 0;
-      for (const [groupKey, groupWords] of Object.entries(buckets)) {
-        const alive = groupWords.filter(w => !toDelete.has(w.id));
-        for (let i = 0; i < alive.length; i++) {
-          if (toDelete.has(alive[i].id)) continue;
-          for (let j = 0; j < alive.length; j++) {
-            if (i === j || toDelete.has(alive[j].id)) continue;
-            const shorter = alive[i].reading;
-            const longer = alive[j].reading;
-            if (shorter.length < longer.length && longer.includes(shorter)) {
-              toDelete.add(alive[j].id);
-              containCount++;
-              console.log(`[CLEANUP:contain] "${alive[j].word}" contains "${alive[i].word}" → 長い方を削除 [${groupKey}]`);
-            }
+      send("check3", "チェック3: ローマ字完全一致の重複を検出中...");
+      let romajiDupCount = 0;
+      const globalRomajiMap = new Map<string, typeof items[0]>();
+      for (const item of items) {
+        if (toDelete.has(item.id)) continue;
+        const normRomaji = item.romaji.replace(/[-\s]/g, "").toLowerCase();
+        if (normRomaji.length === 0) continue;
+        if (globalRomajiMap.has(normRomaji)) {
+          const existing = globalRomajiMap.get(normRomaji)!;
+          if (item.protected && !existing.protected) {
+            toDelete.add(existing.id);
+            globalRomajiMap.set(normRomaji, item);
+          } else {
+            toDelete.add(item.id);
           }
+          romajiDupCount++;
+          console.log(`[CLEANUP:romaji-global] "${item.word}" ローマ字重複`);
+        } else {
+          globalRomajiMap.set(normRomaji, item);
         }
       }
-      send("check3", `包含重複: ${containCount}個`);
+      send("check3", `ローマ字完全一致重複: ${romajiDupCount}個`);
 
       send("check4", "チェック4: 末尾単語一致をAI検出中...");
       const check4Result = await aiTailDedup(buckets, toDelete, send, false);
@@ -1658,7 +1766,7 @@ ${wordList}`);
 
       if (heartbeat) clearInterval(heartbeat);
       const finalCount = await getWordCount();
-      const summary = `母音不一致${wrongVowelCount} + 表記重複${scriptDupCount} + 語尾バリエーション${endingVarCount} + 包含${containCount} + 末尾重複${check4Result.deletedCount} + 意味重複${semanticDupCount} = ${totalDeleted}個削除`;
+      const summary = `母音不一致${wrongVowelCount} + 表記重複${scriptDupCount} + 語尾バリエーション${endingVarCount} + ローマ字重複${romajiDupCount} + 末尾重複${check4Result.deletedCount} + 意味重複${semanticDupCount} = ${totalDeleted}個削除`;
       send("done", `整理完了: ${summary} (残り${finalCount}語, ${formatElapsed(Date.now() - startTime)})`);
 
       if (!disconnected) {

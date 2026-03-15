@@ -47,9 +47,11 @@ export default function Home() {
   const [lastGenTime, setLastGenTime] = useState<number | null>(null);
   const [prevGenTime, setPrevGenTime] = useState<number | null>(null);
   const [rhymeFilter, setRhymeFilter] = useState<RhymeFilter>("all");
+  const [tail2Filter, setTail2Filter] = useState<string>("all");
   const autoModeRef = useRef(false);
   const generateDissSSERef = useRef<typeof generateDissSSE | null>(null);
   const addWordsDirectRef = useRef<typeof addWordsDirect | null>(null);
+  const runCleanupSSERef = useRef<typeof runCleanupSSE | null>(null);
   const [isPdfExporting, setIsPdfExporting] = useState(false);
   const pdfInputRef = useRef<HTMLInputElement>(null);
   const ngJsonInputRef = useRef<HTMLInputElement>(null);
@@ -521,6 +523,7 @@ export default function Home() {
 
   useEffect(() => { generateDissSSERef.current = generateDissSSE; }, [generateDissSSE]);
   useEffect(() => { addWordsDirectRef.current = addWordsDirect; }, [addWordsDirect]);
+  useEffect(() => { runCleanupSSERef.current = runCleanupSSE; }, [runCleanupSSE]);
 
   const startAutoMode = useCallback(async () => {
     if (autoModeRef.current) return;
@@ -578,11 +581,13 @@ export default function Home() {
         }
         emptyStreak = 0;
 
-        // === (4) データベースへ送信（文字整理→DB追加）===
+        // === (4) データベースへ送信 ===
         const allWords = getWordsFromResult(result);
+        let addTotal = 0;
         try {
           if (!addWordsDirectRef.current) break;
           const addResult = await addWordsDirectRef.current(allWords);
+          addTotal = addResult.total;
           toast({ title: "(4) DB送信完了", description: `${addResult.added}個追加（合計 ${addResult.total}個）` });
         } catch (err) {
           toast({ title: "(4) DB送信エラー", description: err instanceof Error ? err.message : "追加に失敗", variant: "destructive" });
@@ -590,10 +595,22 @@ export default function Home() {
         await delay(1000);
         if (!autoModeRef.current) break;
 
+        // === (4b) 1万語超えたら全て整理して中断 ===
+        if (addTotal >= 10000) {
+          toast({ title: "🎯 1万語達成！", description: "全て整理を開始します。オートモードを停止します。" });
+          autoModeRef.current = false;
+          setActiveTab("fav");
+          await delay(1500);
+          if (runCleanupSSERef.current) {
+            await runCleanupSSERef.current("/api/favorites/cleanup", "全て整理");
+          }
+          break;
+        }
+
         // === (5) カウンター+1 → そのまま次のサイクルへ ===
         cycleCounter++;
         setAutoModeCount(prev => prev + 1);
-        toast({ title: `サイクル${cycleCounter}完了`, description: "次のサイクルへ..." });
+        toast({ title: `サイクル${cycleCounter}完了`, description: `残り${10000 - addTotal}語で1万語達成` });
         await delay(1000);
         if (!autoModeRef.current) break;
       }
@@ -1064,27 +1081,53 @@ export default function Home() {
                   );
                 };
 
+                // 末尾2母音パターンの一覧を取得
+                const allTail2Patterns = [...new Set(favQuery.data.groups.map(g => g.vowels.replace(/^\*/, "").slice(-2)))].sort();
+
                 const filteredGroups = favQuery.data.groups.map(group => {
+                  const grpTail2 = group.vowels.replace(/^\*/, "").slice(-2);
+                  if (tail2Filter !== "all" && grpTail2 !== tail2Filter) return null;
                   if (rhymeFilter === "all") return group;
                   const filteredRhymes = (group.hardRhymes || []).filter(hr => hr.tier === rhymeFilter);
                   return { ...group, hardRhymes: filteredRhymes, words: rhymeFilter === "all" ? group.words : [] };
-                }).filter(group => {
+                }).filter((group): group is NonNullable<typeof group> => {
+                  if (!group) return false;
                   const totalInGroup = group.words.length + (group.hardRhymes?.reduce((s, h) => s + h.words.length, 0) || 0);
                   return totalInGroup > 0;
                 });
 
                 return (
-                <div className="space-y-3" data-testid="favorites-container">
+                <>
+                  {/* 末尾2母音フィルタ */}
+                  <div className="flex flex-wrap gap-1.5" data-testid="tail2-filter-bar">
+                    <Button key="all-t2" variant={tail2Filter === "all" ? "default" : "outline"} size="sm" className="text-xs h-7 px-2.5"
+                      onClick={() => setTail2Filter("all")} data-testid="filter-tail2-all">全パターン</Button>
+                    {allTail2Patterns.map(p => (
+                      <Button key={p} variant={tail2Filter === p ? "secondary" : "outline"} size="sm"
+                        className={`text-xs h-7 px-2.5 font-mono font-bold ${tail2Filter === p ? "ring-2 ring-primary/30" : ""}`}
+                        onClick={() => setTail2Filter(tail2Filter === p ? "all" : p)} data-testid={`filter-tail2-${p}`}>
+                        *{p}
+                      </Button>
+                    ))}
+                  </div>
+
+                <div className="space-y-4" data-testid="favorites-container">
                   {filteredGroups.map(group => {
                     const totalInGroup = group.words.length + (group.hardRhymes?.reduce((s, h) => s + h.words.length, 0) || 0);
+                    const tail2 = group.vowels.replace(/^\*/, "").slice(-2);
                     return (
-                    <div key={group.vowels} className="rounded-md border border-border/50 bg-muted/10 p-3">
-                      <div className="flex items-center gap-2 mb-2">
-                        <Badge variant="default" className="text-xs font-mono">[{group.vowels}]</Badge>
-                        <span className="text-xs text-muted-foreground">{totalInGroup}個</span>
+                    <div key={group.vowels} className="rounded-lg border-2 border-primary/25 bg-muted/20 overflow-hidden">
+                      {/* 末尾2母音ヘッダー（最大グループ単位） */}
+                      <div className="flex items-center gap-3 px-4 py-2.5 bg-primary/10 border-b border-primary/20">
+                        <div className="flex items-center gap-2">
+                          <span className="text-2xl font-extrabold font-mono tracking-wider text-primary">*{tail2}</span>
+                          <span className="text-xs font-mono text-muted-foreground">{group.vowels}</span>
+                        </div>
+                        <Badge variant="secondary" className="text-xs ml-1">{totalInGroup}語</Badge>
                       </div>
+                      <div className="p-3 space-y-2">
                       {group.hardRhymes && group.hardRhymes.length > 0 && (
-                        <div className="space-y-2 mb-2">
+                        <div className="space-y-2">
                           {group.hardRhymes.map(hr => {
                             const tc = tierConfig[hr.tier];
                             return (
@@ -1106,10 +1149,12 @@ export default function Home() {
                           {group.words.map(w => renderWord(w, null))}
                         </div>
                       )}
+                      </div>
                     </div>
                     );
                   })}
                 </div>
+                </>
                 );
               })()}
             </CardContent>
