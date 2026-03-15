@@ -1870,6 +1870,87 @@ ${wordList}`);
     }
   });
 
+  app.post("/api/favorites/analyze-endings", async (req, res) => {
+    let heartbeat: ReturnType<typeof setInterval> | null = null;
+    let disconnected = false;
+    res.on("close", () => { disconnected = true; if (heartbeat) clearInterval(heartbeat); });
+
+    try {
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders();
+      heartbeat = setInterval(() => { if (!disconnected) res.write(`: heartbeat\n\n`); }, 5000);
+
+      const send = (step: string, detail: string) => {
+        if (disconnected) return;
+        res.write(`data: ${JSON.stringify({ type: "progress", step, detail })}\n\n`);
+        if (typeof (res as any).flush === "function") (res as any).flush();
+      };
+
+      send("init", "DB全ワードを取得中...");
+      const allWords = await getAllWords();
+      send("init", `${allWords.length}語の末尾名詞を分析中...`);
+
+      const BATCH = 60;
+      const PARALLEL = 10;
+      const endingMap = new Map<string, number>();
+      const batches: typeof allWords[] = [];
+      for (let i = 0; i < allWords.length; i += BATCH) batches.push(allWords.slice(i, i + BATCH));
+
+      for (let b = 0; b < batches.length; b += PARALLEL) {
+        if (disconnected) break;
+        const chunk = batches.slice(b, b + PARALLEL);
+        send("analyze", `分析中... (${Math.min(b, batches.length)}/${batches.length}バッチ)`);
+        await Promise.all(chunk.map(async (batch) => {
+          const lines = batch.map(w => w.word).join("\n");
+          const prompt = `以下の悪口ワードについて、それぞれの「末尾にある意味のまとまりとしての主要な名詞・単語」を1つ特定せよ。助詞・助動詞・活用語尾は除外し、名詞として成立する末尾単語のみ返せ。
+
+例:
+- 「ポンコツ野郎」→ 野郎
+- 「無能な役立たず」→ 役立たず
+- 「豆腐メンタル」→ メンタル
+- 「顔面崩壊」→ 崩壊
+- 「存在価値ゼロ」→ 価値ゼロ
+
+ワード一覧:
+${lines}
+
+JSON配列で出力（全ワード分必須、名詞として成立しない場合は"t":""）:
+[{"w":"元のワード","t":"末尾名詞"}]`;
+          try {
+            const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 4096 });
+            const text = result?.text || "";
+            const jsonMatch = text.match(/\[[\s\S]*?\]/);
+            if (!jsonMatch) return;
+            type EP = { w: string; t: string };
+            const pairs = JSON.parse(jsonMatch[0]) as EP[];
+            for (const p of pairs) {
+              const tail = (p.t || "").trim();
+              if (tail.length >= 2) endingMap.set(tail, (endingMap.get(tail) ?? 0) + 1);
+            }
+          } catch { }
+        }));
+      }
+
+      const top30 = [...endingMap.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 30)
+        .map(([word, count]) => ({ word, count }));
+
+      if (!disconnected) {
+        res.write(`data: ${JSON.stringify({ type: "result", rankings: top30, total: allWords.length })}\n\n`);
+        if (typeof (res as any).flush === "function") (res as any).flush();
+        res.end();
+      }
+    } catch (error) {
+      if (heartbeat) clearInterval(heartbeat);
+      console.error("Analyze endings error:", error);
+      if (!disconnected) { try { res.write(`data: ${JSON.stringify({ type: "error", error: "分析に失敗しました" })}\n\n`); res.end(); } catch {} }
+    }
+  });
+
   app.post("/api/favorites/paste", async (req, res) => {
     try {
       const { text } = req.body;

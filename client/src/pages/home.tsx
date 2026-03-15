@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import {
   Flame, Mic2, Sparkles, Zap, AlertTriangle, Loader2, Star,
-  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Plus, Play, Filter, Download, Upload, FileText, FileJson, Layers,
+  Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Plus, Play, Filter, Download, Upload, FileText, FileJson, Layers, BarChart3, Search,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import type { WordEntry, FavWord, FavGroup, NgWord, ProgressLog, GenerationResult, RhymeFilter } from "@/types";
@@ -59,6 +59,9 @@ export default function Home() {
   const [cleanupLogs, setCleanupLogs] = useState<ProgressLog[]>([]);
   const [cleanupDone, setCleanupDone] = useState(false);
   const cleanupLogEndRef = useRef<HTMLDivElement>(null);
+  const [isAnalyzingEndings, setIsAnalyzingEndings] = useState(false);
+  const [endingAnalysisLog, setEndingAnalysisLog] = useState("");
+  const [endingRankings, setEndingRankings] = useState<{ word: string; count: number }[] | null>(null);
 
   useEffect(() => { if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: "smooth" }); }, [progressLogs]);
   useEffect(() => { if (cleanupLogEndRef.current) cleanupLogEndRef.current.scrollIntoView({ behavior: "smooth" }); }, [cleanupLogs]);
@@ -461,6 +464,46 @@ export default function Home() {
     }
   }, [isCleanupRunning, queryClient]);
 
+  const runEndingAnalysis = useCallback(async () => {
+    if (isAnalyzingEndings) return;
+    setIsAnalyzingEndings(true);
+    setEndingRankings(null);
+    setEndingAnalysisLog("分析開始...");
+    try {
+      const response = await fetch("/api/favorites/analyze-endings", { method: "POST" });
+      if (!response.ok) throw new Error("リクエストに失敗しました");
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("No reader");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data: ")) continue;
+          try {
+            const data = JSON.parse(trimmed.slice(6));
+            if (data.type === "progress") setEndingAnalysisLog(data.detail || "");
+            else if (data.type === "result") {
+              setEndingRankings(data.rankings as { word: string; count: number }[]);
+              setEndingAnalysisLog(`✅ ${data.total}語を分析完了`);
+            } else if (data.type === "error") {
+              setEndingAnalysisLog(`❌ エラー: ${data.error || "失敗"}`);
+            }
+          } catch {}
+        }
+      }
+    } catch (err) {
+      setEndingAnalysisLog(`❌ エラー: ${err instanceof Error ? err.message : "失敗"}`);
+    } finally {
+      setIsAnalyzingEndings(false);
+    }
+  }, [isAnalyzingEndings]);
+
   const handleNgJsonExport = useCallback(async () => {
     try {
       const res = await fetch("/api/ng-words/export-json");
@@ -822,7 +865,7 @@ export default function Home() {
                 )}
 
                 <div className="space-y-2">
-                  <Textarea placeholder="NG単語を入力（改行・カンマ区切り）&#10;例: 野郎、顔、存在" value={pasteTextNg} onChange={e => setPasteTextNg(e.target.value)} className="text-xs min-h-[60px]" data-testid="textarea-paste-ng" />
+                  <Textarea placeholder="NG単語を入力（改行・「、」・カンマ区切りで複数入力可）&#10;例: 野郎、顔、存在" value={pasteTextNg} onChange={e => setPasteTextNg(e.target.value)} className="text-xs min-h-[60px]" data-testid="textarea-paste-ng" />
                   <Button variant="outline" size="sm" onClick={() => pasteNgMutation.mutate(pasteTextNg)} disabled={!pasteTextNg.trim() || pasteNgMutation.isPending} data-testid="button-paste-ng">
                     {pasteNgMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Plus className="w-3.5 h-3.5 mr-1" />}
                     追加
@@ -1013,6 +1056,44 @@ export default function Home() {
                   </div>
                 </div>
               )}
+
+              {/* 末尾名詞ランキング */}
+              <div className="rounded-md border border-border/40 bg-muted/10 p-3 space-y-2">
+                <div className="flex items-center gap-2">
+                  <BarChart3 className="w-4 h-4 text-primary" />
+                  <span className="text-xs font-semibold">末尾名詞ランキング（NG単語候補）</span>
+                  <Button variant="outline" size="sm" className="ml-auto text-xs h-7 px-2.5" onClick={runEndingAnalysis}
+                    disabled={isAnalyzingEndings || totalCount === 0} data-testid="button-analyze-endings">
+                    {isAnalyzingEndings ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Search className="w-3.5 h-3.5 mr-1" />}
+                    {isAnalyzingEndings ? "分析中..." : "分析"}
+                  </Button>
+                </div>
+                {endingAnalysisLog && (
+                  <p className="text-xs text-muted-foreground">{endingAnalysisLog}</p>
+                )}
+                {endingRankings && endingRankings.length > 0 && (
+                  <>
+                    <div className="flex flex-wrap gap-1.5">
+                      {endingRankings.map((r, i) => (
+                        <div key={r.word} className="inline-flex items-center gap-1 rounded-md border border-border/50 bg-card px-2 py-0.5 text-xs" data-testid={`ending-rank-${i}`}>
+                          <span className="text-muted-foreground font-mono">{i + 1}.</span>
+                          <span className="font-medium">{r.word}</span>
+                          <Badge variant="secondary" className="text-[10px] h-4 px-1">{r.count}</Badge>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-muted-foreground">コピー（NG単語に貼り付け可）:</span>
+                      <button
+                        onClick={() => { navigator.clipboard.writeText(endingRankings.map(r => r.word).join("、")); toast({ title: "コピー完了", description: `${endingRankings.length}個の末尾名詞をコピーしました` }); }}
+                        className="font-mono text-xs bg-black/60 border border-border/50 rounded px-2 py-1 hover:bg-black/80 transition-colors text-left flex-1 truncate cursor-pointer"
+                        data-testid="button-copy-endings">
+                        {endingRankings.map(r => r.word).join("、")}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
 
               <div className="flex flex-wrap gap-1.5" data-testid="rhyme-filter-bar">
                 {([
