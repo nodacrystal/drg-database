@@ -1075,9 +1075,12 @@ export default function Home() {
                   <>
                     <div className="flex flex-wrap gap-1.5">
                       {endingRankings.map((r, i) => (
-                        <div key={r.word} className="inline-flex items-center gap-1 rounded-md border border-border/50 bg-card px-2 py-0.5 text-xs" data-testid={`ending-rank-${i}`}>
+                        <div key={(r as any).reading || r.word} className="inline-flex items-center gap-1 rounded-md border border-border/50 bg-card px-2 py-0.5 text-xs" data-testid={`ending-rank-${i}`}>
                           <span className="text-muted-foreground font-mono">{i + 1}.</span>
                           <span className="font-medium">{r.word}</span>
+                          {(r as any).reading && (r as any).reading !== r.word && (
+                            <span className="text-muted-foreground text-[10px]">（{(r as any).reading}）</span>
+                          )}
                           <Badge variant="secondary" className="text-[10px] h-4 px-1">{r.count}</Badge>
                         </div>
                       ))}

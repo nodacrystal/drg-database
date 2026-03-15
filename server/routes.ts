@@ -1252,31 +1252,44 @@ JSONのみ出力（説明文・コードブロック不要）。`;
       const chunk = batches.slice(b, b + PARALLEL);
       const results = await Promise.all(chunk.map(async batch => {
         const lines = batch.map(w => `${w.word}（${w.reading}）`).join("\n");
-        const prompt = `以下の悪口ワードについて、それぞれの「末尾の主要な名詞（意味のまとまり）」を特定せよ。
-助詞・助動詞・活用語尾は含めず、名詞として自立している末尾単語だけを返せ。
+        const prompt = `以下の悪口ワードについて、それぞれの「末尾の核となる名詞サフィックス」を特定せよ。
 
-【重要なルール】
-- 1文字の名詞も必ず返す: 体（からだ）頭（あたま）顔（かお）腹（はら）等
-- 末尾が助詞（の・が・を・は）や活用形（ない・する・てる）の場合は"t":"","tr":""を返す
-- 表記は漢字・読みはひらがなで返す
+【最重要ルール】
+末尾の「自立した名詞部分だけ」を返す。前の修飾語は含めない。
+→ 同じ末尾名詞を持つワードは、必ず同じt/trを返すこと。
 
-【末尾名詞の例】
-- 「友ゼロ人間」→ t:"人間", tr:"にんげん"
-- 「陰口専門」→ t:"専門", tr:"せんもん"
-- 「無能の王様」→ t:"王様", tr:"おうさま"
+【具体例（この通りに返せ）】
+★1文字漢字サフィックス:
+- 「奇形児」→ t:"児", tr:"じ"　　※"きけいじ"ではなく"じ"
+- 「障害児」→ t:"児", tr:"じ"　　※同様に"じ"のみ
+- 「問題児」→ t:"児", tr:"じ"　　※同様
+- 「役立たず社員」→ t:"員", tr:"いん"　※"しゃいん"ではなく"いん"
+- 「最下位社員」→ t:"員", tr:"いん"　※同様
 - 「ゴミ溜め体」→ t:"体", tr:"からだ"
-- 「醜い肉の山」→ t:"山", tr:"やま"
-- 「役立たずの見本」→ t:"見本", tr:"みほん"
-- 「陰湿な魂胆」→ t:"魂胆", tr:"こんたん"
-- 「筋肉腐乱」→ t:"腐乱", tr:"ふらん"
+- 「醜い体」→ t:"体", tr:"からだ"　※同様
+- 「脂肪頭」→ t:"頭", tr:"あたま"
+
+★複数文字サフィックス:
+- 「恥知らず」→ t:"知らず", tr:"しらず"　※"はじしらず"ではなく"しらず"
+- 「礼儀知らず」→ t:"知らず", tr:"しらず"　※同様
+- 「口の悪さ」→ t:"悪さ", tr:"わるさ"　※"くちのわるさ"ではなく"わるさ"
+- 「性格の悪さ」→ t:"悪さ", tr:"わるさ"　※同様
+- 「友ゼロ人間」→ t:"人間", tr:"にんげん"
+- 「価値ゼロ人間」→ t:"人間", tr:"にんげん"　※同様
+- 「無能の王様」→ t:"王様", tr:"おうさま"
 - 「脳みそ空っぽ」→ t:"空っぽ", tr:"からっぽ"
-- 「存在価値ゼロ」→ t:"価値ゼロ", tr:"かちぜろ"
+
+【判定の原則】
+1. 末尾の名詞・サフィックスだけ返す（前の修飾語・助詞は含めない）
+2. 同じパターンで終わる複数ワードは、必ず同じ t/tr を返す
+3. 1文字の漢字名詞（体・頭・顔・腹・鼻・目・手・足・耳・児・員・者・類・族・風・式・型）も必ず返す
+4. 末尾が助詞（の・が・を・は・に・で）や動詞活用形の場合のみ t:"", tr:"" を返す
 
 ワード一覧:
 ${lines}
 
 JSON配列で出力（全ワード分必須）:
-[{"w":"元のワード","t":"末尾名詞（漢字/表記）","tr":"末尾名詞の読み（ひらがなのみ）"}]`;
+[{"w":"元のワード","t":"末尾名詞/サフィックス（表記）","tr":"読み（ひらがなのみ）"}]`;
         try {
           const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 4096 });
           const text = result?.text || "";
@@ -1859,49 +1872,86 @@ ${wordList}`);
 
       const BATCH = 60;
       const PARALLEL = 10;
-      const endingMap = new Map<string, number>();
+      // 読み(reading)でグループ化: 「体」(からだ)と「からだ」を同一視
+      const endingReadingMap = new Map<string, { displayWord: string; count: number }>();
       const batches: typeof allWords[] = [];
       for (let i = 0; i < allWords.length; i += BATCH) batches.push(allWords.slice(i, i + BATCH));
+
+      // 助詞など除外する1文字読み
+      const particleReadings = new Set(["の", "が", "を", "は", "に", "で", "と", "や", "も", "か", "ね", "よ", "な", "ぞ", "ぜ", "わ", "だ", "さ"]);
 
       for (let b = 0; b < batches.length; b += PARALLEL) {
         if (disconnected) break;
         const chunk = batches.slice(b, b + PARALLEL);
-        send("analyze", `分析中... (${Math.min(b, batches.length)}/${batches.length}バッチ)`);
+        send("analyze", `分析中... (${Math.min(b + PARALLEL, batches.length)}/${batches.length}バッチ)`);
         await Promise.all(chunk.map(async (batch) => {
-          const lines = batch.map(w => w.word).join("\n");
-          const prompt = `以下の悪口ワードについて、それぞれの「末尾にある意味のまとまりとしての主要な名詞・単語」を1つ特定せよ。助詞・助動詞・活用語尾は除外し、名詞として成立する末尾単語のみ返せ。
+          const lines = batch.map(w => `${w.word}（${w.reading}）`).join("\n");
+          const prompt = `以下の悪口ワードについて、それぞれの「末尾の核となる名詞サフィックス」を特定せよ。
 
-例:
-- 「ポンコツ野郎」→ 野郎
-- 「無能な役立たず」→ 役立たず
-- 「豆腐メンタル」→ メンタル
-- 「顔面崩壊」→ 崩壊
-- 「存在価値ゼロ」→ 価値ゼロ
+【最重要ルール】
+末尾の「自立した名詞部分だけ」を返す。前の修飾語は含めない。
+→ 同じ末尾名詞を持つワードは、必ず同じt/trを返すこと。
 
-ワード一覧:
+【具体例（この通りに返せ）】
+★1文字漢字サフィックス:
+- 「奇形児」→ t:"児", tr:"じ"　　※"きけいじ"ではなく"じ"
+- 「障害児」→ t:"児", tr:"じ"　　※同様に"じ"のみ
+- 「問題児」→ t:"児", tr:"じ"　　※同様
+- 「役立たず社員」→ t:"員", tr:"いん"　※"しゃいん"ではなく"いん"
+- 「最下位社員」→ t:"員", tr:"いん"　※同様
+- 「ゴミ溜め体」→ t:"体", tr:"からだ"
+- 「醜い体」→ t:"体", tr:"からだ"　※同様
+- 「脂肪頭」→ t:"頭", tr:"あたま"
+
+★複数文字サフィックス:
+- 「恥知らず」→ t:"知らず", tr:"しらず"　※"はじしらず"ではなく"しらず"
+- 「礼儀知らず」→ t:"知らず", tr:"しらず"　※同様
+- 「口の悪さ」→ t:"悪さ", tr:"わるさ"　※"くちのわるさ"ではなく"わるさ"
+- 「性格の悪さ」→ t:"悪さ", tr:"わるさ"　※同様
+- 「友ゼロ人間」→ t:"人間", tr:"にんげん"
+- 「価値ゼロ人間」→ t:"人間", tr:"にんげん"　※同様
+- 「無能の王様」→ t:"王様", tr:"おうさま"
+
+【判定の原則】
+1. 末尾の名詞・サフィックスだけ返す（前の修飾語・助詞は含めない）
+2. 同じパターンで終わる複数ワードは、必ず同じ t/tr を返す
+3. 1文字の漢字名詞（体・頭・顔・腹・鼻・目・手・足・耳・児・員・者・類・族・風・式・型）も必ず返す
+4. 末尾が助詞（の・が・を・は・に・で）や動詞活用形の場合のみ t:"", tr:"" を返す
+
+ワード一覧（表記/読み）:
 ${lines}
 
-JSON配列で出力（全ワード分必須、名詞として成立しない場合は"t":""）:
-[{"w":"元のワード","t":"末尾名詞"}]`;
+JSON配列で出力（全ワード分必須）:
+[{"w":"元のワード","t":"末尾名詞（表記）","tr":"末尾名詞の読み（ひらがな）"}]`;
           try {
             const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 4096 });
             const text = result?.text || "";
             const jsonMatch = text.match(/\[[\s\S]*?\]/);
             if (!jsonMatch) return;
-            type EP = { w: string; t: string };
+            type EP = { w: string; t: string; tr: string };
             const pairs = JSON.parse(jsonMatch[0]) as EP[];
             for (const p of pairs) {
-              const tail = (p.t || "").trim();
-              if (tail.length >= 2) endingMap.set(tail, (endingMap.get(tail) ?? 0) + 1);
+              const display = (p.t || "").trim();
+              const reading = (p.tr || "").trim();
+              // 読みが2文字以上 OR (読みが1文字かつ助詞でない) → カウント
+              if (!reading || (reading.length === 1 && particleReadings.has(reading))) continue;
+              const existing = endingReadingMap.get(reading);
+              if (existing) {
+                existing.count++;
+                // 表記は短い方（漢字1字など）を代表に
+                if (display.length < existing.displayWord.length) existing.displayWord = display;
+              } else {
+                endingReadingMap.set(reading, { displayWord: display, count: 1 });
+              }
             }
           } catch { }
         }));
       }
 
-      const top30 = [...endingMap.entries()]
-        .sort((a, b) => b[1] - a[1])
+      const top30 = [...endingReadingMap.entries()]
+        .sort((a, b) => b[1].count - a[1].count)
         .slice(0, 30)
-        .map(([word, count]) => ({ word, count }));
+        .map(([reading, { displayWord, count }]) => ({ word: displayWord, reading, count }));
 
       if (!disconnected) {
         res.write(`data: ${JSON.stringify({ type: "result", rankings: top30, total: allWords.length })}\n\n`);
