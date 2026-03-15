@@ -841,7 +841,14 @@ ${wordList}
           const uniqueWords = [...new Map(pWords.map(w => [w.id, w])).values()]
             .filter(w => !assigned.has(w.id));
           if (uniqueWords.length >= 2) {
-            // Display suffix = vowels extracted from key (remove group numbers)
+            // 条件: 一致箇所の単語（reading末尾）が全て同じ → 同一単語の使いまわし → Perfect除外
+            const syllableCount = (ps.match(/[0-9]/g) || []).length;
+            const readingSuffixes = uniqueWords.map(w => {
+              const chars = [...w.reading];
+              return chars.slice(Math.max(0, chars.length - syllableCount)).join("");
+            });
+            if (new Set(readingSuffixes).size === 1) continue; // 全員同じ末尾単語 → スキップ
+
             const displaySuffix = ps.replace(/[0-9]/g, "");
             rhymeGroups.push({ suffix: displaySuffix, words: sortByRomaji(uniqueWords), tier: "perfect" });
             for (const w of uniqueWords) assigned.add(w.id);
