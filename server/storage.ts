@@ -70,9 +70,42 @@ export async function clearAllWords(): Promise<void> {
   await db.delete(words);
 }
 
+const MAIN_VOWEL_GROUPS = ["ae", "oe", "ua", "an", "ao", "iu"];
+
 export async function exportWords(): Promise<string> {
   const allWords = await getAllWords();
-  const lines = allWords.map((w) => `${w.word}/${w.reading}(${w.romaji})[${w.vowels}]`);
+
+  const groupedWords: Record<string, typeof allWords> = {};
+  for (const w of allWords) {
+    const lastTwo = w.vowels.length >= 2 ? w.vowels.slice(-2) : w.vowels || "_";
+    (groupedWords[lastTwo] ??= []).push(w);
+  }
+
+  const lines: string[] = [];
+
+  for (const g of MAIN_VOWEL_GROUPS) {
+    const grp = groupedWords[g] || [];
+    if (grp.length === 0) continue;
+    lines.push(`===== ${g}グループ [メイン] (${grp.length}語) =====`);
+    for (const w of grp) {
+      lines.push(`${w.word}/${w.reading}(${w.romaji})[${w.vowels}]`);
+    }
+    lines.push("");
+  }
+
+  const otherGroups = Object.entries(groupedWords)
+    .filter(([key]) => !MAIN_VOWEL_GROUPS.includes(key))
+    .sort((a, b) => b[1].length - a[1].length);
+
+  for (const [key, grp] of otherGroups) {
+    if (grp.length === 0) continue;
+    lines.push(`===== ${key}グループ (${grp.length}語) =====`);
+    for (const w of grp) {
+      lines.push(`${w.word}/${w.reading}(${w.romaji})[${w.vowels}]`);
+    }
+    lines.push("");
+  }
+
   return lines.join("\n");
 }
 

@@ -104,11 +104,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         const batchCount = Math.max(2, Math.ceil(targetCount / 50));
         const words: WordEntry[] = [];
         const batchSeen = new Set<string>();
+        const usedEndingWords = new Set<string>(); // バッチ間末尾名詞追跡（漢字・カタカナ語形）
 
-        const makePrompt = (batchIndex: number, usedWordsList: string[]) => {
+        const makePrompt = (batchIndex: number, usedWordsList: string[], endingWords: Set<string>) => {
           const angle = DISS_ANGLES[batchIndex % DISS_ANGLES.length];
           const usedNote = usedWordsList.length > 0
             ? `\n【使用済み名詞・概念（絶対使用禁止）】以下の名詞・キーワードはすでに他のワードで使用済み。これらの名詞を含むワードは絶対に生成するな（全角・半角・ひらがな・漢字表記問わず）:\n${usedWordsList.slice(-200).join("、")}`
+            : "";
+          const endingNote2 = endingWords.size > 0
+            ? `\n【末尾名詞使用済み（追加生成禁止）】以下の語で終わるワードは既に生成済み。同じ末尾語で終わるワードを追加するな: ${[...endingWords].slice(-60).join("、")}`
             : "";
           return `「${targetName}」をディスるワードを50個生成せよ。
 
@@ -128,13 +132,14 @@ ${angle}
 - 【挑発性必須】相手が読んで苛立つ・カチンとくるような挑発的な言葉を選べ
 - 【リズム重視】声に出したとき音のリズムが良いこと（語呂が悪いものは削除せよ）
 - 同じ助詞・助動詞で終わるワードを重複させるな
+- 【末尾名詞重複禁止】このバッチ内で末尾の名詞（最後の名詞・名詞句）が重複するワードを生成するな（例：「クズ野郎」「ゴミ野郎」は末尾名詞「野郎」重複→どちらか1個のみ。「脂肪体」「肉体」は末尾名詞「体」重複→1個のみ）
 - 関西弁・方言語尾は絶対禁止（やな/やわ/やろ/やで/やん/ねん/やんか/やんな/わな/じゃな/じゃろ/っちゃ等）→ 標準語のみ
 - 【体言止め必須】名詞・名詞句で終わること。助詞・助動詞・形容詞語尾・動詞活用形で終わるワードは絶対禁止
 - ターゲット「${targetName}」に特化した内容
 - 造語OK（ただし意味が通じること）
 - このバッチ内で同じ単語を使用するな
 - 放送禁止用語・差別用語・商標名（IP）は削除せよ
-- 生成後、全ルールを自己チェックし違反ワードを削除せよ${ngEndingNote}${usedNote}
+- 生成後、全ルールを自己チェックし違反ワードを削除せよ${ngEndingNote}${usedNote}${endingNote2}
 既出DB（生成するな）: ${shortHistory}
 
 【出力形式】
@@ -148,6 +153,28 @@ ${angle}
 【使用名詞】名詞1、名詞2、名詞3...（このバッチで使用した全ての主要名詞）`;
         };
 
+        // ワード末尾から漢字・カタカナ末尾語形を抽出してusedEndingWordsを更新するヘルパー
+        const updateEndingWords = (wordList: WordEntry[]) => {
+          const ec = new Map<string, number>();
+          for (const w of wordList) {
+            const m1 = w.word.match(/[一-龯々ァ-ヶー]{1}$/);   // 1文字漢字
+            const m2 = w.word.match(/[一-龯々ァ-ヶー]{1,2}$/); // 1-2文字
+            const m3 = w.word.match(/[一-龯々ァ-ヶー]{1,4}$/); // 1-4文字
+            for (const m of [m1, m2, m3]) {
+              if (m) ec.set(m[0], (ec.get(m[0]) || 0) + 1);
+            }
+          }
+          let added = 0;
+          for (const [ending, cnt] of ec) {
+            const minCnt = ending.length === 1 ? 3 : 2; // 1文字は3回以上
+            if (cnt >= minCnt && !usedEndingWords.has(ending)) {
+              usedEndingWords.add(ending);
+              added++;
+            }
+          }
+          return added;
+        };
+
         for (let pair = 0; pair < Math.ceil(batchCount / 2); pair++) {
           const i0 = pair * 2;
           const i1 = pair * 2 + 1;
@@ -156,7 +183,7 @@ ${angle}
           const currentUsedWords = [...accumulatedExclusions, ...extraExclusions];
 
           const pairResults = await Promise.allSettled(
-            indices.map(i => aiGenerate(makePrompt(i, currentUsedWords), { ...geminiConfig, maxOutputTokens: 4096 }))
+            indices.map(i => aiGenerate(makePrompt(i, currentUsedWords, usedEndingWords), { ...geminiConfig, maxOutputTokens: 4096 }))
           );
 
           const pairWords: WordEntry[] = [];
@@ -210,6 +237,10 @@ ${angle}
           }
           const commonSubs = extractCommonSubstrings(pairWords);
           for (const s of commonSubs) accumulatedExclusions.add(s);
+
+          // ペア完了後: 蓄積ワード全体から末尾名詞を追跡して次ペアへ引き継ぐ
+          const newEndings = updateEndingWords(words);
+          if (newEndings > 0) console.log(`[STEP1] Pair${pair + 1}: 末尾追跡 +${newEndings}個 (計${usedEndingWords.size}個禁止中)`);
         }
         return words;
       };
@@ -230,6 +261,7 @@ ${angle}
 - 【挑発性必須】読んで苛立つ・カチンとくるような挑発的な言葉であること
 - 【リズム必須】声に出したとき音のリズムが良いこと。語呂が悪いものは削除
 - 同じ助詞・助動詞で終わるワードを重複させるな（例：〜だろ、〜だろ は禁止）
+- 【末尾名詞重複削除】リスト内で末尾の名詞（最後の名詞・名詞句）が同じワードが複数ある場合、最も辛辣な1個だけ残し残りを削除せよ（例：「クズ野郎」「ゴミ野郎」→末尾名詞「野郎」重複→最強1個残す）
 - 関西弁・方言語尾は絶対禁止（やな/やわ/やろ/やで/やん/ねん/やんか/やんな/わな/じゃな/じゃろ/っちゃ等）→ 標準語のみ使用
 - 【体言止め必須】各ワードは必ず名詞・名詞句で終わらせること。助詞（〜な/〜だ/〜わ/〜よ/〜ね）、助動詞（〜てる/〜てた/〜です/〜ます）、形容詞語尾（〜い）、動詞活用形（〜する/〜いる）で終わるワードは絶対禁止
 - 造語OK（ただし意味が通じること）
@@ -456,6 +488,115 @@ ${lines}
       send("step2c", `STEP2c完了: ${romajiFixCount}個修正, ${removedByVerify}個除外 → 残${verifiedWords.length}語`);
       finalQualityWords = verifiedWords;
       logTiming("step2c-romaji");
+
+      // ─── STEP2d: 末尾名詞重複チェック（生成バッチ内） ───
+      send("step2d", `STEP2d: 生成ワードの末尾名詞重複チェック中... (${finalQualityWords.length}個)`);
+      {
+        const STEP2D_BATCH = 60;
+        const STEP2D_PARALLEL = 8;
+        type GenEnding = { word: string; endingReading: string };
+        const genEndings: GenEnding[] = [];
+        const step2dBatches: WordEntry[][] = [];
+        for (let i = 0; i < finalQualityWords.length; i += STEP2D_BATCH)
+          step2dBatches.push(finalQualityWords.slice(i, i + STEP2D_BATCH));
+
+        for (let b = 0; b < step2dBatches.length; b += STEP2D_PARALLEL) {
+          if (disconnected) break;
+          const chunk = step2dBatches.slice(b, b + STEP2D_PARALLEL);
+          const step2dResults = await Promise.all(chunk.map(async (batch) => {
+            const batchLines = batch.map(w => `${w.word}（${w.reading}）`).join("\n");
+            const step2dPrompt = `以下の悪口ワードについて、それぞれの「末尾の名詞部分」を特定せよ。
+
+【1文字漢字の判定ルール（最重要）】
+末尾が漢字1文字の場合、その直前の文字を見る:
+  ▶ 直前が「ひらがな・カタカナ・記号・なし」→ その漢字単体を末尾名詞として返す
+  ▶ 直前が「漢字」→ その漢字は複合語の一部。複合語全体（連続する漢字部分）を末尾名詞として返す
+
+【具体例】
+★直前がひらがな → 漢字単体を返す:
+- 「だらし腹」→ 直前「し」(ひらがな) → t:"腹", tr:"はら"
+- 「醜い体」→ 直前「い」(ひらがな) → t:"体", tr:"からだ"
+- 「ブスな顔」→ 直前「な」(ひらがな) → t:"顔", tr:"かお"
+- 「ゴミの頭」→ 直前「の」(ひらがな) → t:"頭", tr:"あたま"
+
+★直前が漢字 → 複合語全体を返す:
+- 「肉体」→ 直前「肉」(漢字) → t:"肉体", tr:"にくたい"
+- 「障害者」→ 直前「害」(漢字) → t:"障害者", tr:"しょうがいしゃ"
+- 「問題児」→ 直前「題」(漢字) → t:"問題児", tr:"もんだいじ"
+- 「奇形児」→ 直前「形」(漢字) → t:"奇形児", tr:"きけいじ"
+- 「役立たず社員」→「員」の直前「社」(漢字) → t:"社員", tr:"しゃいん"
+- 「腐敗臭」→ 直前「敗」(漢字) → t:"腐敗臭", tr:"ふはいしゅう"
+- 「脂肪体」→ 直前「肪」(漢字) → t:"脂肪体", tr:"しぼうたい"
+
+★複数文字の末尾名詞（直前関係なく末尾の意味単位を返す）:
+- 「恥知らず」→ t:"知らず", tr:"しらず"
+- 「礼儀知らず」→ t:"知らず", tr:"しらず"
+- 「口の悪さ」→ t:"悪さ", tr:"わるさ"
+- 「友ゼロ人間」→ t:"人間", tr:"にんげん"
+- 「価値ゼロ人間」→ t:"人間", tr:"にんげん"
+- 「無能の王様」→ t:"王様", tr:"おうさま"
+
+【その他の原則】
+- 末尾が助詞（の・が・を・は・に・で）や動詞活用形（してる・になる等）の場合のみ t:"", tr:"" を返す
+- 全ワードについて必ず回答せよ（空欄・省略禁止）
+
+ワード一覧:
+${batchLines}
+
+JSON配列で出力（全ワード分必須）:
+[{"w":"元のワード","t":"末尾名詞（表記）","tr":"読み（ひらがなのみ）"}]`;
+            try {
+              const step2dResult = await aiGenerate(step2dPrompt, { ...geminiConfig, maxOutputTokens: 4096 });
+              const step2dText = step2dResult?.text || "";
+              const step2dMatch = step2dText.match(/\[[\s\S]*?\]/);
+              if (!step2dMatch) return [] as GenEnding[];
+              type EP = { w: string; t: string; tr: string };
+              const pairs = JSON.parse(step2dMatch[0]) as EP[];
+              const out: GenEnding[] = [];
+              for (const p of pairs) {
+                if (!batch.find(x => x.word === p.w)) continue;
+                const tr = (p.tr || "").trim();
+                if (tr.length >= 1) out.push({ word: p.w, endingReading: tr });
+              }
+              return out;
+            } catch { return [] as GenEnding[]; }
+          }));
+          for (const items of step2dResults) genEndings.push(...items);
+        }
+
+        const normalizeGenReading = (r: string): string =>
+          r.replace(/ー/g, "").replace(/[ぁぃぅぇぉっ]/g, (c: string) =>
+            ({ "ぁ": "あ", "ぃ": "い", "ぅ": "う", "ぇ": "え", "ぉ": "お", "っ": "つ" }[c] || c));
+        const genParticleSet = new Set(["の", "が", "を", "は", "に", "で", "と", "や", "も", "か", "ね", "よ", "な"]);
+        const genEndingGroups = new Map<string, string[]>();
+        for (const ge of genEndings) {
+          const norm = normalizeGenReading(ge.endingReading);
+          if (!norm || (norm.length === 1 && genParticleSet.has(norm))) continue;
+          const g = genEndingGroups.get(norm) || [];
+          g.push(ge.word);
+          genEndingGroups.set(norm, g);
+        }
+
+        const wordOrder = new Map<string, number>();
+        finalQualityWords.forEach((w, i) => wordOrder.set(w.word, i));
+        const genToRemove = new Set<string>();
+        let step2dDupCount = 0;
+        for (const [norm, group] of genEndingGroups) {
+          if (group.length > 1) {
+            const sorted = [...group].sort((a, b) => (wordOrder.get(a) ?? 9999) - (wordOrder.get(b) ?? 9999));
+            for (let i = 1; i < sorted.length; i++) {
+              genToRemove.add(sorted[i]);
+              step2dDupCount++;
+            }
+            send("step2d", `末尾「${norm}」重複${group.length}個 → 「${sorted[0]}」残し`);
+          }
+        }
+        const before2d = finalQualityWords.length;
+        finalQualityWords = finalQualityWords.filter(w => !genToRemove.has(w.word));
+        logTiming("step2d-dedup");
+        console.log(`[STEP2d] 末尾名詞重複: ${step2dDupCount}件削除 (${before2d}→${finalQualityWords.length}個), 重複グループ数: ${[...genEndingGroups.entries()].filter(([,g])=>g.length>1).length}`);
+        send("step2d", `STEP2d完了: 末尾名詞重複${step2dDupCount}件削除 (${before2d}→${finalQualityWords.length}個)`);
+      }
 
       console.log(`[GEN] Final count before grouping: ${finalQualityWords.length}`);
       send("step3", `STEP3: 母音パターンでグルーピング中...`);
