@@ -1235,7 +1235,7 @@ JSONのみ出力（説明文・コードブロック不要）。`;
       const localPreMap: Record<string, Set<number>> = {};
       for (const w of words) {
         const r = w.reading;
-        for (let len = 2; len <= Math.min(7, r.length - 1); len++) {
+        for (let len = 3; len <= Math.min(7, r.length - 1); len++) {
           localSufMap[r.slice(-len)] ??= new Set();
           localSufMap[r.slice(-len)].add(w.id);
           localPreMap[r.slice(0, len)] ??= new Set();
@@ -1421,27 +1421,41 @@ positionはsuffixまたはprefix。一致なしは[]。`;
       }
     }
 
+    // 長いサフィックス（より具体的）を優先処理
+    pickTasks.sort((a, b) => b.ending.length - a.ending.length);
+
+    // 勝者IDセット: 一度でも「残す」として選ばれたワードは他のグループで削除しない
+    const tailKeptIds = new Set<number>();
+
     for (let p = 0; p < pickTasks.length; p += PARALLEL) {
       const pickBatch = pickTasks.slice(p, p + PARALLEL);
       const pickResults = await Promise.all(pickBatch.map(async t => {
-        const prompt = `以下のワードから最も辛辣・強烈なパンチラインのワードを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${t.candidates.map(w => w.word).join("\n")}`;
+        // 既に削除対象 or 既に勝者として確定済みのワードを除外した候補
+        const liveCandidates = t.candidates.filter(w => !toDelete.has(w.id));
+        if (liveCandidates.length < 2) return liveCandidates[0]?.id ?? t.candidates[0].id;
+        const prompt = `以下のワードから最も辛辣・強烈なパンチラインのワードを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${liveCandidates.map(w => w.word).join("\n")}`;
         try {
           const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 64 });
           const best = (result?.text || "").trim().replace(/^「/, "").replace(/」$/, "").trim();
-          const match = t.candidates.find(w => w.word === best);
-          return match ? match.id : t.candidates[0].id;
-        } catch { return t.candidates[0].id; }
+          const match = liveCandidates.find(w => w.word === best);
+          return match ? match.id : liveCandidates[0].id;
+        } catch { return liveCandidates[0].id; }
       }));
       for (let j = 0; j < pickBatch.length; j++) {
         const keepId = pickResults[j];
+        tailKeptIds.add(keepId);
         let anyDeleted = false;
+        let deletedCount = 0;
         for (const w of pickBatch[j].candidates) {
+          if (w.id === keepId) continue;
+          if (tailKeptIds.has(w.id)) continue; // 別グループで既に勝者に選ばれている
+          if (toDelete.has(w.id)) continue;
           const isProtected = protectNone ? false : w.protected;
-          if (w.id !== keepId && !isProtected) { toDelete.add(w.id); tailDupCount++; anyDeleted = true; }
+          if (!isProtected) { toDelete.add(w.id); tailDupCount++; deletedCount++; anyDeleted = true; }
         }
         if (anyDeleted) {
           const kept = pickBatch[j].candidates.find(w => w.id === keepId);
-          send("check4", `「${pickBatch[j].ending}」→「${kept?.word || "?"}」残し、${pickBatch[j].candidates.length - 1}個削除`);
+          send("check4", `「${pickBatch[j].ending}」→「${kept?.word || "?"}」残し、${deletedCount}個削除`);
         }
       }
     }
