@@ -1223,119 +1223,137 @@ JSONのみ出力（説明文・コードブロック不要）。`;
     protectNone: boolean
   ): Promise<{ deletedCount: number }> {
     let tailDupCount = 0;
+    const EXTRACT_BATCH = 60;
     const PARALLEL = 8;
 
-    // ===== 文字列切り取りによるサブストリングマッチングを廃止 =====
-    // 代わりにAIが各ワードの「末尾/先頭の意味的単語」を直接特定するアプローチを採用。
-    // これにより文字数に依存しない正確なグループ化が可能になる。
+    // ===== 正しいアーキテクチャ =====
+    // 旧: 「バケツ内で全グループを一度に探せ」→ AIが大量ワードから小グループを見落とす
+    // 新: 「各ワードの末尾名詞を個別抽出→読みでグループ化→グループごとにpick」
+    //      ランキング機能と同じ抽出ロジックを使い、文字数・バケツに依存しない正確なグループ化
 
-    const groupsToScan = Object.entries(buckets)
-      .map(([key, words]) => ({ key, words: words.filter(w => !toDelete.has(w.id)) }))
-      .filter(g => g.words.length >= 2 && (protectNone || g.words.some(w => !w.protected)));
+    // Step1: バケツをまたいで全候補ワードを収集
+    const allCandidates = Object.values(buckets)
+      .flat()
+      .filter((w, i, arr) => arr.findIndex(x => x.id === w.id) === i) // dedup by id
+      .filter(w => !toDelete.has(w.id));
 
-    send("check4", `${groupsToScan.length}グループをAIで末尾/先頭単語分析中...`);
+    send("check4", `${allCandidates.length}語の末尾名詞を個別抽出中...`);
 
-    type EndingGroup = { shared: string; reading?: string; position?: "suffix" | "prefix"; ending?: string; words: string[]; readingSuffix?: string };
-    const aiEndingGroups: { key: string; endings: EndingGroup[]; srcWords: TailDupItem[] }[] = [];
+    // Step2: 各ワードの末尾名詞をAIで抽出（ランキングと同じ方式）
+    type WordEnding = { id: number; ending: string; endingReading: string };
+    const wordEndings: WordEnding[] = [];
 
-    for (let b = 0; b < groupsToScan.length; b += PARALLEL) {
-      const batch = groupsToScan.slice(b, b + PARALLEL);
-      const results = await Promise.all(batch.map(async g => {
-        const wordList = g.words.map(w => `${w.word}（${w.reading}）`).join("\n");
-        const prompt = `以下の悪口ワードリストを分析し、「末尾または先頭に同じ意味的単語を持つ」グループを特定せよ。
+    const batches: TailDupItem[][] = [];
+    for (let i = 0; i < allCandidates.length; i += EXTRACT_BATCH) {
+      batches.push(allCandidates.slice(i, i + EXTRACT_BATCH));
+    }
 
-【判定ルール】
-ワード全体の文脈を理解し、「どこまでが一つの意味的単語か」を正確に判断せよ。
-文字数に関係なく、意味のある単語のまとまりで判断すること。
+    for (let b = 0; b < batches.length; b += PARALLEL) {
+      const chunk = batches.slice(b, b + PARALLEL);
+      const results = await Promise.all(chunk.map(async batch => {
+        const lines = batch.map(w => `${w.word}（${w.reading}）`).join("\n");
+        const prompt = `以下の悪口ワードについて、それぞれの「末尾の主要な名詞（意味のまとまり）」を特定せよ。
+助詞・助動詞・活用語尾は含めず、名詞として自立している末尾単語だけを返せ。
 
-【末尾単語の例】
-・「友ゼロ人間」→ 末尾単語は「人間」（にんげん）
-・「陰口専門」→ 末尾単語は「専門」（せんもん）
-・「無能の王様」→ 末尾単語は「王様」（おうさま）
-・「ゴミ溜め体」→ 末尾単語は「体」（からだ）
-・「醜い肉の山」→ 末尾単語は「山」（やま）
-・「役立たずの見本」→ 末尾単語は「見本」（みほん）
-・「陰湿な魂胆」→ 末尾単語は「魂胆」（こんたん）
+【重要なルール】
+- 1文字の名詞も必ず返す: 体（からだ）頭（あたま）顔（かお）腹（はら）等
+- 末尾が助詞（の・が・を・は）や活用形（ない・する・てる）の場合は"t":"","tr":""を返す
+- 表記は漢字・読みはひらがなで返す
 
-【グループ化の対象】
-・末尾(suffix): 末尾の意味的単語が同じ（「体」「からだ」「身体」は読みが同じなので同一グループ）
-・先頭(prefix): 先頭の意味的単語が同じ（「ゴミ顔」「ゴミ野郎」→ 先頭「ゴミ」共通）
+【末尾名詞の例】
+- 「友ゼロ人間」→ t:"人間", tr:"にんげん"
+- 「陰口専門」→ t:"専門", tr:"せんもん"
+- 「無能の王様」→ t:"王様", tr:"おうさま"
+- 「ゴミ溜め体」→ t:"体", tr:"からだ"
+- 「醜い肉の山」→ t:"山", tr:"やま"
+- 「役立たずの見本」→ t:"見本", tr:"みほん"
+- 「陰湿な魂胆」→ t:"魂胆", tr:"こんたん"
+- 「筋肉腐乱」→ t:"腐乱", tr:"ふらん"
+- 「脳みそ空っぽ」→ t:"空っぽ", tr:"からっぽ"
+- 「存在価値ゼロ」→ t:"価値ゼロ", tr:"かちぜろ"
 
-【グループ化しないもの】
-・末尾が助詞: の・が・を・は・に・で・と・や
-・末尾が助動詞・活用語尾: ない・てる・する・いる・など
-・完全に異なる末尾単語（例: 「体」と「頭」は別グループ）
+ワード一覧:
+${lines}
 
-ワード一覧（表記/読み）:
-${wordList}
-
-同じ末尾/先頭単語を持つグループのみJSON配列で出力。グループなしなら[]。
-[{"shared":"共通単語の表記","reading":"共通単語の読み（ひらがな）","position":"suffix","words":["ワード1","ワード2"]}]`;
+JSON配列で出力（全ワード分必須）:
+[{"w":"元のワード","t":"末尾名詞（漢字/表記）","tr":"末尾名詞の読み（ひらがなのみ）"}]`;
         try {
-          const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 2048 });
+          const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 4096 });
           const text = result?.text || "";
-          const jsonMatch = text.match(/\[[\s\S]*\]/);
+          const jsonMatch = text.match(/\[[\s\S]*?\]/);
           if (!jsonMatch) return [];
-          return (JSON.parse(jsonMatch[0]) as EndingGroup[]).map(e => ({
-            ...e,
-            ending: e.shared || e.ending || "",
-            readingSuffix: e.reading || e.readingSuffix || ""
-          }));
+          type EP = { w: string; t: string; tr: string };
+          const pairs = JSON.parse(jsonMatch[0]) as EP[];
+          const out: { id: number; ending: string; endingReading: string }[] = [];
+          for (const p of pairs) {
+            const w = batch.find(x => x.word === p.w);
+            if (!w) continue;
+            const ending = (p.t || "").trim();
+            const endingReading = (p.tr || "").trim();
+            if (ending.length >= 1 && endingReading.length >= 1) {
+              out.push({ id: w.id, ending, endingReading });
+            }
+          }
+          return out;
         } catch { return []; }
       }));
-      for (let i = 0; i < batch.length; i++) {
-        const endings = (results[i] || []).filter((e: EndingGroup) =>
-          e.words && e.words.length >= 2 && (e.shared || e.ending) && [...(e.shared || e.ending || "")].length >= 1
-        );
-        if (endings.length > 0) {
-          aiEndingGroups.push({ key: batch[i].key, endings, srcWords: batch[i].words });
-        }
-      }
-      if (b + PARALLEL < groupsToScan.length) {
-        send("check4", `末尾単語分析中... (${Math.min(b + PARALLEL, groupsToScan.length)}/${groupsToScan.length}グループ完了)`);
+      for (const items of results) wordEndings.push(...items);
+      if (b + PARALLEL < batches.length) {
+        send("check4", `末尾名詞抽出中... (${Math.min((b + PARALLEL) * EXTRACT_BATCH, allCandidates.length)}/${allCandidates.length}語完了)`);
       }
     }
 
+    // Step3: 末尾名詞の読みでグループ化（読みを正規化: 長音符・小文字統一）
+    function normalizeEnding(r: string): string {
+      return r.replace(/ー/g, "").replace(/[ぁぃぅぇぉっ]/g, c =>
+        ({ "ぁ": "あ", "ぃ": "い", "ぅ": "う", "ぇ": "え", "ぉ": "お", "っ": "つ" }[c] || c)
+      );
+    }
+
+    const endingGroups = new Map<string, { words: TailDupItem[]; displayEnding: string }>();
+    const wordIdToEnding = new Map<number, WordEnding>();
+    for (const we of wordEndings) wordIdToEnding.set(we.id, we);
+
+    for (const w of allCandidates) {
+      const we = wordIdToEnding.get(w.id);
+      if (!we) continue;
+      const normReading = normalizeEnding(we.endingReading);
+      if (!normReading) continue;
+      const grp = endingGroups.get(normReading) ?? { words: [], displayEnding: we.ending };
+      grp.words.push(w);
+      endingGroups.set(normReading, grp);
+    }
+
+    send("check4", `末尾名詞グループ: ${endingGroups.size}種類を検出`);
+
+    // Step4: 2件以上のグループをpickタスクに変換
     type PickTask = { candidates: TailDupItem[]; ending: string };
     const pickTasks: PickTask[] = [];
     const processedGroupKeys = new Set<string>();
 
-    for (const eg of aiEndingGroups) {
-      for (const ending of eg.endings) {
-        const sharedStr = ending.shared || ending.ending || "";
-        const rsuffix = ending.readingSuffix || ending.reading || "";
-        const isPrefix = ending.position === "prefix";
-        const candidates = eg.srcWords.filter(w => {
-          if (toDelete.has(w.id)) return false;
-          if (ending.words.includes(w.word)) return true;
-          if (rsuffix) {
-            if (isPrefix ? w.reading.startsWith(rsuffix) : w.reading.endsWith(rsuffix)) return true;
-          }
-          return false;
-        });
-        if (candidates.length < 2) continue;
-        const key = candidates.map(w => w.id).sort().join(",");
-        if (processedGroupKeys.has(key)) continue;
-        processedGroupKeys.add(key);
-        const posLabel = isPrefix ? "先頭" : "末尾";
-        send("check4", `「${sharedStr}」系(AI ${posLabel}検出) ${candidates.length}個検出`);
-        pickTasks.push({ candidates, ending: sharedStr });
-      }
+    for (const [normReading, grp] of endingGroups) {
+      const candidates = grp.words.filter(w => !toDelete.has(w.id));
+      if (candidates.length < 2) continue;
+      const key = candidates.map(w => w.id).sort().join(",");
+      if (processedGroupKeys.has(key)) continue;
+      processedGroupKeys.add(key);
+      send("check4", `「${grp.displayEnding}」(${normReading}) ${candidates.length}個検出`);
+      pickTasks.push({ candidates, ending: grp.displayEnding });
     }
 
-    // 長いサフィックス（より具体的）を優先処理
-    pickTasks.sort((a, b) => b.ending.length - a.ending.length);
+    // 件数が多いグループ（重複が多い）を優先処理
+    pickTasks.sort((a, b) => b.candidates.length - a.candidates.length);
 
-    // 勝者IDセット: 一度でも「残す」として選ばれたワードは他のグループで削除しない
+    // Step5: 各グループでAIに最強パンチラインを選ばせ、残りを削除
     const tailKeptIds = new Set<number>();
 
     for (let p = 0; p < pickTasks.length; p += PARALLEL) {
       const pickBatch = pickTasks.slice(p, p + PARALLEL);
       const pickResults = await Promise.all(pickBatch.map(async t => {
-        // 既に削除対象 or 既に勝者として確定済みのワードを除外した候補
-        const liveCandidates = t.candidates.filter(w => !toDelete.has(w.id));
-        if (liveCandidates.length < 2) return liveCandidates[0]?.id ?? t.candidates[0].id;
-        const prompt = `以下のワードから最も辛辣・強烈なパンチラインのワードを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${liveCandidates.map(w => w.word).join("\n")}`;
+        const liveCandidates = t.candidates.filter(w => !toDelete.has(w.id) && !tailKeptIds.has(w.id));
+        if (liveCandidates.length === 0) return t.candidates[0]?.id ?? -1;
+        if (liveCandidates.length === 1) { tailKeptIds.add(liveCandidates[0].id); return liveCandidates[0].id; }
+        const prompt = `以下のワードは全て「${t.ending}」系のワードです。最も辛辣・強烈なパンチラインを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${liveCandidates.map(w => w.word).join("\n")}`;
         try {
           const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 64 });
           const best = (result?.text || "").trim().replace(/^「/, "").replace(/」$/, "").trim();
@@ -1345,17 +1363,17 @@ ${wordList}
       }));
       for (let j = 0; j < pickBatch.length; j++) {
         const keepId = pickResults[j];
+        if (keepId === -1) continue;
         tailKeptIds.add(keepId);
-        let anyDeleted = false;
         let deletedCount = 0;
         for (const w of pickBatch[j].candidates) {
           if (w.id === keepId) continue;
-          if (tailKeptIds.has(w.id)) continue; // 別グループで既に勝者に選ばれている
+          if (tailKeptIds.has(w.id)) continue;
           if (toDelete.has(w.id)) continue;
           const isProtected = protectNone ? false : w.protected;
-          if (!isProtected) { toDelete.add(w.id); tailDupCount++; deletedCount++; anyDeleted = true; }
+          if (!isProtected) { toDelete.add(w.id); tailDupCount++; deletedCount++; }
         }
-        if (anyDeleted) {
+        if (deletedCount > 0) {
           const kept = pickBatch[j].candidates.find(w => w.id === keepId);
           send("check4", `「${pickBatch[j].ending}」→「${kept?.word || "?"}」残し、${deletedCount}個削除`);
         }
