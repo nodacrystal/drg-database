@@ -18,77 +18,9 @@ import {
   Copy, Trash2, CheckSquare, Square, Database, Target, X, Ban, ScrollText, Plus, Play, Filter, Download, Upload, FileText, FileJson, Layers,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-
-interface WordEntry { word: string; reading: string; romaji: string; }
-interface FavWord { id: number; word: string; reading: string; romaji: string; vowels: string; charCount: number; }
-interface HardRhymeGroup { suffix: string; words: FavWord[]; tier: "hard" | "super" | "legendary" | "perfect"; }
-interface FavGroup { vowels: string; words: FavWord[]; hardRhymes?: HardRhymeGroup[]; }
-interface NgWord { id: number; word: string; reading: string; romaji: string; }
-interface ProgressLog { time: string; detail: string; elapsed: string; }
-interface GenerationResult {
-  groups: Record<string, WordEntry[]>;
-  ungrouped: WordEntry[];
-  total: number;
-}
-
-function extractVowels(romaji: string): string {
-  const r = romaji.toLowerCase();
-  let result = "";
-  for (let i = 0; i < r.length; i++) {
-    if ("aeiou".includes(r[i])) result += r[i];
-    else if (r[i] === "n" && (!r[i + 1] || !"aeiou".includes(r[i + 1]))) result += "n";
-  }
-  return result;
-}
-
-const VOWEL_PATTERNS = ["ae", "oe", "ua", "an", "ao", "iu"];
-
-const PATTERN_COLORS: Record<string, string> = {
-  ae: "bg-rose-500/20 text-rose-300 border-rose-500/30",
-  oe: "bg-amber-500/20 text-amber-300 border-amber-500/30",
-  ua: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30",
-  an: "bg-sky-500/20 text-sky-300 border-sky-500/30",
-  ao: "bg-violet-500/20 text-violet-300 border-violet-500/30",
-  iu: "bg-pink-500/20 text-pink-300 border-pink-500/30",
-};
-
-const LEVEL_INFO: Record<number, { label: string; color: string }> = {
-  1: { label: "毒舌", color: "text-yellow-400" },
-  2: { label: "辛辣", color: "text-orange-400" },
-  3: { label: "過激", color: "text-red-400" },
-  4: { label: "暴言", color: "text-red-500" },
-  5: { label: "禁忌🔞", color: "text-purple-400" },
-};
-
-const LEVEL_BAR_COLORS: Record<number, string> = {
-  1: "bg-yellow-500", 2: "bg-orange-500", 3: "bg-red-400", 4: "bg-red-500", 5: "bg-purple-500",
-};
-
-function getRomajiHighlightIndex(romaji: string, suffixLen: number): number {
-  const r = romaji.toLowerCase();
-  const vowelPositions: number[] = [];
-  for (let i = 0; i < r.length; i++) {
-    if ("aeiou".includes(r[i])) vowelPositions.push(i);
-    else if (r[i] === "n" && (!r[i + 1] || !"aeiou".includes(r[i + 1]))) vowelPositions.push(i);
-  }
-  if (vowelPositions.length < suffixLen) return 0;
-  return vowelPositions[vowelPositions.length - suffixLen];
-}
-
-type RhymeFilter = "all" | "perfect" | "legendary" | "super" | "hard";
-
-function formatTimer(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return m > 0 ? `${m}:${s.toString().padStart(2, "0")}` : `${s}秒`;
-}
-
-function getWordsFromResult(result: GenerationResult): WordEntry[] {
-  const all: WordEntry[] = [];
-  for (const p of VOWEL_PATTERNS) { if (result.groups[p]) all.push(...result.groups[p]); }
-  all.push(...result.ungrouped);
-  return all;
-}
+import type { WordEntry, FavWord, FavGroup, NgWord, ProgressLog, GenerationResult, RhymeFilter } from "@/types";
+import { VOWEL_PATTERNS, PATTERN_COLORS, LEVEL_INFO, LEVEL_BAR_COLORS } from "@/lib/constants";
+import { extractVowels, getRomajiHighlightIndex, formatTimer, getWordsFromResult } from "@/lib/utils";
 
 export default function Home() {
   const { toast } = useToast();
