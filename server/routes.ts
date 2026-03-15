@@ -1225,103 +1225,15 @@ JSONのみ出力（説明文・コードブロック不要）。`;
     let tailDupCount = 0;
     const PARALLEL = 8;
 
-    const readingSuffixGroups: Map<string, TailDupItem[]> = new Map();
-
-    for (const [, bucketWords] of Object.entries(buckets)) {
-      const words = bucketWords.filter(w => !toDelete.has(w.id));
-      if (words.length < 2) continue;
-
-      const localSufMap: Record<string, Set<number>> = {};
-      const localPreMap: Record<string, Set<number>> = {};
-      for (const w of words) {
-        const r = w.reading;
-        for (let len = 3; len <= Math.min(7, r.length - 1); len++) {
-          localSufMap[r.slice(-len)] ??= new Set();
-          localSufMap[r.slice(-len)].add(w.id);
-          localPreMap[r.slice(0, len)] ??= new Set();
-          localPreMap[r.slice(0, len)].add(w.id);
-        }
-      }
-
-      const usedIds = new Set<string>();
-      for (const [suf, idSet] of Object.entries(localSufMap)
-        .filter(([, ids]) => ids.size >= 2)
-        .sort((a, b) => b[0].length - a[0].length)) {
-        const ids = [...idSet].sort().join(",");
-        if (usedIds.has(ids)) continue;
-        usedIds.add(ids);
-        const groupKey = `suffix:${suf}`;
-        const existing = readingSuffixGroups.get(groupKey) ?? [];
-        const toAdd = words.filter(w => idSet.has(w.id) && !existing.some(e => e.id === w.id));
-        readingSuffixGroups.set(groupKey, [...existing, ...toAdd]);
-      }
-
-      const usedPreIds = new Set<string>();
-      for (const [pre, idSet] of Object.entries(localPreMap)
-        .filter(([, ids]) => ids.size >= 2)
-        .sort((a, b) => b[0].length - a[0].length)) {
-        const ids = [...idSet].sort().join(",");
-        if (usedPreIds.has(ids)) continue;
-        usedPreIds.add(ids);
-        const groupKey = `prefix:${pre}`;
-        const existing = readingSuffixGroups.get(groupKey) ?? [];
-        const toAdd = words.filter(w => idSet.has(w.id) && !existing.some(e => e.id === w.id));
-        readingSuffixGroups.set(groupKey, [...existing, ...toAdd]);
-      }
-    }
-
-    const candidateStrings = [...readingSuffixGroups.keys()]
-      .map(k => ({
-        key: k,
-        str: k.startsWith("suffix:") ? k.slice("suffix:".length) : k.slice("prefix:".length)
-      }))
-      .filter(({ key, str }) => readingSuffixGroups.get(key)!.length >= 2 && str.length > 0);
-
-    const validStrings = new Set<string>();
-    if (candidateStrings.length > 0) {
-      send("validate", `単語検証中 (${candidateStrings.length}候補: 末尾+先頭)...`);
-      const VBATCH = 80;
-      const dedupStrs = [...new Set(candidateStrings.map(c => c.str))];
-      for (let i = 0; i < dedupStrs.length; i += VBATCH) {
-        const chunk = dedupStrs.slice(i, i + VBATCH);
-        const validationPrompt = `以下のひらがな文字列が「日本語の名詞または名詞複合語の完全な読み」かどうか判定せよ。
-
-【重要な判定ルール】
-悪口ワードの末尾・先頭として使われる「意味のある単語のまとまり」を合格とせよ。
-単漢字・複合名詞どちらも合格。助詞・助動詞・動詞活用形のみ不合格。
-
-【必ず合格にすべき例】
-単体名詞: おとこ かお おんな からだ やろう のう かべ ぶた くず おう もの ごみ あほ ばか かがみ
-複合名詞: にんげん（人間）せんもん（専門）みほん（見本）やくだたず（役立たず）ぬけがら（抜け殻）かたまり（塊）もどき（擬き）おばさん（おばさん）おじさん（おじさん）ぶとん（布団）ばかもの（馬鹿者）のうみそ（脳みそ）まんたん（満タン）こんたん（魂胆）ふそん（不遜）
-短い名詞: めん（面）だん（弾）さん（山）おう（王）くず（屑）じん（人）のう（脳）
-
-【不合格】
-助詞のみ: の な だ わ よ て で か を は が に
-助動詞・活用形: める みる する いる なる られ てる てた でいる
-明らかな断片: のかたまり なかたまり くかたまり（接頭辞＋名詞の組み合わせは不合格）
-
-判定対象:
-${chunk.map((e, idx) => `${idx + 1}. ${e}`).join("\n")}
-
-合格のもののみ番号をJSON配列で返せ（例: [1,3,5]）。全て不合格なら[]。数字のみ出力。`;
-        try {
-          const vResult = await aiGenerate(validationPrompt, { ...geminiConfig, maxOutputTokens: 512 });
-          const vText = vResult?.text || "";
-          const vMatch = vText.match(/\[[\s\S]*?\]/);
-          if (vMatch) {
-            const validIdxs = JSON.parse(vMatch[0]) as number[];
-            for (const idx of validIdxs) {
-              if (idx >= 1 && idx <= chunk.length) validStrings.add(chunk[idx - 1]);
-            }
-          }
-        } catch {}
-      }
-      send("validate", `単語検証完了: ${dedupStrs.length}候補中 ${validStrings.size}語採用`);
-    }
+    // ===== 文字列切り取りによるサブストリングマッチングを廃止 =====
+    // 代わりにAIが各ワードの「末尾/先頭の意味的単語」を直接特定するアプローチを採用。
+    // これにより文字数に依存しない正確なグループ化が可能になる。
 
     const groupsToScan = Object.entries(buckets)
       .map(([key, words]) => ({ key, words: words.filter(w => !toDelete.has(w.id)) }))
       .filter(g => g.words.length >= 2 && (protectNone || g.words.some(w => !w.protected)));
+
+    send("check4", `${groupsToScan.length}グループをAIで末尾/先頭単語分析中...`);
 
     type EndingGroup = { shared: string; reading?: string; position?: "suffix" | "prefix"; ending?: string; words: string[]; readingSuffix?: string };
     const aiEndingGroups: { key: string; endings: EndingGroup[]; srcWords: TailDupItem[] }[] = [];
@@ -1329,29 +1241,36 @@ ${chunk.map((e, idx) => `${idx + 1}. ${e}`).join("\n")}
     for (let b = 0; b < groupsToScan.length; b += PARALLEL) {
       const batch = groupsToScan.slice(b, b + PARALLEL);
       const results = await Promise.all(batch.map(async g => {
-        const wordList = g.words.map(w => `${w.word}/${w.reading}`).join("\n");
-        const prompt = `以下の悪口ワードリストで、先頭または末尾に同じ名詞単語が一致するものをグループ化せよ。
+        const wordList = g.words.map(w => `${w.word}（${w.reading}）`).join("\n");
+        const prompt = `以下の悪口ワードリストを分析し、「末尾または先頭に同じ意味的単語を持つ」グループを特定せよ。
+
+【判定ルール】
+ワード全体の文脈を理解し、「どこまでが一つの意味的単語か」を正確に判断せよ。
+文字数に関係なく、意味のある単語のまとまりで判断すること。
+
+【末尾単語の例】
+・「友ゼロ人間」→ 末尾単語は「人間」（にんげん）
+・「陰口専門」→ 末尾単語は「専門」（せんもん）
+・「無能の王様」→ 末尾単語は「王様」（おうさま）
+・「ゴミ溜め体」→ 末尾単語は「体」（からだ）
+・「醜い肉の山」→ 末尾単語は「山」（やま）
+・「役立たずの見本」→ 末尾単語は「見本」（みほん）
+・「陰湿な魂胆」→ 末尾単語は「魂胆」（こんたん）
 
 【グループ化の対象】
-・末尾一致(suffix): ワードの末尾に同じ名詞がある（例: ゴミ顔、汚い顔 → 末尾「顔」が共通）
-・先頭一致(prefix): ワードの先頭に同じ名詞がある（例: ゴミ顔、ゴミ野郎 → 先頭「ゴミ」が共通）
-・表記違い（漢字/ひらがな/カタカナ）でも読みが同じなら同一グループ
+・末尾(suffix): 末尾の意味的単語が同じ（「体」「からだ」「身体」は読みが同じなので同一グループ）
+・先頭(prefix): 先頭の意味的単語が同じ（「ゴミ顔」「ゴミ野郎」→ 先頭「ゴミ」共通）
 
-【対象となる単語（例）】
-単独でも意味が完結する名詞のみ:
-・1文字: 体・顔・脳・腹・肉・男・女・者・王・面・玉・虫・人・金
-・2文字以上: 野郎・面倒・ゴミ・アホ・人間・固まり・塊・抜け殻・バカ・クズ・豚
-
-【除外する単語（先頭・末尾どちらも）】
-助詞・助動詞・断片: の・な・だ・わ・よ・て・で・か・を・は・が・に・ない・ぶん・ぐん
-動詞活用形: める・みる・する・いる・なる・られ・てる・てた
+【グループ化しないもの】
+・末尾が助詞: の・が・を・は・に・で・と・や
+・末尾が助動詞・活用語尾: ない・てる・する・いる・など
+・完全に異なる末尾単語（例: 「体」と「頭」は別グループ）
 
 ワード一覧（表記/読み）:
 ${wordList}
 
-JSON配列のみ出力:
-[{"shared":"共通単語（代表表記）","reading":"読み","position":"suffix","words":["ワード1","ワード2"]}]
-positionはsuffixまたはprefix。一致なしは[]。`;
+同じ末尾/先頭単語を持つグループのみJSON配列で出力。グループなしなら[]。
+[{"shared":"共通単語の表記","reading":"共通単語の読み（ひらがな）","position":"suffix","words":["ワード1","ワード2"]}]`;
         try {
           const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 2048 });
           const text = result?.text || "";
@@ -1372,31 +1291,14 @@ positionはsuffixまたはprefix。一致なしは[]。`;
           aiEndingGroups.push({ key: batch[i].key, endings, srcWords: batch[i].words });
         }
       }
+      if (b + PARALLEL < groupsToScan.length) {
+        send("check4", `末尾単語分析中... (${Math.min(b + PARALLEL, groupsToScan.length)}/${groupsToScan.length}グループ完了)`);
+      }
     }
 
     type PickTask = { candidates: TailDupItem[]; ending: string };
     const pickTasks: PickTask[] = [];
     const processedGroupKeys = new Set<string>();
-
-    const useAllStrings = validStrings.size === 0 && candidateStrings.length > 0;
-    if (useAllStrings) {
-      send("validate", "単語バリデーション0件のためフォールバック: 全候補を採用");
-      for (const { str } of candidateStrings) validStrings.add(str);
-    }
-
-    for (const [groupKey, groupWords] of readingSuffixGroups) {
-      const isPrefix = groupKey.startsWith("prefix:");
-      const readingStr = isPrefix ? groupKey.slice("prefix:".length) : groupKey.slice("suffix:".length);
-      if (!validStrings.has(readingStr)) continue;
-      const candidates = groupWords.filter(w => !toDelete.has(w.id));
-      if (candidates.length < 2) continue;
-      const key = candidates.map(w => w.id).sort().join(",");
-      if (processedGroupKeys.has(key)) continue;
-      processedGroupKeys.add(key);
-      const posLabel = isPrefix ? "先頭" : "末尾";
-      send("check4", `「${readingStr}」系(${posLabel}一致) ${candidates.length}個検出`);
-      pickTasks.push({ candidates, ending: readingStr });
-    }
 
     for (const eg of aiEndingGroups) {
       for (const ending of eg.endings) {
