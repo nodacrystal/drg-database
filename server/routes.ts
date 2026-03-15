@@ -1284,13 +1284,21 @@ JSONのみ出力（説明文・コードブロック不要）。`;
       const dedupStrs = [...new Set(candidateStrings.map(c => c.str))];
       for (let i = 0; i < dedupStrs.length; i += VBATCH) {
         const chunk = dedupStrs.slice(i, i + VBATCH);
-        const validationPrompt = `以下のひらがな文字列が「単独で辞書に載る完全な日本語単語の読み」かどうか判定せよ。
+        const validationPrompt = `以下のひらがな文字列が「日本語の名詞または名詞複合語の完全な読み」かどうか判定せよ。
 
-【合格（完全な単語の読み）】: 名詞・代名詞・よく知られた表現の読み
-合格例: おとこ（男）、かお（顔）、おんな（女）、かたまり（塊）、やろう（野郎）、のう（脳）、からだ（体）、ぬけがら（抜け殻）、かべ（壁）、ぶた（豚）、かがみ（鏡）、くず（屑）、おう（王）、じん（人）、めん（面）、だん（弾）、さん（山）、もの（者・物）、ごみ（ゴミ）、あほ（アホ）、ばか（バカ）
+【重要な判定ルール】
+悪口ワードの末尾・先頭として使われる「意味のある単語のまとまり」を合格とせよ。
+単漢字・複合名詞どちらも合格。助詞・助動詞・動詞活用形のみ不合格。
 
-【不合格（断片・活用形・助詞）】: 完全な単語でない
-不合格例: のかたまり（の＋かたまり）、なかたまり、くかたまり、ぐん、でん、りや、いた、ぶん、てる、てた、よ、の、な、か、わ、さ
+【必ず合格にすべき例】
+単体名詞: おとこ かお おんな からだ やろう のう かべ ぶた くず おう もの ごみ あほ ばか かがみ
+複合名詞: にんげん（人間）せんもん（専門）みほん（見本）やくだたず（役立たず）ぬけがら（抜け殻）かたまり（塊）もどき（擬き）おばさん（おばさん）おじさん（おじさん）ぶとん（布団）ばかもの（馬鹿者）のうみそ（脳みそ）まんたん（満タン）こんたん（魂胆）ふそん（不遜）
+短い名詞: めん（面）だん（弾）さん（山）おう（王）くず（屑）じん（人）のう（脳）
+
+【不合格】
+助詞のみ: の な だ わ よ て で か を は が に
+助動詞・活用形: める みる する いる なる られ てる てた でいる
+明らかな断片: のかたまり なかたまり くかたまり（接頭辞＋名詞の組み合わせは不合格）
 
 判定対象:
 ${chunk.map((e, idx) => `${idx + 1}. ${e}`).join("\n")}
@@ -1313,7 +1321,7 @@ ${chunk.map((e, idx) => `${idx + 1}. ${e}`).join("\n")}
 
     const groupsToScan = Object.entries(buckets)
       .map(([key, words]) => ({ key, words: words.filter(w => !toDelete.has(w.id)) }))
-      .filter(g => g.words.length >= 2 && g.words.some(w => !w.protected));
+      .filter(g => g.words.length >= 2 && (protectNone || g.words.some(w => !w.protected)));
 
     type EndingGroup = { shared: string; reading?: string; position?: "suffix" | "prefix"; ending?: string; words: string[]; readingSuffix?: string };
     const aiEndingGroups: { key: string; endings: EndingGroup[]; srcWords: TailDupItem[] }[] = [];
@@ -1515,11 +1523,27 @@ positionはsuffixまたはprefix。一致なしは[]。`;
       }
       send("check3", `ローマ字一致: ${romajiDupCount}件`);
 
-      const total = wordDupCount + readingDupCount + romajiDupCount;
+      // --- check4: 末尾名詞重複（protected無視）---
+      send("check4", "末尾名詞重複を検出中（protect無視）...");
+      const dedupItems = allWords
+        .filter(w => !toDelete.has(w.id))
+        .map(w => ({
+          id: w.id, word: w.word, reading: w.reading, romaji: w.romaji,
+          vowels: w.vowels || "", charCount: w.charCount,
+          protected: w.protected ?? false,
+        }));
+      const dedupBuckets: Record<string, typeof dedupItems> = {};
+      for (const item of dedupItems) {
+        const key = item.vowels.length >= 2 ? item.vowels.slice(-2) : item.vowels || "_";
+        (dedupBuckets[key] ??= []).push(item);
+      }
+      const tailResult = await aiTailDedup(dedupBuckets, toDelete, send, true);
+
+      const total = wordDupCount + readingDupCount + romajiDupCount + tailResult.deletedCount;
       if (total === 0) {
         send("done", "重複なし。データベースはクリーンな状態です。");
       } else {
-        send("delete", `合計 ${total}件 (表記:${wordDupCount} + 読み:${readingDupCount} + ローマ字:${romajiDupCount}) を削除中...`);
+        send("delete", `合計 ${total}件 (表記:${wordDupCount} + 読み:${readingDupCount} + ローマ字:${romajiDupCount} + 末尾名詞:${tailResult.deletedCount}) を削除中...`);
         await deleteWords([...toDelete]);
       }
 
@@ -1720,29 +1744,41 @@ positionはsuffixまたはprefix。一致なしは[]。`;
         await Promise.all(muBatch.map(async (g) => {
           try {
             const rawSet = new Set(g.words.map(w => w.word));
-            const wordList = g.words.map(w => `${w.word}${w.protected ? " [確定]" : ""}`).join("\n");
+            const wordList = g.words.map(w => w.word).join("\n");
             const muResult = await aiGenerate(`以下の悪口ワードリストを精査せよ。
 
+【重要な前提】
+これは「韻（ライム）のデータベース」である。
+「同じ末尾の言葉」が並んでいるのは「同じ単語を繰り返しているだけ」であり、それは韻ではなく重複である。
+例: 「友ゼロ人間」「価値ゼロ人間」「理解ゼロ人間」→ 全員「人間」で終わっている = 末尾が全く同じ単語 = 重複
+
 【作業手順】
-STEP1: 全ワードを読み、各ワードに含まれる「意味のまとまりとしての単語（名詞・固有名詞・造語を含む）」をリストアップせよ。
-STEP2: 同じ名詞・単語（ひらがな・カタカナ・漢字問わず、読みが同じなら同一）が複数のワードに現れているグループを特定せよ。
-STEP3: 各グループの中で最もわかりやすく辛辣なパンチラインのワードを1個だけ選び、他を削除せよ。[確定]マークが付いたワードは削除禁止。[確定]でない方を優先的に削除せよ。
+STEP1: 全ワードを読み、各ワードの「末尾の意味的単語」を特定せよ。
+  ・「この身体」→ 末尾単語は「身体」
+  ・「この体」→ 末尾単語は「体」（「身体」と「体」は同義 = 同一グループ）
+  ・「友ゼロ人間」「価値ゼロ人間」→ 末尾単語はどちらも「人間」= 同一グループ
+  ・先頭単語も同様に判定（「クソ顔」「クソ野郎」→ 先頭「クソ」共通）
+
+STEP2: 末尾（または先頭）が同じ単語・同義語のグループを特定せよ。
+STEP3: 各グループの中で最も辛辣・インパクトの強いパンチラインを1個だけ残し、他は削除。
 STEP4: どのグループにも属さないワードは全て残せ。
 
-【共通単語の例】
-・「クソ顔」「汚い顔」「ブス顔」→「顔」共通 → 最もパンチライン1個だけ残す
-・「役立たず野郎」「使えない野郎」→「野郎」共通 → 最もパンチライン1個だけ残す
-・「豆腐メンタル」「豆腐精神」→「豆腐」共通 → 最もパンチライン1個だけ残す
+【削除例】
+入力: 友ゼロ人間 / 価値ゼロ人間 / 理解ゼロ人間 / 人望ゼロ人間 / 貢献ゼロ人間
+全員「人間」で終わる → グループ化 → 最もパンチライン1個を残し4個削除
+
+入力: 陰口専門 / 穀潰し専門 / 悪巧み専門 / 仕事放棄専門
+全員「専門」で終わる → グループ化 → 最もパンチライン1個を残し3個削除
 
 【厳守事項】
-・先頭・中間・末尾いずれの位置に名詞が現れても対象
-・どのグループにも属さないワードは削除禁止
 ・出力は元の表記そのまま（変換・書き換え禁止）
+・グループ内で最も印象的な1個のみ残す
+・グループに属さないワードは残す
 
 ワードリスト:
 ${wordList}
 
-残すワードのみ出力（1行1個、元の表記そのまま、[確定]マーク・番号・説明一切不要）:`,
+残すワードのみ出力（1行1個、元の表記そのまま、番号・説明一切不要）:`,
               { ...geminiConfig, maxOutputTokens: 4096 });
             const text = muResult?.text || "";
             const kept = text.split("\n")
@@ -1755,11 +1791,11 @@ ${wordList}
             }
             let deleted = 0;
             for (const w of g.words) {
-              if (!keptSet.has(w.word) && !w.protected && !toDelete.has(w.id)) {
+              if (!keptSet.has(w.word) && !toDelete.has(w.id)) {
                 toDelete.add(w.id);
                 deleted++;
                 meaningUnitDupCount++;
-                console.log(`[CHECK3b:${g.key}] "${w.word}" → 意味単位重複削除`);
+                console.log(`[CHECK3b:${g.key}] "${w.word}"${w.protected ? "(protected)" : ""} → 意味単位重複削除`);
               }
             }
             if (deleted > 0) send("check3b", `[${g.key}] ${deleted}個削除（意味単位重複）`);
@@ -1774,7 +1810,7 @@ ${wordList}
       send("check3b", `意味単位（名詞）重複: ${meaningUnitDupCount}個`);
 
       send("check4", "チェック4: 末尾単語一致をAI検出中...");
-      const check4Result = await aiTailDedup(buckets, toDelete, send, false);
+      const check4Result = await aiTailDedup(buckets, toDelete, send, true);
       send("check4", `末尾重複: ${check4Result.deletedCount}個`);
 
       send("check5", "チェック5: 意味的重複をAI検出中...");
@@ -1783,21 +1819,16 @@ ${wordList}
         .map(([key, words]) => ({ key, words: words.filter(w => !toDelete.has(w.id)) }))
         .filter(g => g.words.length >= 2);
 
-      const groupsWithNewWords = groupsToCheck.filter(g => g.words.some(w => !w.protected));
-      send("check5", `${groupsWithNewWords.length}/${groupsToCheck.length}グループに新規ワードあり`);
+      send("check5", `${groupsToCheck.length}グループを意味重複チェック`);
 
       const SEMANTIC_PARALLEL = 8;
-      for (let b = 0; b < groupsWithNewWords.length; b += SEMANTIC_PARALLEL) {
-        const batch = groupsWithNewWords.slice(b, b + SEMANTIC_PARALLEL);
+      for (let b = 0; b < groupsToCheck.length; b += SEMANTIC_PARALLEL) {
+        const batch = groupsToCheck.slice(b, b + SEMANTIC_PARALLEL);
         await Promise.all(batch.map(async (g) => {
           try {
-            const newWords = g.words.filter(w => !w.protected);
-            const protectedWords = g.words.filter(w => w.protected);
-
-            const wordList = g.words.map(w => `${w.word}${w.protected ? " [確定]" : ""}`).join("\n");
+            const wordList = g.words.map(w => w.word).join("\n");
             const semResult = await aiGenerate(`以下の日本語悪口ワード一覧から「意味がほぼ同じ」「表現違いだけの重複」ペアを全て見つけよ。
-[確定]マークが付いたワードは削除禁止。重複ペアが見つかった場合は[確定]でない方を削除せよ。
-両方[確定]なら両方残せ。両方[確定]でなければインパクトがある方を残せ。
+インパクトがある方を残し、弱い方を削除せよ。
 
 検出すべき重複の例:
 - 「うっせーよ」と「うるせえよ」→ 同じ意味の別表現→片方削除
@@ -1813,17 +1844,16 @@ ${wordList}`);
             const text = (semResult.text || "").trim();
             if (text === "なし" || !text.includes("削除")) return;
 
-            const protectedIds = new Set(protectedWords.map(w => w.id));
             for (const line of text.split("\n")) {
               const deleteMatch = line.match(/削除[:：]\s*(.+)/);
               if (!deleteMatch) continue;
-              const deleteWordsList = deleteMatch[1].split(/[,、，]/).map(w => w.trim().replace(/^「/, "").replace(/」$/, "").replace(/\s*\[確定\]/, "").trim());
+              const deleteWordsList = deleteMatch[1].split(/[,、，]/).map(w => w.trim().replace(/^「/, "").replace(/」$/, "").trim());
               for (const dw of deleteWordsList) {
                 const match = g.words.find(w => w.word === dw);
-                if (match && !toDelete.has(match.id) && !protectedIds.has(match.id)) {
+                if (match && !toDelete.has(match.id)) {
                   toDelete.add(match.id);
                   semanticDupCount++;
-                  console.log(`[CLEANUP:semantic] "${match.word}" → 意味的重複削除 [${g.key}]`);
+                  console.log(`[CLEANUP:semantic] "${match.word}"${match.protected ? "(protected)" : ""} → 意味的重複削除 [${g.key}]`);
                 }
               }
             }
@@ -1831,8 +1861,8 @@ ${wordList}`);
             console.log(`[CLEANUP:semantic] AI failed for group ${g.key}:`, err);
           }
         }));
-        if (b + SEMANTIC_PARALLEL < groupsWithNewWords.length) {
-          send("check5", `意味的重複検出中... (${Math.min(b + SEMANTIC_PARALLEL, groupsWithNewWords.length)}/${groupsWithNewWords.length}グループ完了)`);
+        if (b + SEMANTIC_PARALLEL < groupsToCheck.length) {
+          send("check5", `意味的重複検出中... (${Math.min(b + SEMANTIC_PARALLEL, groupsToCheck.length)}/${groupsToCheck.length}グループ完了)`);
         }
       }
       send("check5", `意味的重複: ${semanticDupCount}個`);
