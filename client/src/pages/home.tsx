@@ -53,8 +53,13 @@ export default function Home() {
   const [isPdfExporting, setIsPdfExporting] = useState(false);
   const pdfInputRef = useRef<HTMLInputElement>(null);
   const ngJsonInputRef = useRef<HTMLInputElement>(null);
+  const [isCleanupRunning, setIsCleanupRunning] = useState(false);
+  const [cleanupLogs, setCleanupLogs] = useState<ProgressLog[]>([]);
+  const [cleanupDone, setCleanupDone] = useState(false);
+  const cleanupLogEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { if (logEndRef.current) logEndRef.current.scrollIntoView({ behavior: "smooth" }); }, [progressLogs]);
+  useEffect(() => { if (cleanupLogEndRef.current) cleanupLogEndRef.current.scrollIntoView({ behavior: "smooth" }); }, [cleanupLogs]);
   useEffect(() => { return () => {
     if (timerRef.current) clearInterval(timerRef.current);
   }; }, []);
@@ -402,6 +407,57 @@ export default function Home() {
     }
     if (pdfInputRef.current) pdfInputRef.current.value = "";
   }, [toast, queryClient]);
+
+  const runCleanupSSE = useCallback(async (endpoint: string, label: string) => {
+    if (isCleanupRunning) return;
+    setIsCleanupRunning(true);
+    setCleanupDone(false);
+    setCleanupLogs([]);
+    const addLog = (detail: string, elapsed = "") => {
+      const now = new Date();
+      const time = `${now.getHours().toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")}:${now.getSeconds().toString().padStart(2, "0")}`;
+      setCleanupLogs(prev => [...prev, { time, detail, elapsed }]);
+    };
+    addLog(`${label}開始...`);
+    try {
+      const response = await fetch(endpoint, { method: "POST" });
+      if (!response.ok) throw new Error("リクエストに失敗しました");
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error("No reader");
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data: ")) continue;
+          try {
+            const data = JSON.parse(trimmed.slice(6));
+            if (data.type === "progress" || data.type === "done") {
+              addLog(data.detail || "", data.elapsed || "");
+            } else if (data.type === "result") {
+              const del = data.deleted ?? 0;
+              const tot = data.total ?? data.remaining ?? 0;
+              addLog(`✅ 完了: ${del}件削除 → 残り${tot}語`, "");
+              queryClient.invalidateQueries({ queryKey: ["/api/favorites"] });
+              queryClient.invalidateQueries({ queryKey: ["/api/favorites/count"] });
+            } else if (data.type === "error") {
+              addLog(`❌ エラー: ${data.error || data.detail || "失敗"}`, "");
+            }
+          } catch {}
+        }
+      }
+    } catch (err) {
+      addLog(`❌ エラー: ${err instanceof Error ? err.message : "失敗"}`, "");
+    } finally {
+      setIsCleanupRunning(false);
+      setCleanupDone(true);
+    }
+  }, [isCleanupRunning, queryClient]);
 
   const handleNgJsonExport = useCallback(async () => {
     try {
@@ -901,6 +957,45 @@ export default function Home() {
                   </AlertDialog>
                 </div>
               </div>
+
+              <div className="flex flex-wrap gap-1.5">
+                <Button variant="outline" size="sm" onClick={() => runCleanupSSE("/api/favorites/char-check", "文字整理")} disabled={isCleanupRunning || totalCount === 0} data-testid="button-char-check">
+                  {isCleanupRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Sparkles className="w-3.5 h-3.5 mr-1" />}
+                  文字整理
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => runCleanupSSE("/api/favorites/dedup-cleanup", "重複整理")} disabled={isCleanupRunning || totalCount === 0} data-testid="button-dedup-cleanup">
+                  {isCleanupRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Layers className="w-3.5 h-3.5 mr-1" />}
+                  重複整理
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => runCleanupSSE("/api/favorites/cleanup", "全て整理")} disabled={isCleanupRunning || totalCount === 0} data-testid="button-full-cleanup">
+                  {isCleanupRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Zap className="w-3.5 h-3.5 mr-1" />}
+                  全て整理
+                </Button>
+              </div>
+
+              {(isCleanupRunning || cleanupLogs.length > 0) && (
+                <div className="rounded-md border border-border/50 bg-black/80 p-3">
+                  <div className="flex items-center gap-2 mb-2">
+                    {isCleanupRunning ? <Loader2 className="w-4 h-4 animate-spin text-primary" /> : cleanupDone ? <Star className="w-4 h-4 text-green-400" /> : null}
+                    <span className="text-xs font-medium text-muted-foreground">整理ログ</span>
+                    {!isCleanupRunning && cleanupDone && (
+                      <Button variant="ghost" size="sm" className="ml-auto h-5 px-2 text-xs" onClick={() => { setCleanupLogs([]); setCleanupDone(false); }}>
+                        <X className="w-3 h-3 mr-1" />閉じる
+                      </Button>
+                    )}
+                  </div>
+                  <div className="font-mono text-xs max-h-40 overflow-y-auto space-y-0.5">
+                    {cleanupLogs.map((log, i) => (
+                      <div key={i} className="flex gap-2 py-0.5">
+                        <span className="text-muted-foreground shrink-0">[{log.time}]</span>
+                        {log.elapsed && <span className="text-green-400 shrink-0">({log.elapsed})</span>}
+                        <span className="text-foreground flex-1">{log.detail}</span>
+                      </div>
+                    ))}
+                    <div ref={cleanupLogEndRef} />
+                  </div>
+                </div>
+              )}
 
               <div className="flex flex-wrap gap-1.5" data-testid="rhyme-filter-bar">
                 {([
