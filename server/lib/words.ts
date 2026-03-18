@@ -123,7 +123,8 @@ export function extractTaigenVowels(word: string, reading: string, romaji: strin
       for (let sj = si + 1; sj < segments.length; sj++) {
         if (segments[sj].isH) {
           const anchor = segments[sj].text;
-          const anchorPos = reading.indexOf(anchor, rPos);
+          const minSearchPos = rPos + seg.text.length;
+          const anchorPos = reading.indexOf(anchor, minSearchPos);
           if (anchorPos !== -1) endRPos = anchorPos;
           break;
         }
