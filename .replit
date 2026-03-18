@@ -45,4 +45,4 @@ waitForPort = 5000
 "GEMINI API KEY" = "AIzaSyDnbFqcXkUvKW5gA3yRMuNlfHMHuRglqmo"
 
 [agent]
-integrations = ["javascript_gemini_ai_integrations:2.0.0"]
+integrations = ["javascript_gemini_ai_integrations:2.0.0", "github:1.0.0"]
