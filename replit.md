@@ -40,7 +40,11 @@ The application follows a client-server architecture with a clear separation of 
     3.  **Shared-Word Clustering (STEP2b):** Programmatic hiragana normalization (katakana→hiragana via `katakanaToHiragana()`). Groups words by common 3-5 hiragana substrings. AI picks strongest punchline per cluster. Removes duplicates before DB save.
     4.  **Vowel Grouping (STEP3):** Passing words are grouped by their last two vowels for rhyme matching.
 - **DB Save:** `quickCharCheck()` + `countMoraVowels()` used for accurate mora-based charCount. All fields (word, reading, romaji, vowels, charCount) fully populated before save.
-- **Rhyme System:** A tiered system categorizes rhymes into Perfect, Legendary, Super Hard, and Hard based on vowel suffix matches. Words are sorted by tier and then by Romaji length.
+- **Rhyme System:** A tiered system with 4 tiers. Words are sorted by tier and then by Romaji length.
+  - **Perfect Rhyme (体言100%一致):** Two phrases share exactly the same set of 体言 (nouns/noun phrases) — extracted via `extractTaigen()` which captures kanji sequences (including okurigana bridges like 持ち主) and katakana words. Display label shows the matching nouns (e.g. 「思考・持ち主」).
+  - **Legendary (伝説級):** Last 6 vowels match exactly.
+  - **Super Hard (超硬い):** Last 5 vowels match exactly.
+  - **Hard (硬い):** Last 4 vowels match exactly.
 - **Deduplication and Cleanup:**
     - **`重複整理 (Dedup Cleanup)`:** AI-powered deduplication detects words sharing same prefix/suffix words within same vowel bucket. AI picks strongest punchline per group. **No automatic NG list addition** — NG list is manual only.
     - **`Auto-cleanup`:** Automatically triggers database cleanup upon adding new words.

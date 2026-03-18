@@ -15,6 +15,27 @@ export const ENDING_SUFFIX_GROUPS: string[][] = [
   ["女だ", "女や", "女だわ", "女やな", "女だな"],
 ];
 
+/**
+ * 文章内の体言（名詞・名詞句）を抽出してソートした文字列を返す。
+ * 漢字連続 + ひらがな橋渡し（持ち主、生き様等）＋ カタカナ語を対象とする。
+ * Perfect Rhymeのバケットキーとして使用。
+ */
+export function extractTaigen(word: string): string {
+  const found: string[] = [];
+  // 漢字主体の複合名詞（ひらがな1-2文字橋渡しを含む: 持ち主、生き様等）
+  const kanjiRe = /[\u4e00-\u9fff](?:[\u3041-\u3096]{1,2}(?=[\u4e00-\u9fff]))*[\u4e00-\u9fff]*/g;
+  let m: RegExpExecArray | null;
+  while ((m = kanjiRe.exec(word)) !== null) {
+    if (m[0].length >= 1) found.push(m[0]);
+  }
+  // カタカナ語（外来語・固有名詞）
+  const katakanaRe = /[\u30a1-\u30f6ー]+/g;
+  while ((m = katakanaRe.exec(word)) !== null) {
+    if (m[0].length >= 2) found.push(m[0]);
+  }
+  return [...new Set(found)].sort().join("|");
+}
+
 export function getEndingBase(reading: string): string | null {
   for (const group of ENDING_SUFFIX_GROUPS) {
     for (const ending of group) {

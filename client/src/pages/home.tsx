@@ -1164,7 +1164,7 @@ export default function Home() {
                 <div className="text-center py-8 text-muted-foreground text-sm" data-testid="text-empty-favorites">データベースは空です。生成タブでワードを生成して追加してください。</div>
               ) : (() => {
                 const tierConfig: Record<string, { label: string; border: string; bg: string; badge: string; wordBg: string; highlight: string }> = {
-                  perfect: { label: "Perfect Rhyme (6母音/90%)", border: "border-fuchsia-500/60", bg: "bg-fuchsia-500/10", badge: "border-fuchsia-500/70 text-fuchsia-500 dark:text-fuchsia-400", wordBg: "bg-fuchsia-500/15 border-fuchsia-500/30", highlight: "text-fuchsia-400" },
+                  perfect: { label: "Perfect Rhyme (体言100%一致)", border: "border-fuchsia-500/60", bg: "bg-fuchsia-500/10", badge: "border-fuchsia-500/70 text-fuchsia-500 dark:text-fuchsia-400", wordBg: "bg-fuchsia-500/15 border-fuchsia-500/30", highlight: "text-fuchsia-400" },
                   legendary: { label: "伝説級硬い韻 (6)", border: "border-yellow-500/50", bg: "bg-yellow-500/10", badge: "border-yellow-500/60 text-yellow-600 dark:text-yellow-400", wordBg: "bg-yellow-500/15 border-yellow-500/30", highlight: "text-yellow-400" },
                   super: { label: "超硬い韻 (5)", border: "border-orange-500/40", bg: "bg-orange-500/8", badge: "border-orange-500/50 text-orange-600 dark:text-orange-400", wordBg: "bg-orange-500/12 border-orange-500/25", highlight: "text-orange-400" },
                   hard: { label: "硬い韻 (4)", border: "border-primary/30", bg: "bg-primary/5", badge: "border-primary/40 text-primary", wordBg: "bg-primary/10 border-primary/20", highlight: "text-primary" },
