@@ -89,71 +89,14 @@ function hiraganaToVowelStr(hira: string): string {
 }
 
 /**
- * 体言（名詞）部分の母音のみを抽出する。
- * ひらがなアンカー法: ワード中のひらがな文字を区切りとして、各セグメントに対応する
- * 読みを特定し、体言セグメントの読みのみから母音を生成する。
- * 体言が見つからない場合はromajiからフォールバック。
+ * 語の読み全体から母音文字列を生成する。
+ * 以前は体言（名詞）部分のみを抽出していたが、フレーズ前半の体言を使うことで
+ * 末尾の実際の音（韻を踏む部分）が正しく反映されない問題があったため、
+ * 読み全体から母音を生成するシンプルな方式に変更。
+ * 例: 「仲間はずれ」→ reading="なかまはずれ" → "aaauue" (末尾2="ue")
  */
-export function extractTaigenVowels(word: string, reading: string, romaji: string): string {
-  const taigenStr = extractTaigen(word);
-  const taigenSet = new Set(taigenStr.split("|").filter(Boolean));
-
-  if (taigenSet.size === 0) {
-    return hiraganaToVowelStr(katakanaToHiragana(reading));
-  }
-
-  const isHira = (ch: string) => /[ぁ-ゟ]/.test(ch);
-
-  const segments: { text: string; isH: boolean }[] = [];
-  let i = 0;
-  while (i < word.length) {
-    const h = isHira(word[i]);
-    let j = i;
-    while (j < word.length && isHira(word[j]) === h) j++;
-    segments.push({ text: word.slice(i, j), isH: h });
-    i = j;
-  }
-
-  let rPos = 0;
-  const segReadings: { text: string; isH: boolean; segReading: string }[] = [];
-
-  for (let si = 0; si < segments.length; si++) {
-    const seg = segments[si];
-    if (seg.isH) {
-      segReadings.push({ ...seg, segReading: reading.slice(rPos, rPos + seg.text.length) });
-      rPos += seg.text.length;
-    } else {
-      let endRPos = reading.length;
-      for (let sj = si + 1; sj < segments.length; sj++) {
-        if (segments[sj].isH) {
-          const anchor = segments[sj].text;
-          const minSearchPos = rPos + seg.text.length;
-          const anchorPos = reading.indexOf(anchor, minSearchPos);
-          if (anchorPos !== -1) endRPos = anchorPos;
-          break;
-        }
-      }
-      segReadings.push({ ...seg, segReading: reading.slice(rPos, endRPos) });
-      rPos = endRPos;
-    }
-  }
-
-  let taigenReading = '';
-  for (const { text, isH, segReading } of segReadings) {
-    if (!isH && taigenSet.has(text)) {
-      if (/^[ァ-ヶー]+$/.test(text)) {
-        taigenReading += katakanaToHiragana(text);
-      } else {
-        taigenReading += segReading;
-      }
-    }
-  }
-
-  if (!taigenReading) {
-    return hiraganaToVowelStr(katakanaToHiragana(reading));
-  }
-
-  return hiraganaToVowelStr(taigenReading);
+export function extractTaigenVowels(word: string, reading: string, _romaji: string): string {
+  return hiraganaToVowelStr(katakanaToHiragana(reading));
 }
 
 /** ひらがな（またはカタカナ）文字列をヘボン式ローマ字に変換する */

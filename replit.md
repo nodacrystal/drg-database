@@ -40,7 +40,7 @@ The application follows a client-server architecture with a clear separation of 
     3.  **Shared-Word Clustering (STEP2b):** Programmatic hiragana normalization (katakana→hiragana via `katakanaToHiragana()`). Groups words by common 3-5 hiragana substrings. AI picks strongest punchline per cluster. Removes duplicates before DB save.
     4.  **Vowel Grouping (STEP3):** Passing words are grouped by their last two vowels for rhyme matching.
 - **DB Save:** `quickCharCheck()` + `countMoraVowels()` used for accurate mora-based charCount. All fields (word, reading, romaji, vowels, charCount) fully populated before save.
-- **`vowels` フィールド = 体言母音のみ**: `extractTaigenVowels(word, reading, romaji)` で計算。助詞（の、を、が）や活用形（った、する等）の母音はカウントしない。体言部分の母音のみを `vowels` に格納。アルゴリズム: ワード中のひらがなをアンカーにセグメント分割し、体言セグメントの読みのみを抽出 → `hiraganaToVowelStr()` で母音化。体言が見つからない場合は読みから直接フォールバック（romajiは使わない）。長音符ーは直前母音を繰り返す（例: パー→"aa"）。
+- **`vowels` フィールド = 読み全体の母音**: `hiraganaToVowelStr(reading)` で計算。以前は体言（名詞）のみを抽出していたが、フレーズ前半の体言（例：「仲間はずれ」の「仲間」=なかま）の母音を使うことで末尾の実際の音（「はずれ」=ue）が正しく反映されない問題があったため、読み全体から母音を生成する方式に変更。長音符ーは直前母音を繰り返す（例: パー→"aa"）。
 - **`hiraganaToRomaji()`**: 読みから正確なヘボン式ローマ字を生成。長音符・拗音・促音対応。起動時に自動実行してDBのromajiを修正。
 - **Rhyme System (5ティア):** 韻の定義は以下の通り。全ティアとも`vowels`（体言母音）を使用。
   - **メイングループ**: `vowels`末尾2文字（a/i/u/e/oのいずれかを1文字以上含む）が一致する語を同じグループにまとめる。例: `*in`, `*ou`, `*an`。末尾2文字に実母音がない語は非グループ化。
