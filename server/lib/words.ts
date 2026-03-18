@@ -66,6 +66,91 @@ export function katakanaToHiragana(str: string): string {
   return str.replace(/[\u30a1-\u30f6]/g, c => String.fromCharCode(c.charCodeAt(0) - 0x60));
 }
 
+const HIRA_VOWEL: Record<string, string> = {
+  'あ':'a','ぁ':'a','か':'a','が':'a','さ':'a','ざ':'a','た':'a','だ':'a','な':'a','は':'a','ば':'a','ぱ':'a','ま':'a','や':'a','ゃ':'a','ら':'a','わ':'a','ゎ':'a',
+  'い':'i','ぃ':'i','き':'i','ぎ':'i','し':'i','じ':'i','ち':'i','ぢ':'i','に':'i','ひ':'i','び':'i','ぴ':'i','み':'i','り':'i','ゐ':'i',
+  'う':'u','ぅ':'u','く':'u','ぐ':'u','す':'u','ず':'u','つ':'u','づ':'u','ぬ':'u','ふ':'u','ぶ':'u','ぷ':'u','む':'u','ゆ':'u','ゅ':'u','る':'u',
+  'え':'e','ぇ':'e','け':'e','げ':'e','せ':'e','ぜ':'e','て':'e','で':'e','ね':'e','へ':'e','べ':'e','ぺ':'e','め':'e','れ':'e','ゑ':'e',
+  'お':'o','ぉ':'o','こ':'o','ご':'o','そ':'o','ぞ':'o','と':'o','ど':'o','の':'o','ほ':'o','ぼ':'o','ぽ':'o','も':'o','よ':'o','ょ':'o','ろ':'o','を':'o',
+  'ん':'n','っ':'',
+};
+
+function hiraganaToVowelStr(hira: string): string {
+  let result = '';
+  for (const ch of hira) {
+    const v = HIRA_VOWEL[ch];
+    if (v !== undefined) result += v;
+  }
+  return result;
+}
+
+/**
+ * 体言（名詞）部分の母音のみを抽出する。
+ * ひらがなアンカー法: ワード中のひらがな文字を区切りとして、各セグメントに対応する
+ * 読みを特定し、体言セグメントの読みのみから母音を生成する。
+ * 体言が見つからない場合はromajiからフォールバック。
+ */
+export function extractTaigenVowels(word: string, reading: string, romaji: string): string {
+  const taigenStr = extractTaigen(word);
+  const taigenSet = new Set(taigenStr.split("|").filter(Boolean));
+
+  if (taigenSet.size === 0) {
+    return extractVowels(romaji);
+  }
+
+  const isHira = (ch: string) => /[ぁ-ゟ]/.test(ch);
+
+  const segments: { text: string; isH: boolean }[] = [];
+  let i = 0;
+  while (i < word.length) {
+    const h = isHira(word[i]);
+    let j = i;
+    while (j < word.length && isHira(word[j]) === h) j++;
+    segments.push({ text: word.slice(i, j), isH: h });
+    i = j;
+  }
+
+  let rPos = 0;
+  const segReadings: { text: string; isH: boolean; segReading: string }[] = [];
+
+  for (let si = 0; si < segments.length; si++) {
+    const seg = segments[si];
+    if (seg.isH) {
+      segReadings.push({ ...seg, segReading: reading.slice(rPos, rPos + seg.text.length) });
+      rPos += seg.text.length;
+    } else {
+      let endRPos = reading.length;
+      for (let sj = si + 1; sj < segments.length; sj++) {
+        if (segments[sj].isH) {
+          const anchor = segments[sj].text;
+          const anchorPos = reading.indexOf(anchor, rPos);
+          if (anchorPos !== -1) endRPos = anchorPos;
+          break;
+        }
+      }
+      segReadings.push({ ...seg, segReading: reading.slice(rPos, endRPos) });
+      rPos = endRPos;
+    }
+  }
+
+  let taigenReading = '';
+  for (const { text, isH, segReading } of segReadings) {
+    if (!isH && taigenSet.has(text)) {
+      if (/^[ァ-ヶー]+$/.test(text)) {
+        taigenReading += katakanaToHiragana(text);
+      } else {
+        taigenReading += segReading;
+      }
+    }
+  }
+
+  if (!taigenReading) {
+    return extractVowels(romaji);
+  }
+
+  return hiraganaToVowelStr(taigenReading);
+}
+
 export function extractVowels(romaji: string): string {
   const r = romaji.toLowerCase();
   let result = "";

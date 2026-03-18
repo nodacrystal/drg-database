@@ -11,7 +11,7 @@ import { TARGETS } from "./targets";
 import { SCRUTINY_REFERENCE } from "./scrutiny_reference";
 import { aiGenerate, geminiConfig } from "./lib/ai";
 import {
-  extractVowels, countMoraVowels, quickCharCheck, parseWordEntries,
+  extractVowels, extractTaigenVowels, countMoraVowels, quickCharCheck, parseWordEntries,
   countMoraFromRomaji, extractCommonSubstrings, formatElapsed, getEndingBase,
   extractTaigen, type WordEntry,
 } from "./lib/words";
@@ -36,14 +36,14 @@ const batchDeleteSchema = z.object({ ids: z.array(z.number().int().positive()).m
 async function autoFixVowelMismatches() {
   try {
     const allWords = await getAllWords();
-    const mismatches = allWords.filter(w => w.vowels !== extractVowels(w.romaji));
+    const mismatches = allWords.filter(w => w.vowels !== extractTaigenVowels(w.word, w.reading, w.romaji));
     if (mismatches.length === 0) { console.log("[STARTUP] vowels全一致 — 修正不要"); return; }
     console.log(`[STARTUP] vowels不一致 ${mismatches.length}件 → 並列修正中...`);
     const CHUNK = 16;
     for (let i = 0; i < mismatches.length; i += CHUNK) {
       const chunk = mismatches.slice(i, i + CHUNK);
       await Promise.all(chunk.map(w => {
-        const computedVowels = extractVowels(w.romaji);
+        const computedVowels = extractTaigenVowels(w.word, w.reading, w.romaji);
         const computedChar = countMoraVowels(w.reading);
         return updateWord(w.id, { word: w.word, reading: w.reading, romaji: w.romaji, vowels: computedVowels, charCount: computedChar });
       }));
@@ -628,7 +628,7 @@ JSON配列で出力（全ワード分必須）:
       const ungrouped: WordEntry[] = [];
 
       for (const w of finalQualityWords) {
-        const vowels = extractVowels(w.romaji);
+        const vowels = extractTaigenVowels(w.word, w.reading, w.romaji);
         const suffix = vowels.length >= 2 ? vowels.slice(-2) : "";
         if (suffix && ALLOWED_VOWEL_SUFFIXES.includes(suffix)) {
           groups[suffix].push(w);
@@ -668,7 +668,7 @@ JSON配列で出力（全ワード分必須）:
     try {
       const allWords = await getAllWords();
       const items = allWords.map(w => {
-        const vowels = extractVowels(w.romaji);
+        const vowels = extractTaigenVowels(w.word, w.reading, w.romaji);
         return { id: w.id, word: w.word, reading: w.reading, romaji: w.romaji, vowels, charCount: w.charCount };
       });
 
@@ -808,7 +808,7 @@ JSON配列で出力（全ワード分必須）:
         word: w.word,
         reading: w.reading,
         romaji: w.romaji,
-        vowels: extractVowels(w.romaji),
+        vowels: extractTaigenVowels(w.word, w.reading, w.romaji),
         charCount: countMoraVowels(w.reading),
       })));
       res.json({ added, total: await getWordCount() });
@@ -972,7 +972,7 @@ ${lines}
 
       send({ type: "progress", detail: "チェック1: 母音グループの整合性確認...", elapsed: elapsed() });
       for (const w of allWords) {
-        const recalcVowels = extractVowels(w.romaji);
+        const recalcVowels = extractTaigenVowels(w.word, w.reading, w.romaji);
         const storedVowels = w.vowels || "";
         const recalcKey = recalcVowels.length >= 2 ? recalcVowels.slice(-2) : recalcVowels;
         const storedKey = storedVowels.length >= 2 ? storedVowels.slice(-2) : storedVowels;
@@ -986,7 +986,7 @@ ${lines}
       send({ type: "progress", detail: "チェック2: 一致箇所の重複確認...", elapsed: elapsed() });
       const wordsByBucket: Record<string, typeof allWords> = {};
       for (const w of allWords) {
-        const v = extractVowels(w.romaji);
+        const v = extractTaigenVowels(w.word, w.reading, w.romaji);
         const key = v.length >= 2 ? v.slice(-2) : v || "_";
         (wordsByBucket[key] ??= []).push(w);
       }
@@ -1193,7 +1193,7 @@ ${wordList}
       const vowelFixUpdates: { id: number; word: string; reading: string; romaji: string; vowels: string; charCount: number }[] = [];
 
       for (const w of allWords) {
-        const computedVowels = extractVowels(w.romaji);
+        const computedVowels = extractTaigenVowels(w.word, w.reading, w.romaji);
         if (computedVowels !== w.vowels) {
           const oldGroup = w.vowels.length >= 2 ? `*${w.vowels.slice(-2)}` : w.vowels;
           const newGroup = computedVowels.length >= 2 ? `*${computedVowels.slice(-2)}` : computedVowels;
@@ -1323,7 +1323,7 @@ JSONのみ出力（説明文・コードブロック不要）。`;
       send("apply", `${fixQueue.length}件の問題を修正中...`);
       for (const fix of fixQueue) {
         const orig = allWords.find(w => w.id === fix.id)!;
-        const newVowels = extractVowels(fix.romaji);
+        const newVowels = extractTaigenVowels(orig.word, fix.reading, fix.romaji);
         await updateWord(fix.id, {
           word: orig.word, reading: fix.reading, romaji: fix.romaji,
           vowels: newVowels, charCount: fix.reading.length,
@@ -1730,7 +1730,7 @@ JSON配列で出力（全ワード分必須）:
 
       const allDbWords = await getAllWords();
       const items = allDbWords.map(w => {
-        const computedVowels = extractVowels(w.romaji);
+        const computedVowels = extractTaigenVowels(w.word, w.reading, w.romaji);
         return {
           id: w.id, word: w.word, reading: w.reading, romaji: w.romaji,
           vowels: computedVowels,
@@ -2175,7 +2175,7 @@ JSON配列で出力（全ワード分必須）:
       if (entries.length === 0) return res.status(400).json({ error: "有効なワードが見つかりません。形式: ワード/ひらがな(romaji)" });
       const ngList = await getNgWordStrings();
       const filtered = entries.filter(w => !ngList.some(ng => w.word.endsWith(ng)));
-      const added = await addWords(filtered.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji, vowels: extractVowels(w.romaji), charCount: w.reading.length })));
+      const added = await addWords(filtered.map(w => ({ word: w.word, reading: w.reading, romaji: w.romaji, vowels: extractTaigenVowels(w.word, w.reading, w.romaji), charCount: w.reading.length })));
       res.json({ added, total: await getWordCount() });
     } catch { res.status(500).json({ error: "追加に失敗しました" }); }
   });
@@ -2389,7 +2389,7 @@ ${chunk.map((w, idx) => `${idx + 1}. ${w.word}`).join("\n")}
         .filter((w: any) => !ngList.some((ng: string) => w.word.endsWith(ng)))
         .map((w: any) => ({
           word: w.word, reading: w.reading, romaji: w.romaji,
-          vowels: w.vowels || extractVowels(w.romaji),
+          vowels: w.vowels || extractTaigenVowels(w.word, w.reading, w.romaji),
           charCount: w.charCount || w.reading.length,
         }));
 
