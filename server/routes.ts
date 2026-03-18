@@ -33,8 +33,30 @@ const wordArraySchema = z.object({
 
 const batchDeleteSchema = z.object({ ids: z.array(z.number().int().positive()).min(1).max(500) });
 
+async function autoFixVowelMismatches() {
+  try {
+    const allWords = await getAllWords();
+    const mismatches = allWords.filter(w => w.vowels !== extractVowels(w.romaji));
+    if (mismatches.length === 0) { console.log("[STARTUP] vowels全一致 — 修正不要"); return; }
+    console.log(`[STARTUP] vowels不一致 ${mismatches.length}件 → 並列修正中...`);
+    const CHUNK = 16;
+    for (let i = 0; i < mismatches.length; i += CHUNK) {
+      const chunk = mismatches.slice(i, i + CHUNK);
+      await Promise.all(chunk.map(w => {
+        const computedVowels = extractVowels(w.romaji);
+        const computedChar = countMoraVowels(w.reading);
+        return updateWord(w.id, { word: w.word, reading: w.reading, romaji: w.romaji, vowels: computedVowels, charCount: computedChar });
+      }));
+    }
+    console.log(`[STARTUP] vowels修正完了: ${mismatches.length}件`);
+  } catch (e) {
+    console.error("[STARTUP] vowels修正エラー:", e);
+  }
+}
+
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   await ensureProtectedColumn();
+  autoFixVowelMismatches().catch(() => {});
 
   app.get("/api/target", (_req, res) => {
     const t = TARGETS[Math.floor(Math.random() * TARGETS.length)];
@@ -175,10 +197,10 @@ ${angle}
           return added;
         };
 
-        for (let pair = 0; pair < Math.ceil(batchCount / 2); pair++) {
-          const i0 = pair * 2;
-          const i1 = pair * 2 + 1;
-          const indices = [i0, i1].filter(i => i < batchCount);
+        const STEP1_PARALLEL = 4;
+        for (let quad = 0; quad < Math.ceil(batchCount / STEP1_PARALLEL); quad++) {
+          const baseIdx = quad * STEP1_PARALLEL;
+          const indices = Array.from({ length: STEP1_PARALLEL }, (_, k) => baseIdx + k).filter(i => i < batchCount);
 
           const currentUsedWords = [...accumulatedExclusions, ...extraExclusions];
 
@@ -189,8 +211,8 @@ ${angle}
           const pairWords: WordEntry[] = [];
           for (let r = 0; r < pairResults.length; r++) {
             const result = pairResults[r];
-            const batchNum = pair * 2 + r + 1;
-            const angleLabel = DISS_ANGLES[(pair * 2 + r) % DISS_ANGLES.length].split("（")[0];
+            const batchNum = baseIdx + r + 1;
+            const angleLabel = DISS_ANGLES[(baseIdx + r) % DISS_ANGLES.length].split("（")[0];
             if (result.status !== "fulfilled") {
               console.log(`[STEP1] Batch ${batchNum} (${angleLabel}) FAILED`);
               continue;
@@ -238,9 +260,9 @@ ${angle}
           const commonSubs = extractCommonSubstrings(pairWords);
           for (const s of commonSubs) accumulatedExclusions.add(s);
 
-          // ペア完了後: 蓄積ワード全体から末尾名詞を追跡して次ペアへ引き継ぐ
+          // バッチ完了後: 蓄積ワード全体から末尾名詞を追跡して次バッチへ引き継ぐ
           const newEndings = updateEndingWords(words);
-          if (newEndings > 0) console.log(`[STEP1] Pair${pair + 1}: 末尾追跡 +${newEndings}個 (計${usedEndingWords.size}個禁止中)`);
+          if (newEndings > 0) console.log(`[STEP1] Quad${quad + 1}: 末尾追跡 +${newEndings}個 (計${usedEndingWords.size}個禁止中)`);
         }
         return words;
       };
@@ -432,7 +454,7 @@ ${wordList}
       // ─── STEP2c: ローマ字全数検証・修正 ───
       send("step2c", `STEP2c: ローマ字全数検証中... (${finalQualityWords.length}個)`);
       const ROMAJI_BATCH = 80;
-      const ROMAJI_PARALLEL = 4;
+      const ROMAJI_PARALLEL = 8;
       const correctedWords: WordEntry[] = [];
       const romajiBatches: WordEntry[][] = [];
       for (let i = 0; i < finalQualityWords.length; i += ROMAJI_BATCH) {
@@ -699,13 +721,23 @@ JSON配列で出力（全ワード分必須）:
           }));
 
           // Greedy: 同グループ内で体言が重複しないサブグループに振り分け
+          // 文頭例外: 共有体言がitem・グループメンバー両方の文頭(startsWith)にある場合は競合としない
           const subGroups: Array<typeof withTaigen> = [];
           for (const item of withTaigen) {
             let placed = false;
             for (const grp of subGroups) {
               const usedTaigen = new Set<string>();
               for (const m of grp) m.taigenSet.forEach(t => usedTaigen.add(t));
-              const hasOverlap = [...item.taigenSet].some(t => usedTaigen.has(t));
+              const hasOverlap = [...item.taigenSet].some(t => {
+                if (!usedTaigen.has(t)) return false;
+                // 文頭例外: 共有体言が両フレーズの文頭にある場合は競合としない（文頭同士は同義語置換前提）
+                const itemStartsWithT = item.word.word.startsWith(t);
+                const allGrpWithTStartWithT = grp
+                  .filter(m => m.taigenSet.has(t))
+                  .every(m => m.word.word.startsWith(t));
+                if (itemStartsWithT && allGrpWithTStartWithT) return false;
+                return true;
+              });
               if (!hasOverlap) { grp.push(item); placed = true; break; }
             }
             if (!placed) subGroups.push([item]);
@@ -834,7 +866,7 @@ JSON配列で出力（全ワード分必須）:
       if (disconnected) { if (heartbeat) clearInterval(heartbeat); return; }
       const remaining = allWords.filter(w => !deleteIds.has(w.id));
       const BATCH = 50;
-      const PARALLEL = 6;
+      const PARALLEL = 8;
       let aiViolations = 0;
       const batches: typeof allWords[] = [];
       for (let i = 0; i < remaining.length; i += BATCH) batches.push(remaining.slice(i, i + BATCH));
@@ -1719,15 +1751,22 @@ JSON配列で出力（全ワード分必須）:
       const toDelete = new Set<number>();
 
       send("check1", "チェック1: DBのvowelsフィールドとromaji計算値の不一致を検出中...");
-      let wrongVowelCount = 0;
-      for (const item of items) {
-        if (item.dbVowels !== item.vowels) {
-          wrongVowelCount++;
-          console.log(`[CLEANUP:vowel] "${item.word}" db_vowels=${item.dbVowels} computed=${item.vowels} — DB更新が必要`);
-          await updateWord(item.id, { word: item.word, reading: item.reading, romaji: item.romaji, vowels: item.vowels, charCount: item.charCount });
+      const vowelMismatches = items.filter(item => item.dbVowels !== item.vowels);
+      const wrongVowelCount = vowelMismatches.length;
+      if (wrongVowelCount > 0) {
+        for (const item of vowelMismatches) {
+          console.log(`[CLEANUP:vowel] "${item.word}" db_vowels=${item.dbVowels} computed=${item.vowels}`);
+        }
+        // 並列でDB更新（最大16同時）
+        const VOWEL_UPDATE_PARALLEL = 16;
+        for (let v = 0; v < vowelMismatches.length; v += VOWEL_UPDATE_PARALLEL) {
+          const chunk = vowelMismatches.slice(v, v + VOWEL_UPDATE_PARALLEL);
+          await Promise.all(chunk.map(item =>
+            updateWord(item.id, { word: item.word, reading: item.reading, romaji: item.romaji, vowels: item.vowels, charCount: item.charCount })
+          ));
         }
       }
-      send("check1", `DBvowels不一致: ${wrongVowelCount}個（修正済み）`);
+      send("check1", `DBvowels不一致: ${wrongVowelCount}個（並列修正済み）`);
 
       send("check2", "チェック2: 表記違い重複を検出中...");
       let scriptDupCount = 0;
@@ -1844,7 +1883,7 @@ JSON配列で出力（全ワード分必須）:
         .map(([key, bWords]) => ({ key, words: bWords.filter(w => !toDelete.has(w.id)) }))
         .filter(g => g.words.length >= 3);
 
-      const MU_PARALLEL = 6;
+      const MU_PARALLEL = 8;
       for (let mb = 0; mb < groupsForMU.length; mb += MU_PARALLEL) {
         if (disconnected) break;
         const muBatch = groupsForMU.slice(mb, mb + MU_PARALLEL);

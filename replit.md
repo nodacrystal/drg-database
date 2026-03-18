@@ -41,14 +41,14 @@ The application follows a client-server architecture with a clear separation of 
     4.  **Vowel Grouping (STEP3):** Passing words are grouped by their last two vowels for rhyme matching.
 - **DB Save:** `quickCharCheck()` + `countMoraVowels()` used for accurate mora-based charCount. All fields (word, reading, romaji, vowels, charCount) fully populated before save.
 - **Rhyme System:** A tiered system with 4 tiers. Words are sorted by tier and then by Romaji length.
-  - **Perfect Rhyme (体言母音100%一致):** Two phrases share the same complete vowel sequence (`vowels` field = 100% match), AND no two phrases in the group share any 体言 (noun). `extractTaigen()` extracts: ①2+ kanji sequences (思考, 偽善…), ②kanji+bridge-kana+kanji compounds (持ち主, 生き様…), ③single kanji before particles の/を/が (e.g. 肉の→肉), ④2+ katakana. Same-word 体言 conflict → greedy re-assignment to separate subgroups. Display label shows the shared vowel string (e.g. "uaaien").
+  - **Perfect Rhyme (体言母音100%一致):** Phrases share the same complete vowel sequence (`vowels` = 100% match), AND no two phrases in the group share a 体言 (noun) — **except** if the shared 体言 is at the 文頭 (start, `word.startsWith(taigen)`) of BOTH phrases (文頭同士例外: both start with same noun → allowed; synonym replacement is the intended fix). `extractTaigen()` extracts: ①2+ kanji sequences, ②kanji+bridge-kana+kanji compounds, ③single kanji before の/を/が, ④2+ katakana. Greedy subgrouping with 文頭例外 applied. Display label = shared vowel string (e.g. "uaaien").
   - **Legendary (伝説級):** Last 6 vowels match exactly.
   - **Super Hard (超硬い):** Last 5 vowels match exactly.
   - **Hard (硬い):** Last 4 vowels match exactly.
 - **Deduplication and Cleanup:**
     - **`重複整理 (Dedup Cleanup)`:** AI-powered deduplication detects words sharing same prefix/suffix words within same vowel bucket. AI picks strongest punchline per group. **No automatic NG list addition** — NG list is manual only.
     - **`Auto-cleanup`:** Automatically triggers database cleanup upon adding new words.
-    - **`DB Cleanup (6-step)`:** A comprehensive process including: (1) vowel pattern correction, (2) script-variant deduplication, (2b) ending-particle variant dedup, (3) containment dedup, (4) AI tail-dedup (PARALLEL=8), (5) AI semantic dedup (PARALLEL=8). **No NG list auto-addition.**
+    - **`DB Cleanup (6-step)`:** A comprehensive process including: (1) vowel pattern correction (parallel batch 16), (2) script-variant deduplication, (2b) ending-particle variant dedup, (3) containment dedup, (4) AI tail-dedup (PARALLEL=8), (5) AI semantic dedup (MU_PARALLEL=8). **No NG list auto-addition.** On server startup, vowel mismatches are auto-fixed in parallel batches of 16.
     - **`Protected Word System`:** Words surviving cleanup are marked as protected to prevent accidental deletion.
     - **`Pre-insert char check`:** `quickCharCheck()` validates romaji before every DB insert — rejects invalid characters, words with < 60% expected vowel count, and words violating taigen-dome.
 - **NG Word Management:** Manual-only NG word list. Words ending with NG terms are blocked from generation and addition. NG words are NEVER auto-added by dedup/cleanup operations.
