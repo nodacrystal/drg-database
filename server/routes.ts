@@ -679,23 +679,46 @@ JSON配列で出力（全ワード分必須）:
           return bkts;
         };
 
-        // Perfect Rhyme: 文章内の体言（名詞・名詞句）が100%一致するもの
-        const taigenBuckets: Record<string, typeof items> = {};
+        // Perfect Rhyme: 体言の母音一致率100%
+        // = 全母音列が完全一致（体言が主語なので全母音一致 ≒ 体言母音一致）
+        // + 同一グループ内で体言（名詞）が重複しないこと（同語・同義禁止）
+        const fullVowelBuckets: Record<string, typeof items> = {};
         for (const w of words) {
           if (assigned.has(w.id)) continue;
-          const key = extractTaigen(w.word);
-          if (!key) continue;
-          (taigenBuckets[key] ??= []).push(w);
+          if (!w.vowels || w.vowels.length < 4) continue; // 短すぎる母音列は除外
+          (fullVowelBuckets[w.vowels] ??= []).push(w);
         }
 
-        for (const [taigenKey, tWords] of Object.entries(taigenBuckets)) {
-          const uniqueWords = [...new Map(tWords.map(w => [w.id, w])).values()]
-            .filter(w => !assigned.has(w.id));
-          if (uniqueWords.length < 2) continue;
-          // 表示ラベル: 一致した体言を「・」区切りで
-          const displaySuffix = taigenKey.replace(/\|/g, "・");
-          rhymeGroups.push({ suffix: displaySuffix, words: sortByRomaji(uniqueWords), tier: "perfect" });
-          for (const w of uniqueWords) assigned.add(w.id);
+        for (const [sharedVowels, vWords] of Object.entries(fullVowelBuckets)) {
+          if (vWords.length < 2) continue;
+
+          // 各フレーズの体言セットを取得
+          const withTaigen = vWords.map(w => ({
+            word: w,
+            taigenSet: new Set(extractTaigen(w.word).split("|").filter(Boolean)),
+          }));
+
+          // Greedy: 同グループ内で体言が重複しないサブグループに振り分け
+          const subGroups: Array<typeof withTaigen> = [];
+          for (const item of withTaigen) {
+            let placed = false;
+            for (const grp of subGroups) {
+              const usedTaigen = new Set<string>();
+              for (const m of grp) m.taigenSet.forEach(t => usedTaigen.add(t));
+              const hasOverlap = [...item.taigenSet].some(t => usedTaigen.has(t));
+              if (!hasOverlap) { grp.push(item); placed = true; break; }
+            }
+            if (!placed) subGroups.push([item]);
+          }
+
+          for (const grp of subGroups) {
+            const uniqueWords = [...new Map(grp.map(x => [x.word.id, x.word])).values()]
+              .filter(w => !assigned.has(w.id));
+            if (uniqueWords.length < 2) continue;
+            // 共通母音列をラベルに使用（全語で一致している母音パターン）
+            rhymeGroups.push({ suffix: sharedVowels, words: sortByRomaji(uniqueWords), tier: "perfect" });
+            for (const w of uniqueWords) assigned.add(w.id);
+          }
         }
 
         for (const [s6, lWords] of Object.entries(buildTierBuckets(6))) {

@@ -17,22 +17,30 @@ export const ENDING_SUFFIX_GROUPS: string[][] = [
 
 /**
  * 文章内の体言（名詞・名詞句）を抽出してソートした文字列を返す。
- * 漢字連続 + ひらがな橋渡し（持ち主、生き様等）＋ カタカナ語を対象とする。
- * Perfect Rhymeのバケットキーとして使用。
+ * 動詞活用形（腐った→腐、歪んだ→歪）を除外し、真の名詞のみを対象とする。
+ *
+ * 抽出対象:
+ *   1) 2文字以上の漢字連続（思考、威厳、愛情、偽善…）
+ *   2) 漢字+体言橋渡し仮名(ち/き/り/み/し)+漢字 の複合名詞（持ち主、生き様…）
+ *   3) 2文字以上のカタカナ語（外来語・固有名詞）
+ *
+ * 除外: 単独漢字（動詞語幹の腐/歪など）
  */
 export function extractTaigen(word: string): string {
   const found: string[] = [];
-  // 漢字主体の複合名詞（ひらがな1-2文字橋渡しを含む: 持ち主、生き様等）
-  const kanjiRe = /[\u4e00-\u9fff](?:[\u3041-\u3096]{1,2}(?=[\u4e00-\u9fff]))*[\u4e00-\u9fff]*/g;
   let m: RegExpExecArray | null;
-  while ((m = kanjiRe.exec(word)) !== null) {
-    if (m[0].length >= 1) found.push(m[0]);
-  }
-  // カタカナ語（外来語・固有名詞）
-  const katakanaRe = /[\u30a1-\u30f6ー]+/g;
-  while ((m = katakanaRe.exec(word)) !== null) {
-    if (m[0].length >= 2) found.push(m[0]);
-  }
+  // 1) 2文字以上の漢字連続（々含む）例: 思考, 段々, 無駄, 偽善
+  const multiKanjiRe = /[\u4e00-\u9fff][\u4e00-\u9fff\u3005]+/g;
+  while ((m = multiKanjiRe.exec(word)) !== null) found.push(m[0]);
+  // 2) 漢字+橋渡し仮名+漢字の複合名詞（持ち主、生き様等）橋渡しは ち/き/り/み/し のみ
+  const compoundRe = /[\u4e00-\u9fff][ちきりみし][\u4e00-\u9fff]+/g;
+  while ((m = compoundRe.exec(word)) !== null) found.push(m[0]);
+  // 3) 単独漢字の後に「の/を/が」が続く場合 → 明確な名詞（例: 肉の→肉）
+  const singleKanjiBeforeParticleRe = /[\u4e00-\u9fff](?=[のをが])/g;
+  while ((m = singleKanjiBeforeParticleRe.exec(word)) !== null) found.push(m[0]);
+  // 4) 2文字以上のカタカナ語
+  const katakanaRe = /[\u30a1-\u30f6ー]{2,}/g;
+  while ((m = katakanaRe.exec(word)) !== null) found.push(m[0]);
   return [...new Set(found)].sort().join("|");
 }
 

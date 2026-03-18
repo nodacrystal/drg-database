@@ -41,7 +41,7 @@ The application follows a client-server architecture with a clear separation of 
     4.  **Vowel Grouping (STEP3):** Passing words are grouped by their last two vowels for rhyme matching.
 - **DB Save:** `quickCharCheck()` + `countMoraVowels()` used for accurate mora-based charCount. All fields (word, reading, romaji, vowels, charCount) fully populated before save.
 - **Rhyme System:** A tiered system with 4 tiers. Words are sorted by tier and then by Romaji length.
-  - **Perfect Rhyme (体言100%一致):** Two phrases share exactly the same set of 体言 (nouns/noun phrases) — extracted via `extractTaigen()` which captures kanji sequences (including okurigana bridges like 持ち主) and katakana words. Display label shows the matching nouns (e.g. 「思考・持ち主」).
+  - **Perfect Rhyme (体言母音100%一致):** Two phrases share the same complete vowel sequence (`vowels` field = 100% match), AND no two phrases in the group share any 体言 (noun). `extractTaigen()` extracts: ①2+ kanji sequences (思考, 偽善…), ②kanji+bridge-kana+kanji compounds (持ち主, 生き様…), ③single kanji before particles の/を/が (e.g. 肉の→肉), ④2+ katakana. Same-word 体言 conflict → greedy re-assignment to separate subgroups. Display label shows the shared vowel string (e.g. "uaaien").
   - **Legendary (伝説級):** Last 6 vowels match exactly.
   - **Super Hard (超硬い):** Last 5 vowels match exactly.
   - **Hard (硬い):** Last 4 vowels match exactly.
