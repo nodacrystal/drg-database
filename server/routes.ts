@@ -13,7 +13,7 @@ import { aiGenerate, geminiConfig } from "./lib/ai";
 import {
   extractVowels, extractTaigenVowels, countMoraVowels, quickCharCheck, parseWordEntries,
   countMoraFromRomaji, extractCommonSubstrings, formatElapsed, getEndingBase,
-  extractTaigen, type WordEntry,
+  extractTaigen, hiraganaToRomaji, type WordEntry,
 } from "./lib/words";
 
 import { ALLOWED_VOWEL_SUFFIXES, DISS_ANGLES, LEVEL_CONFIGS } from "./lib/generate";
@@ -33,10 +33,45 @@ const wordArraySchema = z.object({
 
 const batchDeleteSchema = z.object({ ids: z.array(z.number().int().positive()).min(1).max(500) });
 
+function countReadingVowels(reading: string): number {
+  const skipSet = new Set(["ん","っ","ゃ","ゅ","ょ","ぁ","ぃ","ぅ","ぇ","ぉ","ャ","ュ","ョ","ァ","ィ","ゥ","ェ","ォ","ッ","ン","ー","・"," ","　"]);
+  let count = 0;
+  for (const ch of reading) {
+    if (!skipSet.has(ch) && /[\u3040-\u30ff]/.test(ch)) count++;
+  }
+  return count;
+}
+
 async function autoFixVowelMismatches() {
   try {
     const allWords = await getAllWords();
-    const mismatches = allWords.filter(w => w.vowels !== extractTaigenVowels(w.word, w.reading, w.romaji));
+
+    // --- ①romajiが壊れている語を修正（読みから再生成） ---
+    const romajiIssues = allWords.filter(w => {
+      const expectedVowels = countReadingVowels(w.reading);
+      const actualVowels = (w.romaji.toLowerCase().match(/[aeiou]/g) || []).length;
+      return actualVowels < expectedVowels;
+    });
+    if (romajiIssues.length > 0) {
+      console.log(`[STARTUP] romaji欠陥 ${romajiIssues.length}件 → 読みから再生成中...`);
+      const CHUNK = 16;
+      for (let i = 0; i < romajiIssues.length; i += CHUNK) {
+        const chunk = romajiIssues.slice(i, i + CHUNK);
+        await Promise.all(chunk.map(w => {
+          const newRomaji = hiraganaToRomaji(w.reading);
+          const newVowels = extractTaigenVowels(w.word, w.reading, newRomaji);
+          const newCharCount = countMoraVowels(w.reading);
+          return updateWord(w.id, { word: w.word, reading: w.reading, romaji: newRomaji, vowels: newVowels, charCount: newCharCount });
+        }));
+      }
+      console.log(`[STARTUP] romaji修正完了: ${romajiIssues.length}件`);
+    } else {
+      console.log("[STARTUP] romaji全正常 — 修正不要");
+    }
+
+    // --- ②vowelsのみ不一致を修正（romaji修正後の再チェック） ---
+    const refreshedWords = await getAllWords();
+    const mismatches = refreshedWords.filter(w => w.vowels !== extractTaigenVowels(w.word, w.reading, w.romaji));
     if (mismatches.length === 0) { console.log("[STARTUP] vowels全一致 — 修正不要"); return; }
     console.log(`[STARTUP] vowels不一致 ${mismatches.length}件 → 並列修正中...`);
     const CHUNK = 16;

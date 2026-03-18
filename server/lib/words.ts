@@ -95,7 +95,7 @@ export function extractTaigenVowels(word: string, reading: string, romaji: strin
   const taigenSet = new Set(taigenStr.split("|").filter(Boolean));
 
   if (taigenSet.size === 0) {
-    return extractVowels(romaji);
+    return hiraganaToVowelStr(katakanaToHiragana(reading));
   }
 
   const isHira = (ch: string) => /[ぁ-ゟ]/.test(ch);
@@ -146,10 +146,74 @@ export function extractTaigenVowels(word: string, reading: string, romaji: strin
   }
 
   if (!taigenReading) {
-    return extractVowels(romaji);
+    return hiraganaToVowelStr(katakanaToHiragana(reading));
   }
 
   return hiraganaToVowelStr(taigenReading);
+}
+
+/** ひらがな（またはカタカナ）文字列をヘボン式ローマ字に変換する */
+export function hiraganaToRomaji(reading: string): string {
+  const h = katakanaToHiragana(reading);
+  const MAP: Record<string, string> = {
+    'あ':'a','い':'i','う':'u','え':'e','お':'o',
+    'か':'ka','き':'ki','く':'ku','け':'ke','こ':'ko',
+    'が':'ga','ぎ':'gi','ぐ':'gu','げ':'ge','ご':'go',
+    'さ':'sa','し':'shi','す':'su','せ':'se','そ':'so',
+    'ざ':'za','じ':'ji','ず':'zu','ぜ':'ze','ぞ':'zo',
+    'た':'ta','ち':'chi','つ':'tsu','て':'te','と':'to',
+    'だ':'da','ぢ':'ji','づ':'zu','で':'de','ど':'do',
+    'な':'na','に':'ni','ぬ':'nu','ね':'ne','の':'no',
+    'は':'ha','ひ':'hi','ふ':'fu','へ':'he','ほ':'ho',
+    'ば':'ba','び':'bi','ぶ':'bu','べ':'be','ぼ':'bo',
+    'ぱ':'pa','ぴ':'pi','ぷ':'pu','ぺ':'pe','ぽ':'po',
+    'ま':'ma','み':'mi','む':'mu','め':'me','も':'mo',
+    'や':'ya','ゆ':'yu','よ':'yo',
+    'ら':'ra','り':'ri','る':'ru','れ':'re','ろ':'ro',
+    'わ':'wa','ゐ':'i','ゑ':'e','を':'wo',
+    'きゃ':'kya','きゅ':'kyu','きょ':'kyo',
+    'しゃ':'sha','しゅ':'shu','しょ':'sho',
+    'ちゃ':'cha','ちゅ':'chu','ちょ':'cho',
+    'にゃ':'nya','にゅ':'nyu','にょ':'nyo',
+    'ひゃ':'hya','ひゅ':'hyu','ひょ':'hyo',
+    'みゃ':'mya','みゅ':'myu','みょ':'myo',
+    'りゃ':'rya','りゅ':'ryu','りょ':'ryo',
+    'ぎゃ':'gya','ぎゅ':'gyu','ぎょ':'gyo',
+    'じゃ':'ja','じゅ':'ju','じょ':'jo',
+    'びゃ':'bya','びゅ':'byu','びょ':'byo',
+    'ぴゃ':'pya','ぴゅ':'pyu','ぴょ':'pyo',
+    'ふぁ':'fa','ふぃ':'fi','ふぇ':'fe','ふぉ':'fo',
+    'てぃ':'ti','でぃ':'di','でゅ':'dyu',
+    'うぃ':'wi','うぇ':'we','うぉ':'wo',
+    'ぁ':'a','ぃ':'i','ぅ':'u','ぇ':'e','ぉ':'o',
+  };
+  let result = '';
+  let i = 0;
+  while (i < h.length) {
+    if (h[i] === 'ん') {
+      result += 'n';
+      i++;
+      continue;
+    }
+    if (h[i] === 'っ') {
+      const next2 = h.slice(i + 1, i + 3);
+      const nm = MAP[next2] || MAP[h[i + 1]] || '';
+      result += nm ? nm[0] : 'xt';
+      i++;
+      continue;
+    }
+    if (h[i] === 'ー') {
+      if (result.length > 0) result += result[result.length - 1];
+      i++;
+      continue;
+    }
+    const two = h.slice(i, i + 2);
+    if (MAP[two]) { result += MAP[two]; i += 2; continue; }
+    const one = h[i];
+    if (MAP[one]) { result += MAP[one]; i++; continue; }
+    i++;
+  }
+  return result;
 }
 
 export function extractVowels(romaji: string): string {
