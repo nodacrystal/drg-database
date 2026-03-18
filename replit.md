@@ -40,12 +40,16 @@ The application follows a client-server architecture with a clear separation of 
     3.  **Shared-Word Clustering (STEP2b):** Programmatic hiragana normalization (katakana→hiragana via `katakanaToHiragana()`). Groups words by common 3-5 hiragana substrings. AI picks strongest punchline per cluster. Removes duplicates before DB save.
     4.  **Vowel Grouping (STEP3):** Passing words are grouped by their last two vowels for rhyme matching.
 - **DB Save:** `quickCharCheck()` + `countMoraVowels()` used for accurate mora-based charCount. All fields (word, reading, romaji, vowels, charCount) fully populated before save.
-- **`vowels` フィールド = 体言母音のみ**: `extractTaigenVowels(word, reading, romaji)` で計算。助詞（の、を、が）や活用形（った、する等）の母音はカウントしない。体言部分の母音のみを `vowels` に格納。アルゴリズム: ワード中のひらがなをアンカーにセグメント分割し、体言セグメントの読みのみを抽出 → `hiraganaToVowelStr()` で母音化。体言が見つからない場合はromajiからフォールバック。
-- **Rhyme System:** A tiered system with 4 tiers. Words are sorted by tier and then by Romaji length. All tiers use `vowels` (= 体言母音).
-  - **Perfect Rhyme (体言母音100%一致):** Phrases share the same complete 体言 vowel sequence (`vowels` = 100% match), AND no two phrases in the group share a 体言 (noun) — **except** if the shared 体言 is at the 文頭 (start, `word.startsWith(taigen)`) of BOTH phrases (文頭同士例外: both start with same noun → allowed; synonym replacement is the intended fix). `extractTaigen()` extracts: ①2+ kanji sequences, ②kanji+bridge-kana+kanji compounds, ③single kanji before の/を/が, ④2+ katakana. Greedy subgrouping with 文頭例外 applied. Display label = shared taigen vowel string (e.g. "iuanan").
-  - **Legendary (伝説級):** Last 6 vowels match exactly.
-  - **Super Hard (超硬い):** Last 5 vowels match exactly.
-  - **Hard (硬い):** Last 4 vowels match exactly.
+- **`vowels` フィールド = 体言母音のみ**: `extractTaigenVowels(word, reading, romaji)` で計算。助詞（の、を、が）や活用形（った、する等）の母音はカウントしない。体言部分の母音のみを `vowels` に格納。アルゴリズム: ワード中のひらがなをアンカーにセグメント分割し、体言セグメントの読みのみを抽出 → `hiraganaToVowelStr()` で母音化。体言が見つからない場合は読みから直接フォールバック（romajiは使わない）。長音符ーは直前母音を繰り返す（例: パー→"aa"）。
+- **`hiraganaToRomaji()`**: 読みから正確なヘボン式ローマ字を生成。長音符・拗音・促音対応。起動時に自動実行してDBのromajiを修正。
+- **Rhyme System (5ティア):** 韻の定義は以下の通り。全ティアとも`vowels`（体言母音）を使用。
+  - **メイングループ**: `vowels`末尾2文字（a/i/u/e/oのいずれかを1文字以上含む）が一致する語を同じグループにまとめる。例: `*in`, `*ou`, `*an`。末尾2文字に実母音がない語は非グループ化。
+  - **Perfect Rhyme (完璧韻):** `vowels`全文字が完全一致（最低3文字）かつ同グループ内で体言の重複なし。文頭同士の体言重複は例外として許可。
+  - **Legendary (伝説韻):** 末尾6体言母音が一致。
+  - **Super (超硬い韻):** 末尾5体言母音が一致。
+  - **Hard (硬い韻):** 末尾4体言母音が一致。
+  - **Standard (韻):** 末尾3体言母音が一致（新設）。
+  - **Base:** 末尾2母音のみ一致（サブグループなし）。
 - **Deduplication and Cleanup:**
     - **`重複整理 (Dedup Cleanup)`:** AI-powered deduplication detects words sharing same prefix/suffix words within same vowel bucket. AI picks strongest punchline per group. **No automatic NG list addition** — NG list is manual only.
     - **`Auto-cleanup`:** Automatically triggers database cleanup upon adding new words.

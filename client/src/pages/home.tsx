@@ -1137,9 +1137,10 @@ export default function Home() {
                 {([
                   ["all", "すべて"],
                   ["perfect", "Perfect Rhyme"],
-                  ["legendary", "伝説級"],
-                  ["super", "超硬い"],
-                  ["hard", "硬い"],
+                  ["legendary", "伝説韻(6)"],
+                  ["super", "超硬い(5)"],
+                  ["hard", "硬い(4)"],
+                  ["standard", "韻(3)"],
                 ] as [RhymeFilter, string][]).map(([key, label]) => (
                   <Button key={key} variant={rhymeFilter === key ? "default" : "outline"} size="sm" className="text-xs h-7 px-2.5"
                     onClick={() => setRhymeFilter(key)} data-testid={`filter-${key}`}>{label}</Button>
@@ -1164,10 +1165,11 @@ export default function Home() {
                 <div className="text-center py-8 text-muted-foreground text-sm" data-testid="text-empty-favorites">データベースは空です。生成タブでワードを生成して追加してください。</div>
               ) : (() => {
                 const tierConfig: Record<string, { label: string; border: string; bg: string; badge: string; wordBg: string; highlight: string }> = {
-                  perfect: { label: "Perfect Rhyme (体言母音100%一致)", border: "border-fuchsia-500/60", bg: "bg-fuchsia-500/10", badge: "border-fuchsia-500/70 text-fuchsia-500 dark:text-fuchsia-400", wordBg: "bg-fuchsia-500/15 border-fuchsia-500/30", highlight: "text-fuchsia-400" },
-                  legendary: { label: "伝説級硬い韻 (6)", border: "border-yellow-500/50", bg: "bg-yellow-500/10", badge: "border-yellow-500/60 text-yellow-600 dark:text-yellow-400", wordBg: "bg-yellow-500/15 border-yellow-500/30", highlight: "text-yellow-400" },
-                  super: { label: "超硬い韻 (5)", border: "border-orange-500/40", bg: "bg-orange-500/8", badge: "border-orange-500/50 text-orange-600 dark:text-orange-400", wordBg: "bg-orange-500/12 border-orange-500/25", highlight: "text-orange-400" },
-                  hard: { label: "硬い韻 (4)", border: "border-primary/30", bg: "bg-primary/5", badge: "border-primary/40 text-primary", wordBg: "bg-primary/10 border-primary/20", highlight: "text-primary" },
+                  perfect:   { label: "Perfect Rhyme (体言母音全一致)", border: "border-fuchsia-500/60", bg: "bg-fuchsia-500/10", badge: "border-fuchsia-500/70 text-fuchsia-500 dark:text-fuchsia-400", wordBg: "bg-fuchsia-500/15 border-fuchsia-500/30", highlight: "text-fuchsia-400" },
+                  legendary: { label: "伝説韻 (末尾6母音一致)", border: "border-yellow-500/50", bg: "bg-yellow-500/10", badge: "border-yellow-500/60 text-yellow-600 dark:text-yellow-400", wordBg: "bg-yellow-500/15 border-yellow-500/30", highlight: "text-yellow-400" },
+                  super:     { label: "超硬い韻 (末尾5母音一致)", border: "border-orange-500/40", bg: "bg-orange-500/8", badge: "border-orange-500/50 text-orange-600 dark:text-orange-400", wordBg: "bg-orange-500/12 border-orange-500/25", highlight: "text-orange-400" },
+                  hard:      { label: "硬い韻 (末尾4母音一致)", border: "border-primary/30", bg: "bg-primary/5", badge: "border-primary/40 text-primary", wordBg: "bg-primary/10 border-primary/20", highlight: "text-primary" },
+                  standard:  { label: "韻 (末尾3母音一致)", border: "border-sky-500/30", bg: "bg-sky-500/5", badge: "border-sky-500/40 text-sky-600 dark:text-sky-400", wordBg: "bg-sky-500/10 border-sky-500/20", highlight: "text-sky-400" },
                 };
 
                 const renderRomajiChars = (romaji: string, hlIdx: number, hlColor: string, isSelected: boolean) => (

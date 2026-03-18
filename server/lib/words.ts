@@ -78,8 +78,12 @@ const HIRA_VOWEL: Record<string, string> = {
 function hiraganaToVowelStr(hira: string): string {
   let result = '';
   for (const ch of hira) {
-    const v = HIRA_VOWEL[ch];
-    if (v !== undefined) result += v;
+    if (ch === 'ー' && result.length > 0) {
+      result += result[result.length - 1];
+    } else {
+      const v = HIRA_VOWEL[ch];
+      if (v !== undefined) result += v;
+    }
   }
   return result;
 }

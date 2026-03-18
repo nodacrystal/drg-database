@@ -707,56 +707,65 @@ JSON配列で出力（全ワード分必須）:
         return { id: w.id, word: w.word, reading: w.reading, romaji: w.romaji, vowels, charCount: w.charCount };
       });
 
-      const sortByRomaji = (arr: typeof items) => arr.sort((a, b) => a.romaji.length - b.romaji.length || a.romaji.localeCompare(b.romaji));
+      const sortByRomaji = (arr: typeof items) => [...arr].sort((a, b) => a.romaji.length - b.romaji.length || a.romaji.localeCompare(b.romaji));
 
+      // 末尾2母音グループ化:
+      // キー = vowels末尾2文字。最低1文字がa/i/u/e/oであること（nのみや空文字は除外）
+      const REAL_VOWEL = /[aiueo]/;
       const buckets: Record<string, typeof items> = {};
+      const ungroupedItems: typeof items = [];
       for (const item of items) {
-        const key = item.vowels.length >= 2 ? item.vowels.slice(-2) : item.vowels || "_";
-        (buckets[key] ??= []).push(item);
+        const tail2 = item.vowels.slice(-2);
+        if (tail2.length === 2 && REAL_VOWEL.test(tail2)) {
+          (buckets[tail2] ??= []).push(item);
+        } else {
+          ungroupedItems.push(item);
+        }
       }
 
-      type RhymeGroup = { suffix: string; words: typeof items; tier: "hard" | "super" | "legendary" | "perfect" };
+      type RhymeTier = "standard" | "hard" | "super" | "legendary" | "perfect";
+      type RhymeGroup = { suffix: string; words: typeof items; tier: RhymeTier };
       const groups: { vowels: string; words: typeof items; hardRhymes: RhymeGroup[] }[] = [];
 
-      for (const [suffix, words] of Object.entries(buckets)) {
+      for (const [tail2, words] of Object.entries(buckets)) {
         if (words.length === 0) continue;
 
         const assigned = new Set<number>();
         const rhymeGroups: RhymeGroup[] = [];
 
+        // 末尾N母音が一致する語をグループ化するヘルパー（未割当のみ）
         const buildTierBuckets = (minLen: number) => {
           const bkts: Record<string, typeof items> = {};
           for (const w of words) {
             if (assigned.has(w.id)) continue;
             if (w.vowels.length >= minLen) {
               const s = w.vowels.slice(-minLen);
-              (bkts[s] ??= []).push(w);
+              // このバケットのキーが末尾2文字と一致することを保証
+              if (s.slice(-2) === tail2) (bkts[s] ??= []).push(w);
             }
           }
           return bkts;
         };
 
-        // Perfect Rhyme: 体言の母音一致率100%
-        // = 全母音列が完全一致（体言が主語なので全母音一致 ≒ 体言母音一致）
-        // + 同一グループ内で体言（名詞）が重複しないこと（同語・同義禁止）
+        // ── Perfect Rhyme: 全母音が完全一致 + 体言重複なし ──────────────────
+        // 体言母音が全部一致するグループを探す（最低3文字以上）
         const fullVowelBuckets: Record<string, typeof items> = {};
         for (const w of words) {
           if (assigned.has(w.id)) continue;
-          if (!w.vowels || w.vowels.length < 4) continue; // 短すぎる母音列は除外
+          if (!w.vowels || w.vowels.length < 3) continue;
+          if (w.vowels.slice(-2) !== tail2) continue; // 必ずtail2で終わること確認
           (fullVowelBuckets[w.vowels] ??= []).push(w);
         }
 
         for (const [sharedVowels, vWords] of Object.entries(fullVowelBuckets)) {
           if (vWords.length < 2) continue;
 
-          // 各フレーズの体言セットを取得
           const withTaigen = vWords.map(w => ({
             word: w,
             taigenSet: new Set(extractTaigen(w.word).split("|").filter(Boolean)),
           }));
 
-          // Greedy: 同グループ内で体言が重複しないサブグループに振り分け
-          // 文頭例外: 共有体言がitem・グループメンバー両方の文頭(startsWith)にある場合は競合としない
+          // Greedy: 体言重複なしでサブグループに振り分け（文頭例外あり）
           const subGroups: Array<typeof withTaigen> = [];
           for (const item of withTaigen) {
             let placed = false;
@@ -765,11 +774,8 @@ JSON配列で出力（全ワード分必須）:
               for (const m of grp) m.taigenSet.forEach(t => usedTaigen.add(t));
               const hasOverlap = [...item.taigenSet].some(t => {
                 if (!usedTaigen.has(t)) return false;
-                // 文頭例外: 共有体言が両フレーズの文頭にある場合は競合としない（文頭同士は同義語置換前提）
                 const itemStartsWithT = item.word.word.startsWith(t);
-                const allGrpWithTStartWithT = grp
-                  .filter(m => m.taigenSet.has(t))
-                  .every(m => m.word.word.startsWith(t));
+                const allGrpWithTStartWithT = grp.filter(m => m.taigenSet.has(t)).every(m => m.word.word.startsWith(t));
                 if (itemStartsWithT && allGrpWithTStartWithT) return false;
                 return true;
               });
@@ -779,41 +785,45 @@ JSON配列で出力（全ワード分必須）:
           }
 
           for (const grp of subGroups) {
-            const uniqueWords = [...new Map(grp.map(x => [x.word.id, x.word])).values()]
-              .filter(w => !assigned.has(w.id));
+            const uniqueWords = [...new Map(grp.map(x => [x.word.id, x.word])).values()].filter(w => !assigned.has(w.id));
             if (uniqueWords.length < 2) continue;
-            // 共通母音列をラベルに使用（全語で一致している母音パターン）
             rhymeGroups.push({ suffix: sharedVowels, words: sortByRomaji(uniqueWords), tier: "perfect" });
             for (const w of uniqueWords) assigned.add(w.id);
           }
         }
 
+        // ── 末尾N母音一致ティア（Legendary=6, Super=5, Hard=4, Standard=3） ──
         for (const [s6, lWords] of Object.entries(buildTierBuckets(6))) {
           if (lWords.length >= 2) {
             rhymeGroups.push({ suffix: s6, words: sortByRomaji(lWords), tier: "legendary" });
             for (const w of lWords) assigned.add(w.id);
           }
         }
-
         for (const [s5, sWords] of Object.entries(buildTierBuckets(5))) {
           if (sWords.length >= 2) {
             rhymeGroups.push({ suffix: s5, words: sortByRomaji(sWords), tier: "super" });
             for (const w of sWords) assigned.add(w.id);
           }
         }
-
         for (const [s4, hWords] of Object.entries(buildTierBuckets(4))) {
           if (hWords.length >= 2) {
             rhymeGroups.push({ suffix: s4, words: sortByRomaji(hWords), tier: "hard" });
             for (const w of hWords) assigned.add(w.id);
           }
         }
+        for (const [s3, stWords] of Object.entries(buildTierBuckets(3))) {
+          if (stWords.length >= 2) {
+            rhymeGroups.push({ suffix: s3, words: sortByRomaji(stWords), tier: "standard" });
+            for (const w of stWords) assigned.add(w.id);
+          }
+        }
 
-        const tierOrder = { perfect: 0, legendary: 1, super: 2, hard: 3 };
-        rhymeGroups.sort((a, b) => tierOrder[a.tier] - tierOrder[b.tier] || b.words.length - a.words.length);
+        const tierOrder: Record<RhymeTier, number> = { perfect: 0, legendary: 1, super: 2, hard: 3, standard: 4 };
+        rhymeGroups.sort((a, b) => tierOrder[a.tier as RhymeTier] - tierOrder[b.tier as RhymeTier] || b.words.length - a.words.length);
 
+        // 末尾2母音のみ一致（サブグループなし）の語
         const remaining = sortByRomaji(words.filter(w => !assigned.has(w.id)));
-        groups.push({ vowels: `*${suffix}`, words: remaining, hardRhymes: rhymeGroups });
+        groups.push({ vowels: `*${tail2}`, words: remaining, hardRhymes: rhymeGroups });
       }
 
       const vowelOrder: Record<string, number> = { a: 0, i: 1, u: 2, e: 3, o: 4, n: 5 };
