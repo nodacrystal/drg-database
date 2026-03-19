@@ -9,7 +9,7 @@ import {
 } from "./storage";
 import { TARGETS } from "./targets";
 import { SCRUTINY_REFERENCE } from "./scrutiny_reference";
-import { aiGenerate, geminiConfig } from "./lib/ai";
+import { aiGenerate, geminiConfig, claudeGenerate } from "./lib/ai";
 import {
   extractVowels, extractTaigenVowels, countMoraVowels, quickCharCheck, parseWordEntries,
   countMoraFromRomaji, extractCommonSubstrings, formatElapsed, getEndingBase,
@@ -329,7 +329,7 @@ ${wordList}
 
 【出力】合格ワードのみ、1行1個。元の表記そのまま出力。番号・説明不要:`;
         try {
-          const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 8192 });
+          const result = await claudeGenerate(prompt, { maxOutputTokens: 8192 });
           const text = result.text || "";
           const passed = text.split("\n")
             .map((l: string) => l.trim().replace(/^\d+[\.\)）、]\s*/, "").replace(/^[・●▸►\-]\s*/, "").replace(/^「/, "").replace(/」$/, "").trim())
@@ -376,7 +376,7 @@ ${wordList}
 
 残すワードのみ出力（1行1個、元の表記そのまま、番号・説明一切不要）:`;
         try {
-          const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 8192 });
+          const result = await claudeGenerate(prompt, { maxOutputTokens: 8192 });
           const text = result?.text || "";
           const kept = text.split("\n")
             .map((l: string) => l.trim().replace(/^「/, "").replace(/」$/, "").replace(/^\d+[\.\)）、]\s*/, "").replace(/^[・●▸►\-]\s*/, "").trim())
@@ -516,7 +516,7 @@ ${lines}
 [{"idx":1,"romaji":"修正後ローマ字"}]
 番号は1始まり。`;
           try {
-            const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 1024 });
+            const result = await claudeGenerate(prompt, { maxOutputTokens: 1024 });
             const text = result?.text || "";
             const jsonMatch = text.match(/\[[\s\S]*?\]/);
             if (!jsonMatch) return batch;
@@ -603,7 +603,7 @@ ${batchLines}
 JSON配列で出力（全ワード分必須）:
 [{"w":"元のワード","t":"末尾名詞（表記）","tr":"読み（ひらがなのみ）"}]`;
             try {
-              const step2dResult = await aiGenerate(step2dPrompt, { ...geminiConfig, maxOutputTokens: 4096 });
+              const step2dResult = await claudeGenerate(step2dPrompt, { maxOutputTokens: 4096 });
               const step2dText = step2dResult?.text || "";
               const step2dMatch = step2dText.match(/\[[\s\S]*?\]/);
               if (!step2dMatch) return [] as GenEnding[];
@@ -948,7 +948,7 @@ ${lines}
 腐ってる|動詞進行形「てる」で終わり体言でない
 
 違反なしの場合:「違反なし」とだけ回答。`;
-          const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 2048 });
+          const result = await claudeGenerate(prompt, { maxOutputTokens: 2048 });
           const text = (result?.text || "").trim();
           if (!text || text.includes("違反なし")) return [];
           const violated: number[] = [];
@@ -1114,7 +1114,7 @@ ${wordList}
 ニガー|差別
 コカコーラ野郎|商標`;
 
-          const result = await aiGenerate(prompt);
+          const result = await claudeGenerate(prompt);
           const text = (result?.text || "").trim();
           if (text && !text.includes("該当なし")) {
             for (const line of text.split("\n")) {
@@ -1335,7 +1335,7 @@ ${wordList}
 [{"id":数字,"reading":"正しいひらがな","romaji":"正しいヘボン式ローマ字（英小文字+ハイフンのみ）","issues":"問題の簡潔な説明"}]
 JSONのみ出力（説明文・コードブロック不要）。`;
           try {
-            const result = await aiGenerate(prompt);
+            const result = await claudeGenerate(prompt);
             const text = result.text || "";
             const jsonMatch = text.match(/\[[\s\S]*\]/);
             if (!jsonMatch) return [];
@@ -1528,7 +1528,7 @@ ${lines}
 JSON配列で出力（全ワード分必須）:
 [{"w":"元のワード","t":"末尾名詞（表記）","tr":"読み（ひらがなのみ）"}]`;
         try {
-          const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 4096 });
+          const result = await claudeGenerate(prompt, { maxOutputTokens: 4096 });
           const text = result?.text || "";
           const jsonMatch = text.match(/\[[\s\S]*?\]/);
           if (!jsonMatch) return [];
@@ -1605,7 +1605,7 @@ JSON配列で出力（全ワード分必須）:
         if (liveCandidates.length === 1) { tailKeptIds.add(liveCandidates[0].id); return liveCandidates[0].id; }
         const prompt = `以下のワードは全て「${t.ending}」系のワードです。最も辛辣・強烈なパンチラインを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${liveCandidates.map(w => w.word).join("\n")}`;
         try {
-          const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 64 });
+          const result = await claudeGenerate(prompt, { maxOutputTokens: 64 });
           const best = (result?.text || "").trim().replace(/^「/, "").replace(/」$/, "").trim();
           const match = liveCandidates.find(w => w.word === best);
           return match ? match.id : liveCandidates[0].id;
@@ -1936,7 +1936,7 @@ JSON配列で出力（全ワード分必須）:
           try {
             const rawSet = new Set(g.words.map(w => w.word));
             const wordList = g.words.map(w => w.word).join("\n");
-            const muResult = await aiGenerate(`以下の悪口ワードリストを精査せよ。
+            const muResult = await claudeGenerate(`以下の悪口ワードリストを精査せよ。
 
 【重要な前提】
 これは「韻（ライム）のデータベース」である。
@@ -1970,7 +1970,7 @@ STEP4: どのグループにも属さないワードは全て残せ。
 ${wordList}
 
 残すワードのみ出力（1行1個、元の表記そのまま、番号・説明一切不要）:`,
-              { ...geminiConfig, maxOutputTokens: 4096 });
+              { maxOutputTokens: 4096 });
             const text = muResult?.text || "";
             const kept = text.split("\n")
               .map((l: string) => l.trim().replace(/^「/, "").replace(/」$/, "").replace(/^\d+[\.\)）、]\s*/, "").replace(/^[・●▸►\-]\s*/, "").replace(/\s*\[確定\]/, "").trim())
@@ -2018,7 +2018,7 @@ ${wordList}
         await Promise.all(batch.map(async (g) => {
           try {
             const wordList = g.words.map(w => w.word).join("\n");
-            const semResult = await aiGenerate(`以下の日本語悪口ワード一覧から「意味がほぼ同じ」「表現違いだけの重複」ペアを全て見つけよ。
+            const semResult = await claudeGenerate(`以下の日本語悪口ワード一覧から「意味がほぼ同じ」「表現違いだけの重複」ペアを全て見つけよ。
 インパクトがある方を残し、弱い方を削除せよ。
 
 検出すべき重複の例:
@@ -2171,7 +2171,7 @@ ${lines}
 JSON配列で出力（全ワード分必須）:
 [{"w":"元のワード","t":"末尾名詞（表記）","tr":"末尾名詞の読み（ひらがな）"}]`;
           try {
-            const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 4096 });
+            const result = await claudeGenerate(prompt, { maxOutputTokens: 4096 });
             const text = result?.text || "";
             const jsonMatch = text.match(/\[[\s\S]*?\]/);
             if (!jsonMatch) return;
@@ -2284,7 +2284,7 @@ ${chunk.map((w, idx) => `${idx + 1}. ${w.word}`).join("\n")}
 合格のもの番号のみJSON配列で返せ（例: [1,3,5]）。全て不合格なら[]:`;
 
         try {
-          const result = await aiGenerate(prompt, { ...geminiConfig, maxOutputTokens: 512 });
+          const result = await claudeGenerate(prompt, { maxOutputTokens: 512 });
           const text = result?.text || "";
           const match = text.match(/\[[\s\S]*?\]/);
           if (match) {
