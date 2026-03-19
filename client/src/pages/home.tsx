@@ -807,7 +807,7 @@ export default function Home() {
         <div className="relative max-w-2xl mx-auto px-4 py-6 text-center">
           <div className="flex items-center justify-center gap-2 mb-3">
             <Mic2 className="w-7 h-7 text-primary" />
-            <h1 className="text-2xl font-bold tracking-tight" data-testid="text-title">DRGデータベース</h1>
+            <h1 className="text-2xl font-bold tracking-tight" data-testid="text-title">DRGデータベース ver CD</h1>
             <Database className="w-6 h-6 text-primary" />
           </div>
 
@@ -1015,7 +1015,7 @@ export default function Home() {
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <div className="flex items-center gap-2">
                   <Database className="w-5 h-5 text-primary" />
-                  <h2 className="text-base font-semibold">DRGデータベース</h2>
+                  <h2 className="text-base font-semibold">DRGデータベース ver CD</h2>
                   <Badge variant="secondary">{totalCount.toLocaleString()}件</Badge>
                 </div>
                 <div className="flex flex-wrap gap-1.5">
