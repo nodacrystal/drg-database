@@ -782,6 +782,68 @@ JSON配列で出力:
       type RhymeGroup = { suffix: string; words: typeof items; tier: RhymeTier };
       const groups: { vowels: string; words: typeof items; hardRhymes: RhymeGroup[] }[] = [];
 
+      // ── 韻の定義: 末尾母音が一致しているが、母音一致箇所が意味の異なる言葉 ──
+      // 同じ言葉（読み）が母音一致箇所に含まれている場合、それは韻ではない
+      const isValidRhymePair = (a: typeof items[0], b: typeof items[0], matchLen: number): boolean => {
+        // 末尾matchLen母音に対応する読みの末尾部分を比較
+        // 読みの末尾matchLen文字が同じなら、同じ言葉で一致しているだけ → 韻ではない
+        const aReadTail = a.reading.slice(-matchLen);
+        const bReadTail = b.reading.slice(-matchLen);
+        if (aReadTail === bReadTail) return false; // 同じ読みの末尾 → 韻ではない
+
+        // ワードの末尾部分が同じ文字列かチェック（漢字表記）
+        const aWordTail = a.word.slice(-Math.ceil(matchLen / 2));
+        const bWordTail = b.word.slice(-Math.ceil(matchLen / 2));
+        if (aWordTail.length >= 2 && aWordTail === bWordTail) return false; // 同じ漢字末尾 → 韻ではない
+
+        // 前半部（読み）が同じなら重複（自己評価甘 vs 自己評価高 のパターン）
+        const aPrefix = a.reading.slice(0, -Math.max(2, Math.ceil(matchLen * 0.4)));
+        const bPrefix = b.reading.slice(0, -Math.max(2, Math.ceil(matchLen * 0.4)));
+        if (aPrefix.length >= 4 && aPrefix === bPrefix) return false; // 前半部同一 → 韻ではない
+
+        return true; // 母音は一致するが異なる言葉 → 有効な韻
+      };
+
+      // グループ内の全ペアが有効な韻かチェック
+      const filterValidRhymes = (group: typeof items, matchLen: number): typeof items[] => {
+        if (group.length < 2) return [group];
+        // 有効な韻のペアだけでサブグループを構築
+        const validPairs = new Set<string>();
+        for (let i = 0; i < group.length; i++) {
+          for (let j = i + 1; j < group.length; j++) {
+            if (isValidRhymePair(group[i], group[j], matchLen)) {
+              validPairs.add(`${group[i].id}-${group[j].id}`);
+            }
+          }
+        }
+
+        // 有効なペアが1つもないグループは分解
+        if (validPairs.size === 0) return group.map(w => [w]);
+
+        // Greedy: 有効なペアが多い語から順にグループ化
+        const used = new Set<number>();
+        const result: typeof items[] = [];
+
+        for (const w of group) {
+          if (used.has(w.id)) continue;
+          const compatible = group.filter(other =>
+            other.id !== w.id && !used.has(other.id) &&
+            (validPairs.has(`${Math.min(w.id, other.id)}-${Math.max(w.id, other.id)}`) ||
+             validPairs.has(`${w.id}-${other.id}`))
+          );
+          if (compatible.length > 0) {
+            const subGroup = [w, ...compatible];
+            result.push(subGroup);
+            for (const s of subGroup) used.add(s.id);
+          }
+        }
+        // 未割当の語は個別に
+        for (const w of group) {
+          if (!used.has(w.id)) result.push([w]);
+        }
+        return result;
+      };
+
       for (const [tail2, words] of Object.entries(buckets)) {
         if (words.length === 0) continue;
 
@@ -789,86 +851,106 @@ JSON配列で出力:
         const rhymeGroups: RhymeGroup[] = [];
 
         // 末尾N母音が一致する語をグループ化するヘルパー（未割当のみ）
+        // 韻の定義を適用: 同じ言葉による母音一致は韻としてカウントしない
         const buildTierBuckets = (minLen: number) => {
           const bkts: Record<string, typeof items> = {};
           for (const w of words) {
             if (assigned.has(w.id)) continue;
             if (w.vowels.length >= minLen) {
               const s = w.vowels.slice(-minLen);
-              // このバケットのキーが末尾2文字と一致することを保証
               if (s.slice(-2) === tail2) (bkts[s] ??= []).push(w);
             }
           }
-          return bkts;
+          // 韻の有効性をチェックし、無効なペアを除外
+          const validBkts: Record<string, typeof items> = {};
+          for (const [key, group] of Object.entries(bkts)) {
+            const validSubGroups = filterValidRhymes(group, minLen);
+            for (const sg of validSubGroups) {
+              if (sg.length >= 2) {
+                const sgKey = `${key}_${sg[0].id}`;
+                validBkts[sgKey] = sg;
+              }
+            }
+          }
+          return validBkts;
         };
 
-        // ── Perfect Rhyme: 全母音が完全一致 + 体言重複なし ──────────────────
-        // 体言母音が全部一致するグループを探す（最低3文字以上）
+        // ── Perfect Rhyme: 全母音が完全一致 + 体言重複なし + 韻の定義適用 ──
         const fullVowelBuckets: Record<string, typeof items> = {};
         for (const w of words) {
           if (assigned.has(w.id)) continue;
           if (!w.vowels || w.vowels.length < 3) continue;
-          if (w.vowels.slice(-2) !== tail2) continue; // 必ずtail2で終わること確認
+          if (w.vowels.slice(-2) !== tail2) continue;
           (fullVowelBuckets[w.vowels] ??= []).push(w);
         }
 
         for (const [sharedVowels, vWords] of Object.entries(fullVowelBuckets)) {
           if (vWords.length < 2) continue;
 
-          const withTaigen = vWords.map(w => ({
-            word: w,
-            taigenSet: new Set(extractTaigen(w.word).split("|").filter(Boolean)),
-          }));
+          // 韻の有効性チェック
+          const validSubGroups = filterValidRhymes(vWords, sharedVowels.length);
 
-          // Greedy: 体言重複なしでサブグループに振り分け（文頭例外あり）
-          const subGroups: Array<typeof withTaigen> = [];
-          for (const item of withTaigen) {
-            let placed = false;
-            for (const grp of subGroups) {
-              const usedTaigen = new Set<string>();
-              for (const m of grp) m.taigenSet.forEach(t => usedTaigen.add(t));
-              const hasOverlap = [...item.taigenSet].some(t => {
-                if (!usedTaigen.has(t)) return false;
-                const itemStartsWithT = item.word.word.startsWith(t);
-                const allGrpWithTStartWithT = grp.filter(m => m.taigenSet.has(t)).every(m => m.word.word.startsWith(t));
-                if (itemStartsWithT && allGrpWithTStartWithT) return false;
-                return true;
-              });
-              if (!hasOverlap) { grp.push(item); placed = true; break; }
+          for (const validGroup of validSubGroups) {
+            if (validGroup.length < 2) continue;
+
+            const withTaigen = validGroup.map(w => ({
+              word: w,
+              taigenSet: new Set(extractTaigen(w.word).split("|").filter(Boolean)),
+            }));
+
+            // Greedy: 体言重複なしでサブグループに振り分け
+            const subGroups: Array<typeof withTaigen> = [];
+            for (const item of withTaigen) {
+              let placed = false;
+              for (const grp of subGroups) {
+                const usedTaigen = new Set<string>();
+                for (const m of grp) m.taigenSet.forEach(t => usedTaigen.add(t));
+                const hasOverlap = [...item.taigenSet].some(t => {
+                  if (!usedTaigen.has(t)) return false;
+                  const itemStartsWithT = item.word.word.startsWith(t);
+                  const allGrpWithTStartWithT = grp.filter(m => m.taigenSet.has(t)).every(m => m.word.word.startsWith(t));
+                  if (itemStartsWithT && allGrpWithTStartWithT) return false;
+                  return true;
+                });
+                if (!hasOverlap) { grp.push(item); placed = true; break; }
+              }
+              if (!placed) subGroups.push([item]);
             }
-            if (!placed) subGroups.push([item]);
-          }
 
-          for (const grp of subGroups) {
-            const uniqueWords = [...new Map(grp.map(x => [x.word.id, x.word])).values()].filter(w => !assigned.has(w.id));
-            if (uniqueWords.length < 2) continue;
-            rhymeGroups.push({ suffix: sharedVowels, words: sortByRomaji(uniqueWords), tier: "perfect" });
-            for (const w of uniqueWords) assigned.add(w.id);
+            for (const grp of subGroups) {
+              const uniqueWords = [...new Map(grp.map(x => [x.word.id, x.word])).values()].filter(w => !assigned.has(w.id));
+              if (uniqueWords.length < 2) continue;
+              rhymeGroups.push({ suffix: sharedVowels, words: sortByRomaji(uniqueWords), tier: "perfect" });
+              for (const w of uniqueWords) assigned.add(w.id);
+            }
           }
         }
 
         // ── 末尾N母音一致ティア（Legendary=6, Super=5, Hard=4, Standard=3） ──
-        for (const [s6, lWords] of Object.entries(buildTierBuckets(6))) {
+        // 韻の定義適用済み: buildTierBucketsのキーは "母音パターン_id" 形式
+        const extractSuffix = (key: string) => key.split("_")[0]; // "aeiou_123" → "aeiou"
+
+        for (const [key, lWords] of Object.entries(buildTierBuckets(6))) {
           if (lWords.length >= 2) {
-            rhymeGroups.push({ suffix: s6, words: sortByRomaji(lWords), tier: "legendary" });
+            rhymeGroups.push({ suffix: extractSuffix(key), words: sortByRomaji(lWords), tier: "legendary" });
             for (const w of lWords) assigned.add(w.id);
           }
         }
-        for (const [s5, sWords] of Object.entries(buildTierBuckets(5))) {
+        for (const [key, sWords] of Object.entries(buildTierBuckets(5))) {
           if (sWords.length >= 2) {
-            rhymeGroups.push({ suffix: s5, words: sortByRomaji(sWords), tier: "super" });
+            rhymeGroups.push({ suffix: extractSuffix(key), words: sortByRomaji(sWords), tier: "super" });
             for (const w of sWords) assigned.add(w.id);
           }
         }
-        for (const [s4, hWords] of Object.entries(buildTierBuckets(4))) {
+        for (const [key, hWords] of Object.entries(buildTierBuckets(4))) {
           if (hWords.length >= 2) {
-            rhymeGroups.push({ suffix: s4, words: sortByRomaji(hWords), tier: "hard" });
+            rhymeGroups.push({ suffix: extractSuffix(key), words: sortByRomaji(hWords), tier: "hard" });
             for (const w of hWords) assigned.add(w.id);
           }
         }
-        for (const [s3, stWords] of Object.entries(buildTierBuckets(3))) {
+        for (const [key, stWords] of Object.entries(buildTierBuckets(3))) {
           if (stWords.length >= 2) {
-            rhymeGroups.push({ suffix: s3, words: sortByRomaji(stWords), tier: "standard" });
+            rhymeGroups.push({ suffix: extractSuffix(key), words: sortByRomaji(stWords), tier: "standard" });
             for (const w of stWords) assigned.add(w.id);
           }
         }
@@ -1861,64 +1943,120 @@ JSON配列で出力（全ワード分必須）:
       }
       const tailResult = await aiTailDedup(dedupBuckets, toDelete, send, true);
 
-      // --- check5: グループ内の同じ意味の言葉をClaudeで検出 ---
-      send("check5", "グループ内の同義語・同意語を検出中...");
-      let meaningDupCount = 0;
+      // --- check5: 広義の重複検出（全DB横断、7パターン） ---
+      send("check5", "広義の重複を検出中（全DB横断）...");
+      let broadDupCount = 0;
       const liveWords = allWords.filter(w => !toDelete.has(w.id));
 
-      // 末尾2母音でグループ化
-      const meaningBuckets: Record<string, typeof liveWords> = {};
+      // 5a: 読みの類似（濁音/半濁音/促音の違いのみ）
+      function normalizeReadingLoose(s: string): string {
+        return s.replace(/[ー・\s\u3000]/g, "")
+          .replace(/[がぎぐげご]/g, c => "かきくけこ"["がぎぐげご".indexOf(c)])
+          .replace(/[ざじずぜぞ]/g, c => "さしすせそ"["ざじずぜぞ".indexOf(c)])
+          .replace(/[だぢづでど]/g, c => "たちつてと"["だぢづでど".indexOf(c)])
+          .replace(/[ばびぶべぼ]/g, c => "はひふへほ"["ばびぶべぼ".indexOf(c)])
+          .replace(/[ぱぴぷぺぽ]/g, c => "はひふへほ"["ぱぴぷぺぽ".indexOf(c)])
+          .replace(/っ/g, "").replace(/を/g, "お");
+      }
+      const seenLooseReading = new Map<string, { id: number; word: string }>();
       for (const w of liveWords) {
-        const key = w.vowels.length >= 2 ? w.vowels.slice(-2) : "_";
-        (meaningBuckets[key] ??= []).push(w);
+        if (toDelete.has(w.id)) continue;
+        const loose = normalizeReadingLoose(w.reading);
+        if (!loose) continue;
+        const existing = seenLooseReading.get(loose);
+        if (existing) {
+          toDelete.add(w.id);
+          broadDupCount++;
+          send("check5a", `読み類似: "${w.word}"(${w.reading}) ≈ "${existing.word}" → 削除`);
+        } else {
+          seenLooseReading.set(loose, { id: w.id, word: w.word });
+        }
       }
 
-      const MEANING_PARALLEL = 3;
-      const meaningTasks = Object.entries(meaningBuckets).filter(([, ws]) => ws.length >= 2);
+      // 5b: 前半部（修飾部）が同一のペアを検出
+      const liveWords2 = liveWords.filter(w => !toDelete.has(w.id));
+      const prefixGroups = new Map<string, typeof liveWords2>();
+      for (const w of liveWords2) {
+        // 前半部 = 末尾2文字を除いた部分（ひらがな読みベース）
+        if (w.reading.length <= 3) continue;
+        const prefix = w.reading.slice(0, -2);
+        const g = prefixGroups.get(prefix) || [];
+        g.push(w);
+        prefixGroups.set(prefix, g);
+      }
+      let prefixDupCount = 0;
+      for (const [prefix, group] of prefixGroups) {
+        if (group.length <= 1) continue;
+        // 同じ前半部で3個以上 or 前半部が4文字以上 → 重複の可能性大
+        if (group.length >= 2 && prefix.length >= 4) {
+          // 先頭を残し、他を削除
+          for (let i = 1; i < group.length; i++) {
+            if (!toDelete.has(group[i].id)) {
+              toDelete.add(group[i].id);
+              prefixDupCount++;
+              send("check5b", `前半部一致: "${group[i].word}" ≈ "${group[0].word}"（前半「${prefix}」同一）→ 削除`);
+            }
+          }
+        }
+      }
+      broadDupCount += prefixDupCount;
 
-      for (let m = 0; m < meaningTasks.length; m += MEANING_PARALLEL) {
+      // 5c: Claudeによる厳密な重複検出（バッチ処理、全DB横断）
+      const liveWords3 = liveWords.filter(w => !toDelete.has(w.id));
+      const DUP_BATCH = 150;
+      const DUP_PARALLEL = 3;
+      const dupBatches: typeof liveWords3[] = [];
+      for (let i = 0; i < liveWords3.length; i += DUP_BATCH) dupBatches.push(liveWords3.slice(i, i + DUP_BATCH));
+
+      for (let d = 0; d < dupBatches.length; d += DUP_PARALLEL) {
         if (disconnected) break;
-        const chunk = meaningTasks.slice(m, m + MEANING_PARALLEL);
-        await Promise.all(chunk.map(async ([key, groupWords]) => {
-          if (groupWords.length < 2) return;
-          const wordList = groupWords.map(w => `${w.id}:${w.word}`).join("\n");
+        const chunk = dupBatches.slice(d, d + DUP_PARALLEL);
+        await Promise.all(chunk.map(async (batch) => {
+          const wordList = batch.map(w => `${w.id}:${w.word}(${w.reading})`).join("\n");
           try {
-            const result = await claudeGenerate(`以下のワードグループ内で「同じ意味」「ほぼ同じ表現」の重複ペアを見つけよ。
+            const result = await claudeGenerate(`以下のワードリストから重複を全て検出し、削除すべきIDを返せ。
 
-【重複の例】
-- 「うっせーよ」と「うるせえよ」→ 同じ意味の別表現
-- 「生きてる価値なし」と「生きる価値なし」→ 活用違い
-- 「存在価値なし」と「生きる価値なし」→ 同じ概念
+【重複の定義（以下の全てが重複）】
+1. 表記違いの同一語: 「独りよがり」「独り善がり」「一人よがり」→ 同じ読み・同じ意味→1個残して他は削除
+2. 同じ前半部+似た末尾: 「自己評価甘」「自己評価高」→ 前半部「自己評価」が同じ→1個残す
+3. 同じ前半部+似た末尾: 「顔面廃棄」「顔面麻痺」→ 前半部「顔面」が同じ→1個残す
+4. 同じ概念の言い換え: 「社会不適応」「社会不適合」→ ほぼ同義→1個残す
+5. 同じ概念の言い換え: 「友達不毛」「友達不要」→ 同じ概念→1個残す
+6. 濁音/半濁音の違いだけ: 「一人ぼっち」「一人ぽっち」→ ほぼ同一→1個残す
+7. 漢字違いの同一語: 「無駄飯喰い」「無駄飯食い」→ 同じ→1個残す
+8. 6つのルール違反: 「プライド高い」（形容詞語尾）「カビ生えとる」（方言）→ 削除
 
-重複がなければ「なし」とだけ出力。
-重複があれば、削除すべきワードのIDをJSON配列で出力（残す方のIDは含めない）:
-[{"deleteId":123,"reason":"「○○」と同義"}]
+【重要】各重複グループで最もインパクトのある1個を残し、それ以外のIDを返せ。
+重複がなければ空配列[]を返せ。
 
-ワードグループ（${key}グループ）:
-${wordList}`, { maxOutputTokens: 4096 });
+[{"deleteId":123,"reason":"「○○」と表記違い/同義/前半部一致/ルール違反"}]
+
+ワードリスト:
+${wordList}`, { maxOutputTokens: 8192 });
             const text = (result?.text || "").trim();
-            if (text === "なし" || text.includes("なし")) return;
             const jsonMatch = text.match(/\[[\s\S]*?\]/);
             if (!jsonMatch) return;
             type MR = { deleteId: number; reason: string };
             const duplicates = JSON.parse(jsonMatch[0]) as MR[];
-            for (const d of duplicates) {
-              if (d.deleteId && !toDelete.has(d.deleteId)) {
-                toDelete.add(d.deleteId);
-                meaningDupCount++;
-                send("check5", `同義語削除: id:${d.deleteId} (${d.reason})`);
+            for (const dup of duplicates) {
+              if (dup.deleteId && !toDelete.has(dup.deleteId)) {
+                toDelete.add(dup.deleteId);
+                broadDupCount++;
+                send("check5c", `重複削除: id:${dup.deleteId} (${dup.reason})`);
               }
             }
           } catch {}
         }));
+        send("check5", `広義重複検出: ${d + Math.min(DUP_PARALLEL, dupBatches.length - d)}/${dupBatches.length}バッチ完了...`);
       }
-      send("check5", `同義語・同意語: ${meaningDupCount}件`);
 
-      const total = wordDupCount + readingDupCount + romajiDupCount + tailResult.deletedCount + meaningDupCount;
+      send("check5", `広義重複: ${broadDupCount}件（前半部一致${prefixDupCount}件含む）`);
+
+      const total = wordDupCount + readingDupCount + romajiDupCount + tailResult.deletedCount + broadDupCount;
       if (total === 0) {
         send("done", "重複なし。データベースはクリーンな状態です。");
       } else {
-        send("delete", `合計 ${total}件 (表記:${wordDupCount} + 読み:${readingDupCount} + ローマ字:${romajiDupCount} + 末尾名詞:${tailResult.deletedCount} + 同義語:${meaningDupCount}) を削除中...`);
+        send("delete", `合計 ${total}件 (表記:${wordDupCount} + 読み:${readingDupCount} + ローマ字:${romajiDupCount} + 末尾名詞:${tailResult.deletedCount} + 広義重複:${broadDupCount}) を削除中...`);
         await deleteWords([...toDelete]);
       }
 
