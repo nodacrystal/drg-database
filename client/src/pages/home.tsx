@@ -1065,9 +1065,9 @@ export default function Home() {
               </div>
 
               <div className="flex flex-wrap gap-1.5">
-                <Button variant="outline" size="sm" onClick={() => runCleanupSSE("/api/favorites/char-check", "文字整理")} disabled={isCleanupRunning || totalCount === 0} data-testid="button-char-check">
+                <Button variant="outline" size="sm" onClick={() => runCleanupSSE("/api/favorites/group-check", "グループ整理")} disabled={isCleanupRunning || totalCount === 0} data-testid="button-group-check">
                   {isCleanupRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Sparkles className="w-3.5 h-3.5 mr-1" />}
-                  文字整理
+                  グループ整理
                 </Button>
                 <Button variant="outline" size="sm" onClick={() => runCleanupSSE("/api/favorites/dedup-cleanup", "重複整理")} disabled={isCleanupRunning || totalCount === 0} data-testid="button-dedup-cleanup">
                   {isCleanupRunning ? <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" /> : <Layers className="w-3.5 h-3.5 mr-1" />}
