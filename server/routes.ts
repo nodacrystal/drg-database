@@ -902,39 +902,61 @@ JSON配列で出力:
         return true; // 母音は一致するが異なる言葉 → 有効な韻
       };
 
-      // グループ内の全ペアが有効な韻かチェック
+      // グループ内の全ペアが有効な韻かチェックし、有効なサブグループのみ返す
       const filterValidRhymes = (group: typeof items, matchLen: number): typeof items[] => {
         if (group.length < 2) return [group];
-        // 有効な韻のペアだけでサブグループを構築
+
+        // 全ペアの有効性をチェック
+        const pairKey = (a: number, b: number) => a < b ? `${a}-${b}` : `${b}-${a}`;
         const validPairs = new Set<string>();
         for (let i = 0; i < group.length; i++) {
           for (let j = i + 1; j < group.length; j++) {
             if (isValidRhymePair(group[i], group[j], matchLen)) {
-              validPairs.add(`${group[i].id}-${group[j].id}`);
+              validPairs.add(pairKey(group[i].id, group[j].id));
             }
           }
         }
 
-        // 有効なペアが1つもないグループは分解
         if (validPairs.size === 0) return group.map(w => [w]);
 
-        // Greedy: 有効なペアが多い語から順にグループ化
+        // Greedy: 互いに全て有効なペアであるサブグループを構築
         const used = new Set<number>();
         const result: typeof items[] = [];
 
+        // 有効ペア数でソート（多い語を優先）
+        const pairCount = new Map<number, number>();
         for (const w of group) {
+          let cnt = 0;
+          for (const other of group) {
+            if (other.id !== w.id && validPairs.has(pairKey(w.id, other.id))) cnt++;
+          }
+          pairCount.set(w.id, cnt);
+        }
+        const sorted = [...group].sort((a, b) => (pairCount.get(b.id) || 0) - (pairCount.get(a.id) || 0));
+
+        for (const w of sorted) {
           if (used.has(w.id)) continue;
-          const compatible = group.filter(other =>
+          // このワードと有効なペアを持つ未使用ワードを集める
+          const candidates = sorted.filter(other =>
             other.id !== w.id && !used.has(other.id) &&
-            (validPairs.has(`${Math.min(w.id, other.id)}-${Math.max(w.id, other.id)}`) ||
-             validPairs.has(`${w.id}-${other.id}`))
+            validPairs.has(pairKey(w.id, other.id))
           );
-          if (compatible.length > 0) {
-            const subGroup = [w, ...compatible];
+
+          if (candidates.length === 0) continue;
+
+          // candidates同士も全て有効なペアであることを確認
+          const subGroup = [w];
+          for (const c of candidates) {
+            const allValid = subGroup.every(member => validPairs.has(pairKey(member.id, c.id)));
+            if (allValid) subGroup.push(c);
+          }
+
+          if (subGroup.length >= 2) {
             result.push(subGroup);
             for (const s of subGroup) used.add(s.id);
           }
         }
+
         // 未割当の語は個別に
         for (const w of group) {
           if (!used.has(w.id)) result.push([w]);
