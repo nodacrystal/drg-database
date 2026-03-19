@@ -1576,12 +1576,85 @@ ${wordList}
       let romajiFixed = 0;
       let vowelFixed = 0;
 
+      // PHASE0: プログラム的なreadingの異常を検出・修正
+      send("fix", `PHASE0: ${allWords.length}語のreadingを検証中...`);
+      let phase0Fixed = 0;
+      for (const w of allWords) {
+        let newWord = w.word;
+        let newReading = w.reading;
+        let newRomaji = w.romaji;
+        let changed = false;
+
+        // readingにスラッシュが含まれる（パースバグ）
+        if (newReading.includes("/") || newReading.includes("／")) {
+          const parts = newReading.split(/[\/／]/);
+          newWord = parts[0].trim();
+          newReading = parts[parts.length - 1].trim();
+          // カタカナをひらがなに変換
+          newReading = newReading.replace(/[ァ-ヶ]/g, (c: string) => String.fromCharCode(c.charCodeAt(0) - 0x60));
+          changed = true;
+        }
+
+        // wordにスラッシュが含まれる
+        if (newWord.includes("/") || newWord.includes("／")) {
+          const parts = newWord.split(/[\/／]/);
+          newWord = parts[0].trim();
+          if (!/^[ぁ-ゟー]+$/.test(newReading)) {
+            let r = parts[parts.length - 1].trim();
+            r = r.replace(/[ァ-ヶ]/g, (c: string) => String.fromCharCode(c.charCodeAt(0) - 0x60));
+            if (/^[ぁ-ゟー]+$/.test(r)) { newReading = r; changed = true; }
+          }
+          changed = true;
+        }
+
+        // readingがひらがなでない（漢字・カタカナ混入）
+        if (!/^[ぁ-ゟー]+$/.test(newReading)) {
+          // カタカナをひらがなに変換してみる
+          let converted = newReading.replace(/[ァ-ヶ]/g, (c: string) => String.fromCharCode(c.charCodeAt(0) - 0x60));
+          // まだひらがなでなければwordをそのまま使う
+          if (!/^[ぁ-ゟー]+$/.test(converted)) {
+            converted = newWord;
+          }
+          if (converted !== newReading) { newReading = converted; changed = true; }
+        }
+
+        // romajiに重複部分がある（ワード+読みが連結されている）
+        if (newRomaji.length > 15) {
+          const half = Math.floor(newRomaji.length / 2);
+          for (let checkLen = Math.min(half, 8); checkLen >= 4; checkLen--) {
+            const prefix = newRomaji.slice(0, checkLen);
+            const secondHalf = newRomaji.slice(half - 2);
+            if (secondHalf.includes(prefix)) {
+              // 後半部分を特定して使用
+              const idx = newRomaji.indexOf(prefix, checkLen);
+              if (idx > 0) {
+                newRomaji = newRomaji.slice(idx);
+                changed = true;
+                break;
+              }
+            }
+          }
+        }
+
+        if (changed) {
+          const newVowels = extractTaigenVowels(newWord, newReading, newRomaji);
+          await updateWord(w.id, { word: newWord, reading: newReading, romaji: newRomaji, vowels: newVowels, charCount: countMoraVowels(newReading) });
+          phase0Fixed++;
+          send("fix", `修正: "${w.word}" → word="${newWord}" reading="${newReading}" romaji="${newRomaji}"`);
+        }
+      }
+      send("fix", `PHASE0完了: ${phase0Fixed}語を修正`);
+      readingFixed += phase0Fixed;
+
+      // PHASE0後にデータを再取得
+      const refreshedWords = phase0Fixed > 0 ? await getAllWords() : allWords;
+
       // PHASE1: 読み・ローマ字の正確性をClaudeで検証
-      send("check", `PHASE1: ${allWords.length}語の読み・ローマ字を検証中...`);
+      send("check", `PHASE1: ${refreshedWords.length}語の読み・ローマ字を検証中...`);
       const CHECK_BATCH = 80;
       const CHECK_PARALLEL = 3;
-      const checkBatches: typeof allWords[] = [];
-      for (let i = 0; i < allWords.length; i += CHECK_BATCH) checkBatches.push(allWords.slice(i, i + CHECK_BATCH));
+      const checkBatches: typeof refreshedWords[] = [];
+      for (let i = 0; i < refreshedWords.length; i += CHECK_BATCH) checkBatches.push(refreshedWords.slice(i, i + CHECK_BATCH));
 
       for (let r = 0; r < Math.ceil(checkBatches.length / CHECK_PARALLEL); r++) {
         if (disconnected) break;
