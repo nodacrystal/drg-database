@@ -152,26 +152,20 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const shortHistory = existingWords.slice(-80).join(",") || "なし";
       const ngEndingNote = ngWordList.length > 0 ? `\n【禁止単語（含有禁止）】以下の単語を1文字でも含むワードは生成禁止（位置問わず）: ${ngWordList.join("、")}` : "";
 
-      send("step1", `STEP1: ディスワード300個を生成中... (並列バッチ生成)`);
-
-      const dupTailWords = new Set<string>();
+      const TARGET_COUNT = 300;
       const accumulatedExclusions = new Set<string>();
 
-      const runStep1Generation = async (targetCount: number, extraExclusions: string[] = []): Promise<WordEntry[]> => {
-        const batchCount = Math.max(2, Math.ceil(targetCount / 50));
-        const words: WordEntry[] = [];
-        const batchSeen = new Set<string>();
-        const usedEndingWords = new Set<string>(); // バッチ間末尾名詞追跡（漢字・カタカナ語形）
+      // ============================================================
+      // STEP1（Gemini）: 300個のワードを並列バッチ生成
+      // ============================================================
+      send("step1", `STEP1: Geminiでディスワード300個を並列生成中...`);
 
-        const makePrompt = (batchIndex: number, usedWordsList: string[], endingWords: Set<string>) => {
-          const angle = DISS_ANGLES[batchIndex % DISS_ANGLES.length];
-          const usedNote = usedWordsList.length > 0
-            ? `\n【使用済み名詞・概念（絶対使用禁止）】以下の名詞・キーワードはすでに他のワードで使用済み。これらの名詞を含むワードは絶対に生成するな（全角・半角・ひらがな・漢字表記問わず）:\n${usedWordsList.slice(-200).join("、")}`
-            : "";
-          const endingNote2 = endingWords.size > 0
-            ? `\n【末尾名詞使用済み（追加生成禁止）】以下の語で終わるワードは既に生成済み。同じ末尾語で終わるワードを追加するな: ${[...endingWords].slice(-60).join("、")}`
-            : "";
-          return `「${targetName}」をディスるワードを50個生成せよ。
+      const makePrompt = (batchIndex: number, usedWordsList: string[]) => {
+        const angle = DISS_ANGLES[batchIndex % DISS_ANGLES.length];
+        const usedNote = usedWordsList.length > 0
+          ? `\n【使用済み単語（絶対使用禁止）】以下の単語は既に生成済み。これらを含むワードは生成するな:\n${usedWordsList.slice(-200).join("、")}`
+          : "";
+        return `「${targetName}」をディスるワードを50個生成せよ。
 
 【ターゲット情報】
 ${target}
@@ -180,489 +174,437 @@ ${target}
 
 【このバッチの攻撃角度】
 ${angle}
-この角度に特化したワードのみ生成せよ。他の角度のワードは生成するな。
+この角度に特化したワードのみ生成せよ。
 
-【絶対ルール】
-- 1ワード10文字以内、4文字以上（ひらがな換算）
-- 【難しい言葉禁止】小学生でも即座に理解できる言葉のみ使用。漢語・専門用語・難読語は絶対禁止
-- 【辛辣必須】どのワードも相手の急所を突く辛辣さを持つこと。当たり障りのない表現は削除せよ
-- 【挑発性必須】相手が読んで苛立つ・カチンとくるような挑発的な言葉を選べ
-- 【リズム重視】声に出したとき音のリズムが良いこと（語呂が悪いものは削除せよ）
-- 同じ助詞・助動詞で終わるワードを重複させるな
-- 【末尾名詞重複禁止】このバッチ内で末尾の名詞（最後の名詞・名詞句）が重複するワードを生成するな（例：「クズ野郎」「ゴミ野郎」は末尾名詞「野郎」重複→どちらか1個のみ。「脂肪体」「肉体」は末尾名詞「体」重複→1個のみ）
-- 関西弁・方言語尾は絶対禁止（やな/やわ/やろ/やで/やん/ねん/やんか/やんな/わな/じゃな/じゃろ/っちゃ等）→ 標準語のみ
-- 【体言止め必須】名詞・名詞句で終わること。助詞・助動詞・形容詞語尾・動詞活用形で終わるワードは絶対禁止
-- ターゲット「${targetName}」に特化した内容
-- 造語OK（ただし意味が通じること）
-- このバッチ内で同じ単語を使用するな
-- 放送禁止用語・差別用語・商標名（IP）は削除せよ
-- 生成後、全ルールを自己チェックし違反ワードを削除せよ${ngEndingNote}${usedNote}${endingNote2}
+【悪口の6つのルール】
+1. 小学生でもわかる言葉のみを使う（漢語・専門用語・難読語は禁止）
+2. ターゲットの特徴から、悪口・指摘・挑発になる言葉を作成する
+3. 言葉は必ず「体言止め」にすること（名詞・名詞句で終わる。助詞・助動詞・形容詞語尾・動詞で終わるのは禁止）
+4. 商標権のある名前、有名人の名前などは使用しないこと
+5. 言葉のリズムが良いこと（声に出したとき語呂が良い）
+6. 一度使われた単語は使用しないこと
+
+【文字数制限】ひらがな換算で4文字〜10文字
+【関西弁・方言禁止】標準語のみ
+【放送禁止用語・差別用語禁止】${ngEndingNote}${usedNote}
 既出DB（生成するな）: ${shortHistory}
 
-【出力形式】
-全ワードを出力した後、必ず末尾に「【使用名詞】」セクションを追加し、生成した全ワードに含まれる主要な名詞・キーワードを列挙せよ。
-
-ワード出力（1行1個）:
+【出力形式】1行1個:
 ワード/よみ(romaji)
-例: ポンコツ野郎/ぽんこつやろう(ponkotsuyarou)
-※必ず「/」の後にひらがな読みを書き、(romaji)を付けること
-
-【使用名詞】名詞1、名詞2、名詞3...（このバッチで使用した全ての主要名詞）`;
-        };
-
-        // ワード末尾から漢字・カタカナ末尾語形を抽出してusedEndingWordsを更新するヘルパー
-        const updateEndingWords = (wordList: WordEntry[]) => {
-          const ec = new Map<string, number>();
-          for (const w of wordList) {
-            const m1 = w.word.match(/[一-龯々ァ-ヶー]{1}$/);   // 1文字漢字
-            const m2 = w.word.match(/[一-龯々ァ-ヶー]{1,2}$/); // 1-2文字
-            const m3 = w.word.match(/[一-龯々ァ-ヶー]{1,4}$/); // 1-4文字
-            for (const m of [m1, m2, m3]) {
-              if (m) ec.set(m[0], (ec.get(m[0]) || 0) + 1);
-            }
-          }
-          let added = 0;
-          for (const [ending, cnt] of ec) {
-            const minCnt = ending.length === 1 ? 3 : 2; // 1文字は3回以上
-            if (cnt >= minCnt && !usedEndingWords.has(ending)) {
-              usedEndingWords.add(ending);
-              added++;
-            }
-          }
-          return added;
-        };
-
-        const STEP1_PARALLEL = 4;
-        for (let quad = 0; quad < Math.ceil(batchCount / STEP1_PARALLEL); quad++) {
-          const baseIdx = quad * STEP1_PARALLEL;
-          const indices = Array.from({ length: STEP1_PARALLEL }, (_, k) => baseIdx + k).filter(i => i < batchCount);
-
-          const currentUsedWords = [...accumulatedExclusions, ...extraExclusions];
-
-          const pairResults = await Promise.allSettled(
-            indices.map(i => aiGenerate(makePrompt(i, currentUsedWords, usedEndingWords), { ...geminiConfig, maxOutputTokens: 4096 }))
-          );
-
-          const pairWords: WordEntry[] = [];
-          for (let r = 0; r < pairResults.length; r++) {
-            const result = pairResults[r];
-            const batchNum = baseIdx + r + 1;
-            const angleLabel = DISS_ANGLES[(baseIdx + r) % DISS_ANGLES.length].split("（")[0];
-            if (result.status !== "fulfilled") {
-              console.log(`[STEP1] Batch ${batchNum} (${angleLabel}) FAILED`);
-              continue;
-            }
-            const text = result.value.text || "";
-
-            // 【使用名詞】セクションを抽出してexclusionsに追加
-            const nounMatch = text.match(/【使用名詞】([^\n]+)/);
-            if (nounMatch) {
-              const nouns = nounMatch[1].split(/[、,，\s]+/).map((n: string) => n.trim()).filter((n: string) => n.length >= 2 && n.length <= 10);
-              for (const n of nouns) accumulatedExclusions.add(n);
-              console.log(`[STEP1] Batch ${batchNum} 使用名詞: ${nouns.join("、")}`);
-            }
-
-            const entries = parseWordEntries(text);
-            let batchAdded = 0;
-            for (const e of entries) {
-              if (batchSeen.has(e.word)) {
-                const tail = e.reading.slice(-2);
-                if (tail.length >= 2) dupTailWords.add(tail);
-                continue;
-              }
-              // NG単語チェック: 含有判定（位置問わず）
-              if (ngWordList.length > 0 && ngWordList.some(ng => e.word.includes(ng) || e.reading.includes(ng))) {
-                console.log(`[STEP1] NG単語含有除外: "${e.word}"`);
-                continue;
-              }
-              const isHiragana = /^[ぁ-ゟー]+$/.test(e.reading);
-              const len = isHiragana ? e.reading.length : countMoraFromRomaji(e.romaji);
-              if (len < 3 || len > 10) continue;
-              if (!isHiragana) e.reading = e.word;
-              batchSeen.add(e.word);
-              pairWords.push(e);
-              batchAdded++;
-            }
-            console.log(`[STEP1] Batch ${batchNum} [${angleLabel}]: parsed=${entries.length} added=${batchAdded}`);
-          }
-
-          words.push(...pairWords);
-
-          // 文字列ベースのcommonSubsも引き続き追加
-          for (const w of pairWords) {
-            accumulatedExclusions.add(w.word);
-          }
-          const commonSubs = extractCommonSubstrings(pairWords);
-          for (const s of commonSubs) accumulatedExclusions.add(s);
-
-          // バッチ完了後: 蓄積ワード全体から末尾名詞を追跡して次バッチへ引き継ぐ
-          const newEndings = updateEndingWords(words);
-          if (newEndings > 0) console.log(`[STEP1] Quad${quad + 1}: 末尾追跡 +${newEndings}個 (計${usedEndingWords.size}個禁止中)`);
-        }
-        return words;
+例: ポンコツ野郎/ぽんこつやろう(ponkotsuyarou)`;
       };
 
-      const TARGET_COUNT = 300;
-      const RAW_TARGET = Math.ceil(TARGET_COUNT * 2.2);
-
-      const runStep2Filter = async (words: WordEntry[], label = ""): Promise<WordEntry[]> => {
-        if (words.length === 0) return [];
-        const rawSet = new Set(words.map(w => w.word));
-        const wordList = words.map(w => w.word).join("\n");
-        const prompt = `以下のワード一覧が絶対ルールを守っているか検証し、合格ワードのみ出力せよ。
-
-【絶対ルール（違反ワードは削除）】
-- 1ワード10文字以内、4文字以上（ひらがな換算）
-- 【難しい言葉禁止】小学生でも即座に理解できる言葉のみ。漢語・専門用語・難読語は削除
-- 【辛辣必須】当たり障りのない・弱い表現は削除。相手の急所を突く辛辣さがあること
-- 【挑発性必須】読んで苛立つ・カチンとくるような挑発的な言葉であること
-- 【リズム必須】声に出したとき音のリズムが良いこと。語呂が悪いものは削除
-- 同じ助詞・助動詞で終わるワードを重複させるな（例：〜だろ、〜だろ は禁止）
-- 【末尾名詞重複削除】リスト内で末尾の名詞（最後の名詞・名詞句）が同じワードが複数ある場合、最も辛辣な1個だけ残し残りを削除せよ（例：「クズ野郎」「ゴミ野郎」→末尾名詞「野郎」重複→最強1個残す）
-- 関西弁・方言語尾は絶対禁止（やな/やわ/やろ/やで/やん/ねん/やんか/やんな/わな/じゃな/じゃろ/っちゃ等）→ 標準語のみ使用
-- 【体言止め必須】各ワードは必ず名詞・名詞句で終わらせること。助詞（〜な/〜だ/〜わ/〜よ/〜ね）、助動詞（〜てる/〜てた/〜です/〜ます）、形容詞語尾（〜い）、動詞活用形（〜する/〜いる）で終わるワードは絶対禁止
-- 造語OK（ただし意味が通じること）
-- 放送禁止用語、差別用語、商標名（IP）を使用している場合は削除せよ。
-
-【ワード一覧】
-${wordList}
-
-【出力】合格ワードのみ、1行1個。元の表記そのまま出力。番号・説明不要:`;
-        try {
-          const result = await claudeGenerate(prompt, { maxOutputTokens: 8192 });
-          const text = result.text || "";
-          const passed = text.split("\n")
-            .map((l: string) => l.trim().replace(/^\d+[\.\)）、]\s*/, "").replace(/^[・●▸►\-]\s*/, "").replace(/^「/, "").replace(/」$/, "").trim())
-            .filter((l: string) => l.length > 0 && rawSet.has(l));
-          const passedSet = new Set(passed);
-          if (passedSet.size < words.length * 0.15) {
-            console.log(`[STEP2${label}] Pass rate too low (${passedSet.size}/${words.length}), keeping all`);
-            return words;
-          }
-          console.log(`[STEP2${label}] Filter: ${passedSet.size}/${words.length} passed`);
-          return words.filter(w => passedSet.has(w.word));
-        } catch (err) {
-          console.log(`[STEP2${label}] Filter error, keeping all:`, err);
-          return words;
-        }
-      };
-
-      const clusterBySharedWordAI = async (words: WordEntry[], label = ""): Promise<WordEntry[]> => {
-        if (words.length < 2) return words;
-        const rawSet = new Set(words.map(w => w.word));
-        const wordList = words.map(w => w.word).join("\n");
-        const prompt = `以下の悪口ワードリストを精査せよ。
-
-【作業手順】
-STEP1: 全ワードを読み、各ワードに含まれる「名詞・固有名詞」をリストアップせよ。
-STEP2: 同じ名詞（ひらがな・カタカナ・漢字問わず、読みが同じなら同一）が複数のワードに現れているグループを特定せよ。
-STEP3: 各グループの中で最も辛辣・強烈・パンチラインのワードを1個だけ選び、他を削除せよ。
-STEP4: 共通名詞グループに属さないワードは全て残せ。
-
-【共通単語の例】
-・「クソ顔」「汚い顔」「ブス顔」→「顔(かお)」共通 → 最強1個だけ残す
-・「カス野郎」「ゴミ野郎」「クズ野郎」→「野郎(やろう)」共通 → 最強1個だけ残す
-・「価値ゼロ」「価値なし」「存在価値ゼロ」→「価値(かち)」共通 → 最強1個だけ残す
-・「脳ミソ腐れ」「脳なし野郎」→「脳(のう)」共通 → 最強1個だけ残す
-・「ゴミ人間」「社会のゴミ」「生ゴミ」→「ゴミ(ごみ)」共通 → 最強1個だけ残す
-
-【厳守事項】
-・先頭・中間・末尾いずれの位置に名詞が現れても対象
-・共通名詞を持たないワードは削除禁止
-・出力は元の表記そのまま（変換・書き換え禁止）
-
-ワードリスト:
-${wordList}
-
-残すワードのみ出力（1行1個、元の表記そのまま、番号・説明一切不要）:`;
-        try {
-          const result = await claudeGenerate(prompt, { maxOutputTokens: 8192 });
-          const text = result?.text || "";
-          const kept = text.split("\n")
-            .map((l: string) => l.trim().replace(/^「/, "").replace(/」$/, "").replace(/^\d+[\.\)）、]\s*/, "").replace(/^[・●▸►\-]\s*/, "").trim())
-            .filter((l: string) => l.length > 0 && rawSet.has(l));
-          const keptSet = new Set(kept);
-          if (keptSet.size < words.length * 0.4) {
-            console.log(`[CLUSTER${label}] AI returned too few (${keptSet.size}/${words.length}), keeping all`);
-            return words;
-          }
-          console.log(`[CLUSTER${label}] ${keptSet.size}/${words.length} kept after shared-word dedup`);
-          return words.filter(w => keptSet.has(w.word));
-        } catch (err) {
-          console.log(`[CLUSTER${label}] AI failed, keeping all:`, err);
-          return words;
-        }
-      };
-
-      // ─── Phase 1: 大量生成 ───
       let rawPool: WordEntry[] = [];
-      let rawIter = 0;
-      while (rawPool.length < RAW_TARGET && rawIter < 5) {
-        rawIter++;
-        const needed = RAW_TARGET - rawPool.length;
-        const batchTarget = Math.ceil(needed * 1.3);
-        send("step1", `STEP1: [${rawIter}] ${batchTarget}個を生成中... (目標プール: ${rawPool.length}/${RAW_TARGET})`);
+      const batchSeen = new Set<string>();
+      const STEP1_PARALLEL = 6;
+      const totalBatches = Math.ceil(TARGET_COUNT / 50); // 6バッチ = 300個目標
 
-        const rawBatch = await runStep1Generation(batchTarget);
-        logTiming(`step1-raw-${rawIter}`);
+      for (let quad = 0; quad < Math.ceil(totalBatches / STEP1_PARALLEL); quad++) {
+        if (disconnected) break;
+        const baseIdx = quad * STEP1_PARALLEL;
+        const indices = Array.from({ length: STEP1_PARALLEL }, (_, k) => baseIdx + k).filter(i => i < totalBatches);
+        const currentUsedWords = [...accumulatedExclusions];
 
-        const poolSet = new Set(rawPool.map(w => w.word));
-        const endingMap = new Map<string, WordEntry>();
-        for (const w of rawPool) {
-          const base = getEndingBase(w.reading);
-          if (base && !endingMap.has(base)) endingMap.set(base, w);
+        send("step1", `STEP1: バッチ${baseIdx + 1}〜${baseIdx + indices.length}を並列生成中... (現在${rawPool.length}個)`);
+
+        const pairResults = await Promise.allSettled(
+          indices.map(i => aiGenerate(makePrompt(i, currentUsedWords), { ...geminiConfig, maxOutputTokens: 4096 }))
+        );
+
+        for (let r = 0; r < pairResults.length; r++) {
+          const result = pairResults[r];
+          if (result.status !== "fulfilled") continue;
+          const text = result.value.text || "";
+          const entries = parseWordEntries(text);
+          for (const e of entries) {
+            if (batchSeen.has(e.word)) continue;
+            if (ngWordList.length > 0 && ngWordList.some(ng => e.word.includes(ng) || e.reading.includes(ng))) continue;
+            const isHiragana = /^[ぁ-ゟー]+$/.test(e.reading);
+            const len = isHiragana ? e.reading.length : countMoraFromRomaji(e.romaji);
+            if (len < 3 || len > 10) continue;
+            if (!isHiragana) e.reading = e.word;
+            batchSeen.add(e.word);
+            rawPool.push(e);
+            accumulatedExclusions.add(e.word);
+          }
         }
-        let addedCount = 0;
-        for (const w of rawBatch) {
-          if (poolSet.has(w.word)) continue;
-          const base = getEndingBase(w.reading);
-          if (base && endingMap.has(base)) continue;
-          if (base) endingMap.set(base, w);
-          poolSet.add(w.word);
-          rawPool.push(w);
-          addedCount++;
-        }
-        rawPool = quickCharCheck(rawPool);
-        console.log(`[PHASE1:${rawIter}] raw=${rawBatch.length}, added=${addedCount}, pool=${rawPool.length}`);
-        send("step1", `STEP1: [${rawIter}] プール${rawPool.length}個 (目標${RAW_TARGET}個)`);
       }
-
+      rawPool = quickCharCheck(rawPool);
       logTiming("step1-generate");
-      send("step1", `STEP1完了: ${rawPool.length}個の候補ワードを収集`);
+      send("step1", `STEP1完了: Geminiが${rawPool.length}個のワードを生成`);
+      console.log(`[STEP1] Generated: ${rawPool.length} words`);
 
-      // ─── Phase 2: Step2品質フィルタ ───
-      send("step2", `STEP2: 品質フィルタリング中... (${rawPool.length}個を一括評価)`);
-      let qualityPool = await runStep2Filter(rawPool);
-      qualityPool = quickCharCheck(qualityPool);
-      logTiming("step2-filter");
-      send("step2", `STEP2完了: ${qualityPool.length}/${rawPool.length}個が合格`);
-
-      // ─── Phase 3: 共通単語クラスタリング ───
-      send("step2b", `STEP2b: 共通単語クラスタリング中... (${qualityPool.length}個を一括評価)`);
-      let clusteredPool = await clusterBySharedWordAI(qualityPool);
-      logTiming("step2b-cluster");
-      send("step2b", `STEP2b完了: ${clusteredPool.length}/${qualityPool.length}個残（${qualityPool.length - clusteredPool.length}個重複削除）`);
-
-      // ─── Phase 4: 補充ループ ───
-      let fillIter = 0;
-      while (clusteredPool.length < TARGET_COUNT && fillIter < 3) {
-        fillIter++;
-        const deficit = TARGET_COUNT - clusteredPool.length;
-        const extraRawTarget = Math.ceil(deficit * 2.5);
-        send("step1", `[補充${fillIter}] あと${deficit}個必要 → ${extraRawTarget}個を追加生成中...`);
-
-        const existingSet = new Set(clusteredPool.map(w => w.word));
-        const existingEndingMap = new Map<string, WordEntry>();
-        for (const w of clusteredPool) {
-          const base = getEndingBase(w.reading);
-          if (base && !existingEndingMap.has(base)) existingEndingMap.set(base, w);
-        }
-
-        const extraRaw = await runStep1Generation(extraRawTarget, [...dupTailWords]);
-        const extraNew: WordEntry[] = [];
-        for (const w of extraRaw) {
-          if (existingSet.has(w.word)) continue;
-          const base = getEndingBase(w.reading);
-          if (base && existingEndingMap.has(base)) continue;
-          if (base) existingEndingMap.set(base, w);
-          existingSet.add(w.word);
-          extraNew.push(w);
-        }
-        const extraChecked = quickCharCheck(extraNew);
-        if (extraChecked.length === 0) { send("step1", `[補充${fillIter}] 新規ワードなし、終了`); break; }
-
-        const extraFiltered = await runStep2Filter(extraChecked, `:fill${fillIter}`);
-        logTiming(`step2-fill-${fillIter}`);
-
-        const combined = [...clusteredPool, ...extraFiltered];
-        send("step2b", `[補充${fillIter}] 合計${combined.length}個を再クラスタリング中...`);
-        clusteredPool = await clusterBySharedWordAI(combined, `:fill${fillIter}`);
-        logTiming(`step2b-fill-${fillIter}`);
-        send("step1", `[補充${fillIter}完了] 合計${clusteredPool.length}個`);
+      // 300個に調整（多い場合はカット）
+      if (rawPool.length > TARGET_COUNT) {
+        rawPool = rawPool.slice(0, TARGET_COUNT);
       }
 
-      let finalQualityWords = clusteredPool;
-      if (finalQualityWords.length > TARGET_COUNT) {
-        finalQualityWords = finalQualityWords.slice(0, TARGET_COUNT);
-      }
-
-      // ─── STEP2c: ローマ字全数検証・修正 ───
-      send("step2c", `STEP2c: ローマ字全数検証中... (${finalQualityWords.length}個)`);
-      const ROMAJI_BATCH = 80;
-      const ROMAJI_PARALLEL = 8;
-      const correctedWords: WordEntry[] = [];
+      // ============================================================
+      // STEP2（Claude）: ローマ字変換 — 全子音に母音付与、ん=n は母音扱い
+      // ============================================================
+      send("step2", `STEP2: Claudeがローマ字変換中... (${rawPool.length}個)`);
+      const ROMAJI_BATCH = 60;
+      const ROMAJI_PARALLEL = 5;
+      const romajiConverted: WordEntry[] = [];
       const romajiBatches: WordEntry[][] = [];
-      for (let i = 0; i < finalQualityWords.length; i += ROMAJI_BATCH) {
-        romajiBatches.push(finalQualityWords.slice(i, i + ROMAJI_BATCH));
+      for (let i = 0; i < rawPool.length; i += ROMAJI_BATCH) {
+        romajiBatches.push(rawPool.slice(i, i + ROMAJI_BATCH));
       }
-      let romajiFixCount = 0;
+
       for (let r = 0; r < Math.ceil(romajiBatches.length / ROMAJI_PARALLEL); r++) {
         if (disconnected) break;
         const chunk = romajiBatches.slice(r * ROMAJI_PARALLEL, (r + 1) * ROMAJI_PARALLEL);
         const results = await Promise.all(chunk.map(async (batch) => {
-          const lines = batch.map((w, i) => `${i + 1}. ${w.word}/${w.reading}(${w.romaji})`).join("\n");
-          const prompt = `以下のワードのヘボン式ローマ字を検証し、誤りがあれば修正せよ。
+          const lines = batch.map((w, i) => `${i + 1}. ${w.word}/${w.reading}`).join("\n");
+          const prompt = `以下のワードをアルファベット（ローマ字）に変換せよ。
 
-【ルール】
-- 読みの各モーラを正確にヘボン式ローマ字で表す
-- 「ん」→n、「っ」→次子音重複(tt/kk/ss等)、「ー」→前母音重複(aa/oo等)
+【変換ルール（厳守）】
+- 「ん」→ n（nは母音扱いとする）
+- 「ん」以外の全ての子音には必ず母音(a,i,u,e,o)をつけること。母音のついていない子音は認めない
+- 「っ」→ 次の子音を重複させる（例：「かっこ」→ kakko）
+- 「ー」→ 前の母音を重複させる（例：「おー」→ oo）
 - 半角小文字英字のみ（ハイフン・スペース不可）
-- ん・っ以外の全モーラに母音(aeiou)が1つ対応すること
 
-ワード一覧（番号.ワード/よみ（現在のローマ字））:
-${lines}
+【出力形式】JSON配列のみ出力:
+[{"idx":1,"romaji":"変換結果"}]
 
-修正が必要なもののみJSON配列で出力。不要なら[]のみ:
-[{"idx":1,"romaji":"修正後ローマ字"}]
-番号は1始まり。`;
+ワード一覧:
+${lines}`;
           try {
-            const result = await claudeGenerate(prompt, { maxOutputTokens: 1024 });
+            const result = await claudeGenerate(prompt, { maxOutputTokens: 4096 });
             const text = result?.text || "";
             const jsonMatch = text.match(/\[[\s\S]*?\]/);
             if (!jsonMatch) return batch;
             type RC = { idx: number; romaji: string };
-            const corrections = JSON.parse(jsonMatch[0]) as RC[];
-            const corrBatch = [...batch];
-            for (const c of corrections) {
+            const conversions = JSON.parse(jsonMatch[0]) as RC[];
+            const convBatch = [...batch];
+            for (const c of conversions) {
               const idx = c.idx - 1;
-              if (idx >= 0 && idx < corrBatch.length && c.romaji) {
+              if (idx >= 0 && idx < convBatch.length && c.romaji) {
                 const newRomaji = c.romaji.toLowerCase().replace(/[^a-z]/g, "");
-                if (newRomaji && newRomaji !== corrBatch[idx].romaji) {
-                  console.log(`[STEP2c] "${corrBatch[idx].word}" ${corrBatch[idx].romaji}→${newRomaji}`);
-                  corrBatch[idx] = { ...corrBatch[idx], romaji: newRomaji };
-                  romajiFixCount++;
+                if (newRomaji) {
+                  convBatch[idx] = { ...convBatch[idx], romaji: newRomaji };
                 }
               }
             }
-            return corrBatch;
+            return convBatch;
           } catch { return batch; }
         }));
-        for (const batch of results) correctedWords.push(...batch);
-        send("step2c", `STEP2c: ${Math.min((r + 1) * ROMAJI_PARALLEL, romajiBatches.length)}/${romajiBatches.length}バッチ完了...`);
+        for (const batch of results) romajiConverted.push(...batch);
+        send("step2", `STEP2: ${Math.min((r + 1) * ROMAJI_PARALLEL, romajiBatches.length)}/${romajiBatches.length}バッチ完了...`);
       }
-      const verifiedWords = quickCharCheck(correctedWords);
-      const removedByVerify = correctedWords.length - verifiedWords.length;
-      send("step2c", `STEP2c完了: ${romajiFixCount}個修正, ${removedByVerify}個除外 → 残${verifiedWords.length}語`);
-      finalQualityWords = verifiedWords;
-      logTiming("step2c-romaji");
+      let finalWords = quickCharCheck(romajiConverted);
+      logTiming("step2-romaji");
+      send("step2", `STEP2完了: ローマ字変換 ${finalWords.length}語`);
 
-      // ─── STEP2d: 末尾名詞重複チェック（生成バッチ内） ───
-      send("step2d", `STEP2d: 生成ワードの末尾名詞重複チェック中... (${finalQualityWords.length}個)`);
-      {
-        const STEP2D_BATCH = 60;
-        const STEP2D_PARALLEL = 8;
-        type GenEnding = { word: string; endingReading: string };
-        const genEndings: GenEnding[] = [];
-        const step2dBatches: WordEntry[][] = [];
-        for (let i = 0; i < finalQualityWords.length; i += STEP2D_BATCH)
-          step2dBatches.push(finalQualityWords.slice(i, i + STEP2D_BATCH));
+      // ============================================================
+      // STEP3（Claude）: 末尾体言の重複チェック → 重複ゼロまで繰り返し
+      // ============================================================
+      send("step3", `STEP3: Claudeが末尾体言の重複チェック中...`);
+      let dedupIteration = 0;
+      const MAX_DEDUP_ITERATIONS = 5;
 
-        for (let b = 0; b < step2dBatches.length; b += STEP2D_PARALLEL) {
+      while (dedupIteration < MAX_DEDUP_ITERATIONS) {
+        dedupIteration++;
+        if (disconnected) break;
+        send("step3", `STEP3: 末尾体言重複チェック [ラウンド${dedupIteration}] (${finalWords.length}語)`);
+
+        // 3a: 全ワードの末尾体言を抽出
+        const ENDING_BATCH = 60;
+        type EndingInfo = { word: string; ending: string; endingReading: string };
+        const allEndings: EndingInfo[] = [];
+        const endingBatches: WordEntry[][] = [];
+        for (let i = 0; i < finalWords.length; i += ENDING_BATCH) {
+          endingBatches.push(finalWords.slice(i, i + ENDING_BATCH));
+        }
+
+        for (let b = 0; b < endingBatches.length; b += ROMAJI_PARALLEL) {
           if (disconnected) break;
-          const chunk = step2dBatches.slice(b, b + STEP2D_PARALLEL);
-          const step2dResults = await Promise.all(chunk.map(async (batch) => {
+          const chunk = endingBatches.slice(b, b + ROMAJI_PARALLEL);
+          const endingResults = await Promise.all(chunk.map(async (batch) => {
             const batchLines = batch.map(w => `${w.word}（${w.reading}）`).join("\n");
-            const step2dPrompt = `以下の悪口ワードについて、それぞれの「末尾の名詞部分」を特定せよ。
+            const prompt = `以下の悪口ワードの「末尾の体言（名詞部分）」を特定せよ。
 
-【1文字漢字の判定ルール（最重要）】
-末尾が漢字1文字の場合、その直前の文字を見る:
-  ▶ 直前が「ひらがな・カタカナ・記号・なし」→ その漢字単体を末尾名詞として返す
-  ▶ 直前が「漢字」→ その漢字は複合語の一部。複合語全体（連続する漢字部分）を末尾名詞として返す
-
-【具体例】
-★直前がひらがな → 漢字単体を返す:
-- 「だらし腹」→ 直前「し」(ひらがな) → t:"腹", tr:"はら"
-- 「醜い体」→ 直前「い」(ひらがな) → t:"体", tr:"からだ"
-- 「ブスな顔」→ 直前「な」(ひらがな) → t:"顔", tr:"かお"
-- 「ゴミの頭」→ 直前「の」(ひらがな) → t:"頭", tr:"あたま"
-
-★直前が漢字 → 複合語全体を返す:
-- 「肉体」→ 直前「肉」(漢字) → t:"肉体", tr:"にくたい"
-- 「障害者」→ 直前「害」(漢字) → t:"障害者", tr:"しょうがいしゃ"
-- 「問題児」→ 直前「題」(漢字) → t:"問題児", tr:"もんだいじ"
-- 「奇形児」→ 直前「形」(漢字) → t:"奇形児", tr:"きけいじ"
-- 「役立たず社員」→「員」の直前「社」(漢字) → t:"社員", tr:"しゃいん"
-- 「腐敗臭」→ 直前「敗」(漢字) → t:"腐敗臭", tr:"ふはいしゅう"
-- 「脂肪体」→ 直前「肪」(漢字) → t:"脂肪体", tr:"しぼうたい"
-
-★複数文字の末尾名詞（直前関係なく末尾の意味単位を返す）:
-- 「恥知らず」→ t:"知らず", tr:"しらず"
-- 「礼儀知らず」→ t:"知らず", tr:"しらず"
-- 「口の悪さ」→ t:"悪さ", tr:"わるさ"
-- 「友ゼロ人間」→ t:"人間", tr:"にんげん"
-- 「価値ゼロ人間」→ t:"人間", tr:"にんげん"
-- 「無能の王様」→ t:"王様", tr:"おうさま"
-
-【その他の原則】
-- 末尾が助詞（の・が・を・は・に・で）や動詞活用形（してる・になる等）の場合のみ t:"", tr:"" を返す
-- 全ワードについて必ず回答せよ（空欄・省略禁止）
+【判定ルール】
+- 末尾が漢字1文字で直前がひらがな → その漢字単体が末尾体言
+- 末尾が漢字で直前も漢字 → 連続する漢字の複合語全体が末尾体言
+- 末尾がカタカナ → カタカナ部分が末尾体言
+- 末尾がひらがな → 末尾の意味単位が末尾体言
 
 ワード一覧:
 ${batchLines}
 
-JSON配列で出力（全ワード分必須）:
-[{"w":"元のワード","t":"末尾名詞（表記）","tr":"読み（ひらがなのみ）"}]`;
+JSON配列で全ワード分出力:
+[{"w":"元のワード","t":"末尾体言（表記）","tr":"読み（ひらがなのみ）"}]`;
             try {
-              const step2dResult = await claudeGenerate(step2dPrompt, { maxOutputTokens: 4096 });
-              const step2dText = step2dResult?.text || "";
-              const step2dMatch = step2dText.match(/\[[\s\S]*?\]/);
-              if (!step2dMatch) return [] as GenEnding[];
+              const result = await claudeGenerate(prompt, { maxOutputTokens: 4096 });
+              const text = result?.text || "";
+              const jsonMatch = text.match(/\[[\s\S]*?\]/);
+              if (!jsonMatch) return [] as EndingInfo[];
               type EP = { w: string; t: string; tr: string };
-              const pairs = JSON.parse(step2dMatch[0]) as EP[];
-              const out: GenEnding[] = [];
+              const pairs = JSON.parse(jsonMatch[0]) as EP[];
+              const out: EndingInfo[] = [];
               for (const p of pairs) {
                 if (!batch.find(x => x.word === p.w)) continue;
                 const tr = (p.tr || "").trim();
-                if (tr.length >= 1) out.push({ word: p.w, endingReading: tr });
+                if (tr.length >= 1) out.push({ word: p.w, ending: p.t || "", endingReading: tr });
               }
               return out;
-            } catch { return [] as GenEnding[]; }
+            } catch { return [] as EndingInfo[]; }
           }));
-          for (const items of step2dResults) genEndings.push(...items);
+          for (const items of endingResults) allEndings.push(...items);
         }
 
-        const normalizeGenReading = (r: string): string =>
-          r.replace(/ー/g, "").replace(/[ぁぃぅぇぉっ]/g, (c: string) =>
+        // 3b: 末尾体言の読みでグループ化し、重複を検出
+        const endingGroups = new Map<string, EndingInfo[]>();
+        for (const e of allEndings) {
+          const norm = e.endingReading.replace(/ー/g, "").replace(/[ぁぃぅぇぉっ]/g, (c: string) =>
             ({ "ぁ": "あ", "ぃ": "い", "ぅ": "う", "ぇ": "え", "ぉ": "お", "っ": "つ" }[c] || c));
-        const genParticleSet = new Set(["の", "が", "を", "は", "に", "で", "と", "や", "も", "か", "ね", "よ", "な"]);
-        const genEndingGroups = new Map<string, string[]>();
-        for (const ge of genEndings) {
-          const norm = normalizeGenReading(ge.endingReading);
-          if (!norm || (norm.length === 1 && genParticleSet.has(norm))) continue;
-          const g = genEndingGroups.get(norm) || [];
-          g.push(ge.word);
-          genEndingGroups.set(norm, g);
+          if (!norm || norm.length === 0) continue;
+          const g = endingGroups.get(norm) || [];
+          g.push(e);
+          endingGroups.set(norm, g);
         }
 
-        const wordOrder = new Map<string, number>();
-        finalQualityWords.forEach((w, i) => wordOrder.set(w.word, i));
-        const genToRemove = new Set<string>();
-        let step2dDupCount = 0;
-        for (const [norm, group] of genEndingGroups) {
-          if (group.length > 1) {
-            const sorted = [...group].sort((a, b) => (wordOrder.get(a) ?? 9999) - (wordOrder.get(b) ?? 9999));
-            for (let i = 1; i < sorted.length; i++) {
-              genToRemove.add(sorted[i]);
-              step2dDupCount++;
+        // 重複しているグループを抽出
+        const duplicateGroups: Map<string, EndingInfo[]> = new Map();
+        for (const [norm, group] of endingGroups) {
+          if (group.length > 1) duplicateGroups.set(norm, group);
+        }
+
+        if (duplicateGroups.size === 0) {
+          send("step3", `STEP3: ラウンド${dedupIteration}で重複ゼロ達成！`);
+          console.log(`[STEP3] No duplicates found at iteration ${dedupIteration}`);
+          break;
+        }
+
+        console.log(`[STEP3] Iteration ${dedupIteration}: ${duplicateGroups.size} duplicate groups found`);
+
+        // 3c: 各重複グループで最強パンチラインを残し、他のワードの末尾体言を変更
+        const wordsToReplace: { word: string; reason: string }[] = [];
+        const wordsToKeep = new Set<string>();
+
+        for (const [norm, group] of duplicateGroups) {
+          // Claudeに最強のパンチラインを選ばせる
+          const candidates = group.map(e => e.word).join("\n");
+          try {
+            const result = await claudeGenerate(
+              `以下のワードは全て末尾体言「${norm}」が同じワードです。最も辛辣・強烈なパンチラインを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${candidates}`,
+              { maxOutputTokens: 64 }
+            );
+            const best = (result?.text || "").trim().replace(/^「/, "").replace(/」$/, "").trim();
+            const bestMatch = group.find(e => e.word === best);
+            if (bestMatch) {
+              wordsToKeep.add(bestMatch.word);
+              for (const e of group) {
+                if (e.word !== bestMatch.word) {
+                  wordsToReplace.push({ word: e.word, reason: `末尾体言「${norm}」が「${bestMatch.word}」と重複` });
+                }
+              }
+            } else {
+              // マッチしなかった場合、先頭を残す
+              wordsToKeep.add(group[0].word);
+              for (let i = 1; i < group.length; i++) {
+                wordsToReplace.push({ word: group[i].word, reason: `末尾体言「${norm}」重複` });
+              }
             }
-            send("step2d", `末尾「${norm}」重複${group.length}個 → 「${sorted[0]}」残し`);
+          } catch {
+            wordsToKeep.add(group[0].word);
+            for (let i = 1; i < group.length; i++) {
+              wordsToReplace.push({ word: group[i].word, reason: `末尾体言「${norm}」重複` });
+            }
           }
         }
-        const before2d = finalQualityWords.length;
-        finalQualityWords = finalQualityWords.filter(w => !genToRemove.has(w.word));
-        logTiming("step2d-dedup");
-        console.log(`[STEP2d] 末尾名詞重複: ${step2dDupCount}件削除 (${before2d}→${finalQualityWords.length}個), 重複グループ数: ${[...genEndingGroups.entries()].filter(([,g])=>g.length>1).length}`);
-        send("step2d", `STEP2d完了: 末尾名詞重複${step2dDupCount}件削除 (${before2d}→${finalQualityWords.length}個)`);
+
+        if (wordsToReplace.length === 0) break;
+
+        send("step3", `STEP3: [ラウンド${dedupIteration}] ${wordsToReplace.length}個の重複ワードの末尾体言を変更中...`);
+
+        // 3d: 重複ワードの末尾体言を別の言葉に置き換え
+        const replaceList = wordsToReplace.map(w => `${w.word}（理由: ${w.reason}）`).join("\n");
+        const existingEndings = [...endingGroups.keys()].join("、");
+        try {
+          const replaceResult = await claudeGenerate(`以下のワードは末尾の体言が他のワードと重複しています。重複している箇所の体言を、まだ使われていない別の体言に置き換えよ。
+
+【置き換えルール】
+- ワードの意味・辛辣さ・リズムを維持しつつ、末尾の体言だけを変更する
+- 既に使用されている末尾体言: ${existingEndings}
+- 上記の体言は使用禁止。全く別の体言に置き換えよ
+- 6つのルールを守ること（小学生でもわかる言葉、体言止め、商標禁止、リズム重視、一度使った単語禁止、ターゲット特化）
+
+置き換えが必要なワード:
+${replaceList}
+
+JSON配列で出力:
+[{"original":"元のワード","replaced":"置き換え後のワード","reading":"読み（ひらがな）"}]`, { maxOutputTokens: 8192 });
+
+          const replaceText = replaceResult?.text || "";
+          const replaceMatch = replaceText.match(/\[[\s\S]*?\]/);
+          if (replaceMatch) {
+            type ReplaceEntry = { original: string; replaced: string; reading: string };
+            const replacements = JSON.parse(replaceMatch[0]) as ReplaceEntry[];
+            const replaceMap = new Map<string, { replaced: string; reading: string }>();
+            for (const r of replacements) {
+              if (r.original && r.replaced && r.reading) {
+                replaceMap.set(r.original, { replaced: r.replaced, reading: r.reading });
+              }
+            }
+
+            finalWords = finalWords.map(w => {
+              const rep = replaceMap.get(w.word);
+              if (rep) {
+                console.log(`[STEP3] Replace: "${w.word}" → "${rep.replaced}"`);
+                return { ...w, word: rep.replaced, reading: rep.reading, romaji: hiraganaToRomaji(rep.reading) };
+              }
+              return w;
+            });
+            finalWords = quickCharCheck(finalWords);
+          }
+        } catch (err) {
+          console.log(`[STEP3] Replace error, removing duplicates instead:`, err);
+          const removeSet = new Set(wordsToReplace.map(w => w.word));
+          finalWords = finalWords.filter(w => !removeSet.has(w.word));
+        }
+
+        send("step3", `STEP3: [ラウンド${dedupIteration}] 処理完了 → 残${finalWords.length}語`);
+      }
+      logTiming("step3-dedup");
+      send("step3", `STEP3完了: 末尾体言重複解消 (${dedupIteration}ラウンド) → ${finalWords.length}語`);
+
+      // ============================================================
+      // STEP4（Claude）: 6つのルール全チェック → 違反箇所を修正
+      // ============================================================
+      send("step4", `STEP4: Claudeが6つのルール全チェック中... (${finalWords.length}語)`);
+      const RULE_BATCH = 100;
+      const ruleCheckedWords: WordEntry[] = [];
+      const ruleBatches: WordEntry[][] = [];
+      for (let i = 0; i < finalWords.length; i += RULE_BATCH) {
+        ruleBatches.push(finalWords.slice(i, i + RULE_BATCH));
       }
 
-      console.log(`[GEN] Final count before grouping: ${finalQualityWords.length}`);
-      send("step3", `STEP3: 母音パターンでグルーピング中...`);
+      for (let b = 0; b < ruleBatches.length; b++) {
+        if (disconnected) break;
+        const batch = ruleBatches[b];
+        const wordList = batch.map((w, i) => `${i + 1}. ${w.word}（${w.reading}）`).join("\n");
+        const prompt = `以下の${batch.length}個のワードが、6つのルールを全て守っているか確認せよ。
+違反しているワードは問題箇所を他の言葉に置き換えよ。
 
+【6つのルール】
+1. 小学生でもわかる言葉のみを使う（漢語・専門用語・難読語は禁止）
+2. ターゲット「${targetName}」の特徴から、悪口・指摘・挑発になる言葉であること
+3. 言葉は必ず「体言止め」にすること（名詞・名詞句で終わる）
+4. 商標権のある名前、有名人の名前などは使用しないこと
+5. 言葉のリズムが良いこと（声に出したとき語呂が良い）
+6. 一度使われた単語は使用しないこと（リスト内で重複禁止）
+
+【追加禁止事項】
+- 関西弁・方言禁止（標準語のみ）
+- 放送禁止用語・差別用語禁止
+- ひらがな換算4文字〜10文字
+
+ワード一覧:
+${wordList}
+
+全ワードについて結果をJSON配列で出力:
+[{"idx":1,"word":"ワード（修正した場合は修正後）","reading":"読み（ひらがな）","fixed":true/false}]
+※violationがない場合はfixed:false、修正した場合はfixed:trueにすること`;
+
+        try {
+          const result = await claudeGenerate(prompt, { maxOutputTokens: 8192 });
+          const text = result?.text || "";
+          const jsonMatch = text.match(/\[[\s\S]*?\]/);
+          if (jsonMatch) {
+            type RuleResult = { idx: number; word: string; reading: string; fixed: boolean };
+            const ruleResults = JSON.parse(jsonMatch[0]) as RuleResult[];
+            for (const rr of ruleResults) {
+              const idx = rr.idx - 1;
+              if (idx >= 0 && idx < batch.length) {
+                if (rr.fixed && rr.word && rr.reading) {
+                  console.log(`[STEP4] Fixed: "${batch[idx].word}" → "${rr.word}"`);
+                  ruleCheckedWords.push({
+                    ...batch[idx],
+                    word: rr.word,
+                    reading: rr.reading,
+                    romaji: hiraganaToRomaji(rr.reading),
+                  });
+                } else {
+                  ruleCheckedWords.push(batch[idx]);
+                }
+              }
+            }
+            // AIが返さなかった分はそのまま追加
+            if (ruleResults.length < batch.length) {
+              const returnedIndices = new Set(ruleResults.map(rr => rr.idx - 1));
+              for (let i = 0; i < batch.length; i++) {
+                if (!returnedIndices.has(i)) ruleCheckedWords.push(batch[i]);
+              }
+            }
+          } else {
+            ruleCheckedWords.push(...batch);
+          }
+        } catch {
+          ruleCheckedWords.push(...batch);
+        }
+        send("step4", `STEP4: ${b + 1}/${ruleBatches.length}バッチ完了...`);
+      }
+      finalWords = quickCharCheck(ruleCheckedWords);
+      logTiming("step4-rules");
+      send("step4", `STEP4完了: ルールチェック → ${finalWords.length}語`);
+
+      // ============================================================
+      // STEP5（Claude）: 各ワードの末尾体言をタグ付け + 母音グループ化
+      // ============================================================
+      send("step5", `STEP5: Claudeが末尾体言タグ付け + 母音グルーピング中...`);
+
+      // 最終的な末尾体言抽出（STEP3と同じロジック）
+      const FINAL_BATCH = 60;
+      type FinalEnding = { word: string; ending: string; endingReading: string };
+      const finalEndings: FinalEnding[] = [];
+      const finalBatches: WordEntry[][] = [];
+      for (let i = 0; i < finalWords.length; i += FINAL_BATCH) {
+        finalBatches.push(finalWords.slice(i, i + FINAL_BATCH));
+      }
+
+      for (let b = 0; b < finalBatches.length; b += ROMAJI_PARALLEL) {
+        if (disconnected) break;
+        const chunk = finalBatches.slice(b, b + ROMAJI_PARALLEL);
+        const endingResults = await Promise.all(chunk.map(async (batch) => {
+          const batchLines = batch.map(w => `${w.word}（${w.reading}）`).join("\n");
+          const prompt = `以下のワードの末尾体言を特定せよ。
+
+ワード一覧:
+${batchLines}
+
+JSON配列で出力:
+[{"w":"元のワード","t":"末尾体言（表記）","tr":"読み（ひらがなのみ）"}]`;
+          try {
+            const result = await claudeGenerate(prompt, { maxOutputTokens: 4096 });
+            const text = result?.text || "";
+            const jsonMatch = text.match(/\[[\s\S]*?\]/);
+            if (!jsonMatch) return [] as FinalEnding[];
+            type EP = { w: string; t: string; tr: string };
+            const pairs = JSON.parse(jsonMatch[0]) as EP[];
+            const out: FinalEnding[] = [];
+            for (const p of pairs) {
+              if (!batch.find(x => x.word === p.w)) continue;
+              out.push({ word: p.w, ending: p.t || "", endingReading: (p.tr || "").trim() });
+            }
+            return out;
+          } catch { return [] as FinalEnding[]; }
+        }));
+        for (const items of endingResults) finalEndings.push(...items);
+      }
+
+      // 母音パターンでグループ化
       const groups: Record<string, WordEntry[]> = {};
       for (const suffix of ALLOWED_VOWEL_SUFFIXES) groups[suffix] = [];
       const ungrouped: WordEntry[] = [];
 
-      for (const w of finalQualityWords) {
+      // 末尾体言情報をワードに付加
+      const endingMap = new Map<string, FinalEnding>();
+      for (const e of finalEndings) endingMap.set(e.word, e);
+
+      for (const w of finalWords) {
         const vowels = extractTaigenVowels(w.word, w.reading, w.romaji);
         const suffix = vowels.length >= 2 ? vowels.slice(-2) : "";
         if (suffix && ALLOWED_VOWEL_SUFFIXES.includes(suffix)) {
@@ -674,10 +616,10 @@ JSON配列で出力（全ワード分必須）:
 
       const patternSummary = ALLOWED_VOWEL_SUFFIXES.map(p => `${p}:${groups[p].length}`).join(", ");
       const totalGrouped = ALLOWED_VOWEL_SUFFIXES.reduce((sum, p) => sum + groups[p].length, 0);
-      console.log(`[STEP3] Grouped: ${totalGrouped} (${patternSummary}), ungrouped: ${ungrouped.length}`);
-      logTiming("step3-group");
+      console.log(`[STEP5] Grouped: ${totalGrouped} (${patternSummary}), ungrouped: ${ungrouped.length}`);
+      logTiming("step5-group");
 
-      send("step3", `STEP3完了: ${totalGrouped}個をグループ化 (${patternSummary})`);
+      send("step5", `STEP5完了: ${totalGrouped}個をグループ化 (${patternSummary})`);
 
       if (heartbeat) clearInterval(heartbeat);
       logTiming("total");
