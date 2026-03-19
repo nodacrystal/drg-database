@@ -612,85 +612,96 @@ export default function Home() {
 
     const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
     let emptyStreak = 0;
-    let cycleCounter = 0;
+    let totalCycles = 0;
 
     try {
       while (autoModeRef.current) {
-        // === (1) ターゲット生成 ===
-        setActiveTab("gen");
-        setGenResult(null);
-        setCheckedWords(new Set());
-        setProgressLogs([]);
-        setGenStatus("idle");
-        setTimerSeconds(0);
-        setIsGenerating(false);
-        if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-        await delay(500);
+        // === 3回の生成サイクル ===
+        for (let genRound = 1; genRound <= 3; genRound++) {
+          if (!autoModeRef.current) break;
 
-        const targetRes = await (await fetch("/api/target")).json();
-        setTarget(targetRes.target);
-        toast({ title: "(1) ターゲット生成", description: `${targetRes.target.name || targetRes.target}` });
-        await delay(1000);
-        if (!autoModeRef.current) break;
+          // --- (1) ターゲット生成 ---
+          setActiveTab("gen");
+          setGenResult(null);
+          setCheckedWords(new Set());
+          setProgressLogs([]);
+          setGenStatus("idle");
+          setTimerSeconds(0);
+          setIsGenerating(false);
+          if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+          await delay(500);
 
-        // === (2) レベル1〜5ランダム ===
-        const randomLvl = 1 + Math.floor(Math.random() * 5);
-        setLevel(randomLvl);
-        setAgeConfirmed(true);
-        toast({ title: "(2) レベル設定", description: `Lv.${randomLvl} ${LEVEL_INFO[randomLvl].label}` });
-        await delay(500);
-        if (!autoModeRef.current) break;
+          const targetRes = await (await fetch("/api/target")).json();
+          setTarget(targetRes.target);
+          toast({ title: `[${genRound}/3] (1) ターゲット生成`, description: `${targetRes.target.name || targetRes.target}` });
+          await delay(1000);
+          if (!autoModeRef.current) break;
 
-        // === (3) 生成（完了まで待機）===
-        toast({ title: "(3) 生成開始", description: `Lv.${randomLvl} で生成中...` });
-        if (!generateDissSSERef.current) break;
-        const result = await generateDissSSERef.current(targetRes.target, randomLvl);
-        if (!autoModeRef.current) break;
+          // --- (2) レベル1〜5ランダム ---
+          const randomLvl = 1 + Math.floor(Math.random() * 5);
+          setLevel(randomLvl);
+          setAgeConfirmed(true);
+          toast({ title: `[${genRound}/3] (2) レベル設定`, description: `Lv.${randomLvl} ${LEVEL_INFO[randomLvl].label}` });
+          await delay(500);
+          if (!autoModeRef.current) break;
 
-        if (!result || result.total === 0) {
-          emptyStreak++;
-          if (emptyStreak >= 3) {
-            toast({ title: "オートモード停止", description: "3回連続で生成結果が空のため停止しました", variant: "destructive" });
-            break;
+          // --- (3) 生成（完了まで待機）---
+          toast({ title: `[${genRound}/3] (3) 生成開始`, description: `Lv.${randomLvl} で生成中...` });
+          if (!generateDissSSERef.current) break;
+          const result = await generateDissSSERef.current(targetRes.target, randomLvl);
+          if (!autoModeRef.current) break;
+
+          if (!result || result.total === 0) {
+            emptyStreak++;
+            if (emptyStreak >= 3) {
+              toast({ title: "オートモード停止", description: "3回連続で生成結果が空のため停止しました", variant: "destructive" });
+              autoModeRef.current = false;
+              break;
+            }
+            toast({ title: "生成結果なし", description: `ワードが0個（${emptyStreak}/3）。10秒後にリトライ...`, variant: "destructive" });
+            await delay(10000);
+            continue;
           }
-          toast({ title: "生成結果なし", description: `ワードが0個（${emptyStreak}/3）。10秒後にリトライ...`, variant: "destructive" });
-          await delay(10000);
-          continue;
-        }
-        emptyStreak = 0;
+          emptyStreak = 0;
 
-        // === (4) データベースへ送信 ===
-        const allWords = getWordsFromResult(result);
-        let addTotal = 0;
-        try {
-          if (!addWordsDirectRef.current) break;
-          const addResult = await addWordsDirectRef.current(allWords);
-          addTotal = addResult.total;
-          toast({ title: "(4) DB送信完了", description: `${addResult.added}個追加（合計 ${addResult.total}個）` });
-        } catch (err) {
-          toast({ title: "(4) DB送信エラー", description: err instanceof Error ? err.message : "追加に失敗", variant: "destructive" });
+          // --- (4) データベースへ送信 ---
+          const allWords = getWordsFromResult(result);
+          try {
+            if (!addWordsDirectRef.current) break;
+            const addResult = await addWordsDirectRef.current(allWords);
+            toast({ title: `[${genRound}/3] (4) DB送信完了`, description: `${addResult.added}個追加（合計 ${addResult.total}個）` });
+          } catch (err) {
+            toast({ title: `[${genRound}/3] (4) DB送信エラー`, description: err instanceof Error ? err.message : "追加に失敗", variant: "destructive" });
+          }
+          await delay(1000);
+          if (!autoModeRef.current) break;
+
+          totalCycles++;
+          setAutoModeCount(totalCycles);
         }
-        await delay(1000);
+
         if (!autoModeRef.current) break;
 
-        // === (4b) 1万語超えたら全て整理して中断 ===
-        if (addTotal >= 10000) {
-          toast({ title: "🎯 1万語達成！", description: "全て整理を開始します。オートモードを停止します。" });
-          autoModeRef.current = false;
-          setActiveTab("fav");
-          await delay(1500);
-          if (runCleanupSSERef.current) {
+        // === 3回完了 → 全て整理 ===
+        toast({ title: "整理開始", description: `${totalCycles}回生成完了。データベースの「全て整理」を実行中...` });
+        setActiveTab("fav");
+        await delay(1500);
+
+        if (runCleanupSSERef.current) {
+          try {
             await runCleanupSSERef.current("/api/favorites/cleanup", "全て整理");
+            toast({ title: "整理完了", description: "全て整理が完了しました。次の生成サイクルに移ります。" });
+          } catch (err) {
+            toast({ title: "整理エラー", description: err instanceof Error ? err.message : "整理に失敗", variant: "destructive" });
           }
-          break;
         }
-
-        // === (5) カウンター+1 → そのまま次のサイクルへ ===
-        cycleCounter++;
-        setAutoModeCount(prev => prev + 1);
-        toast({ title: `サイクル${cycleCounter}完了`, description: `残り${10000 - addTotal}語で1万語達成` });
-        await delay(1000);
+        await delay(2000);
         if (!autoModeRef.current) break;
+
+        // 次の3回サイクルへ
+        toast({ title: "次のサイクルへ", description: `合計${totalCycles}回完了。次の3回生成を開始します...` });
+        setActiveTab("gen");
+        await delay(1000);
       }
     } catch (err) {
       console.error("Auto mode error:", err);
