@@ -1618,29 +1618,22 @@ ${wordList}
           if (converted !== newReading) { newReading = converted; changed = true; }
         }
 
-        // romajiに重複部分がある（ワード+読みが連結されている）
-        if (newRomaji.length > 15) {
-          const half = Math.floor(newRomaji.length / 2);
-          for (let checkLen = Math.min(half, 8); checkLen >= 4; checkLen--) {
-            const prefix = newRomaji.slice(0, checkLen);
-            const secondHalf = newRomaji.slice(half - 2);
-            if (secondHalf.includes(prefix)) {
-              // 後半部分を特定して使用
-              const idx = newRomaji.indexOf(prefix, checkLen);
-              if (idx > 0) {
-                newRomaji = newRomaji.slice(idx);
-                changed = true;
-                break;
-              }
-            }
-          }
+        // readingが正しいひらがなになった場合、romajiをreadingから再生成
+        if (changed && /^[ぁ-ゟー]+$/.test(newReading)) {
+          newRomaji = hiraganaToRomaji(newReading);
         }
 
         if (changed) {
-          const newVowels = extractTaigenVowels(newWord, newReading, newRomaji);
-          await updateWord(w.id, { word: newWord, reading: newReading, romaji: newRomaji, vowels: newVowels, charCount: countMoraVowels(newReading) });
-          phase0Fixed++;
-          send("fix", `修正: "${w.word}" → word="${newWord}" reading="${newReading}" romaji="${newRomaji}"`);
+          try {
+            const newVowels = extractTaigenVowels(newWord, newReading, newRomaji);
+            await updateWord(w.id, { word: newWord, reading: newReading, romaji: newRomaji, vowels: newVowels, charCount: countMoraVowels(newReading) });
+            phase0Fixed++;
+            if (phase0Fixed <= 20 || phase0Fixed % 50 === 0) {
+              send("fix", `修正(${phase0Fixed}): "${w.word}" → reading="${newReading}" romaji="${newRomaji}"`);
+            }
+          } catch (err) {
+            console.log(`[PHASE0] Error updating id:${w.id} word:${w.word}:`, err);
+          }
         }
       }
       send("fix", `PHASE0完了: ${phase0Fixed}語を修正`);
