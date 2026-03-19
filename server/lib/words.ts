@@ -245,31 +245,67 @@ export function parseWordEntries(section: string): WordEntry[] {
 
     let match: RegExpMatchArray | null;
 
+    // パターン1: ワード/ひらがな読み(romaji) — 最も正確な形式
     match = cleaned.match(/^(.+?)\s*[\/／]\s*([ぁ-ゟー]+)\s*[\(（]\s*([a-zA-Z\s\-']+)\s*[\)）]/);
     if (match) {
       entries.push({ word: match[1].trim(), reading: match[2].trim(), romaji: match[3].trim().toLowerCase().replace(/\s+/g, "") });
       continue;
     }
 
+    // パターン2: ワード/カタカナ混じり読み(romaji) — カタカナ含む読みを分割
+    match = cleaned.match(/^(.+?)\s*[\/／]\s*([^(（]+)\s*[\(（]\s*([a-zA-Z\s\-']+)\s*[\)）]/);
+    if (match) {
+      const word = match[1].trim();
+      let reading = match[2].trim();
+      const romaji = match[3].trim().toLowerCase().replace(/\s+/g, "");
+      // 読みにスラッシュが含まれている場合は後半のみ取得
+      if (reading.includes("/") || reading.includes("／")) {
+        reading = reading.split(/[\/／]/).pop()!.trim();
+      }
+      // カタカナをひらがなに変換
+      reading = reading.replace(/[ァ-ヶ]/g, (c: string) => String.fromCharCode(c.charCodeAt(0) - 0x60));
+      // ひらがな以外の文字が残っている場合はreadingをwordと同じにする
+      if (!/^[ぁ-ゟー]+$/.test(reading)) {
+        reading = word;
+      }
+      entries.push({ word, reading, romaji });
+      continue;
+    }
+
+    // パターン3: ひらがなのみ(romaji)
     match = cleaned.match(/^([ぁ-ゟー]{3,})\s*[\(（]\s*([a-zA-Z\s\-']+)\s*[\)）]/);
     if (match) {
       entries.push({ word: match[1].trim(), reading: match[1].trim(), romaji: match[2].trim().toLowerCase().replace(/\s+/g, "") });
       continue;
     }
 
+    // パターン4: ワード(romaji) — 読みなし、wordをreadingとする
     match = cleaned.match(/^(.+?)\s*[\(（]\s*([a-zA-Z\s\-']+)\s*[\)）]/);
     if (match && match[1].length >= 3) {
       const word = match[1].trim();
-      entries.push({ word, reading: word, romaji: match[2].trim().toLowerCase().replace(/\s+/g, "") });
+      // wordにスラッシュがある場合、前半がword、後半がreading
+      if (word.includes("/") || word.includes("／")) {
+        const parts = word.split(/[\/／]/);
+        const w = parts[0].trim();
+        let r = parts[1].trim();
+        // カタカナをひらがなに変換
+        r = r.replace(/[ァ-ヶ]/g, (c: string) => String.fromCharCode(c.charCodeAt(0) - 0x60));
+        if (!/^[ぁ-ゟー]+$/.test(r)) r = w;
+        entries.push({ word: w, reading: r, romaji: match[2].trim().toLowerCase().replace(/\s+/g, "") });
+      } else {
+        entries.push({ word, reading: word, romaji: match[2].trim().toLowerCase().replace(/\s+/g, "") });
+      }
       continue;
     }
 
+    // パターン5: ひらがな/romaji
     match = cleaned.match(/^([ぁ-ゟー]{3,})\s*[\/／]\s*([a-zA-Z\s\-']+)$/);
     if (match) {
       entries.push({ word: match[1].trim(), reading: match[1].trim(), romaji: match[2].trim().toLowerCase().replace(/\s+/g, "") });
       continue;
     }
 
+    // パターン6: ワード/romaji
     match = cleaned.match(/^(.+?)\s*[\/／]\s*([a-zA-Z\s\-']+)$/);
     if (match && match[1].length >= 3) {
       const word = match[1].trim();

@@ -231,6 +231,25 @@ ${angle}
             const text = result.value.text || "";
             const entries = parseWordEntries(text);
             for (const e of entries) {
+              // readingにスラッシュが混入している場合を修正
+              if (e.reading.includes("/") || e.reading.includes("／")) {
+                const parts = e.reading.split(/[\/／]/);
+                e.word = parts[0].trim();
+                e.reading = parts[parts.length - 1].trim();
+                // カタカナをひらがなに変換
+                e.reading = e.reading.replace(/[ァ-ヶ]/g, (c: string) => String.fromCharCode(c.charCodeAt(0) - 0x60));
+              }
+              // wordにスラッシュが混入している場合も修正
+              if (e.word.includes("/") || e.word.includes("／")) {
+                const parts = e.word.split(/[\/／]/);
+                e.word = parts[0].trim();
+                if (!/^[ぁ-ゟー]+$/.test(e.reading)) {
+                  let r = parts[parts.length - 1].trim();
+                  r = r.replace(/[ァ-ヶ]/g, (c: string) => String.fromCharCode(c.charCodeAt(0) - 0x60));
+                  if (/^[ぁ-ゟー]+$/.test(r)) e.reading = r;
+                }
+              }
+
               if (globalBatchSeen.has(e.word)) continue;
               if (ngWordList.length > 0 && ngWordList.some(ng => e.word.includes(ng) || e.reading.includes(ng))) continue;
               const isHiragana = /^[ぁ-ゟー]+$/.test(e.reading);
@@ -1148,7 +1167,35 @@ JSON配列で出力:
       if (!parsed.success) return res.status(400).json({ error: "不正なデータです" });
       const ngList = await getNgWordStrings();
       const ngFiltered = parsed.data.words.filter(w => !ngList.some(ng => w.word.endsWith(ng)));
-      const filtered = quickCharCheck(ngFiltered);
+      // readingの検証・修正: スラッシュ混入やひらがな以外を修正
+      const sanitized = ngFiltered.map(w => {
+        let reading = w.reading;
+        let word = w.word;
+        let romaji = w.romaji;
+        // readingにスラッシュが含まれる場合（パースバグ）→ 後半部分のみ使用
+        if (reading.includes("/") || reading.includes("／")) {
+          const parts = reading.split(/[\/／]/);
+          word = parts[0].trim(); // 前半がワード表記
+          reading = parts[parts.length - 1].trim();
+        }
+        // カタカナをひらがなに変換
+        reading = reading.replace(/[ァ-ヶ]/g, (c: string) => String.fromCharCode(c.charCodeAt(0) - 0x60));
+        // ひらがな以外が残っていたらromajiから推定（readingはwordのまま）
+        if (!/^[ぁ-ゟー]+$/.test(reading)) {
+          reading = word; // フォールバック
+        }
+        // romajiにワード部分が重複している場合は修正
+        if (romaji.length > 20) {
+          const half = Math.floor(romaji.length / 2);
+          const first = romaji.slice(0, half);
+          const second = romaji.slice(half);
+          if (first.length >= 4 && second.startsWith(first.slice(0, 4))) {
+            romaji = second; // 後半だけ使用
+          }
+        }
+        return { ...w, word, reading, romaji };
+      });
+      const filtered = quickCharCheck(sanitized);
       const added = await addWords(filtered.map(w => ({
         word: w.word,
         reading: w.reading,
