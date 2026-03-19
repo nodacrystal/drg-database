@@ -227,9 +227,40 @@ ${angle}
               const len = isHiragana ? e.reading.length : countMoraFromRomaji(e.romaji);
               if (len < 3 || len > 10) continue;
               if (!isHiragana) e.reading = e.word;
+
+              // 体言止め違反を即排除（〜い、〜ない、〜しない、〜される、〜な で終わる）
+              const r = e.reading;
+              if (r.endsWith("い") || r.endsWith("ない") || r.endsWith("しない") ||
+                  r.endsWith("される") || r.endsWith("されない") || r.endsWith("できない") ||
+                  r.endsWith("とる") || r.endsWith("てる") || r.endsWith("する") ||
+                  e.word.endsWith("な")) continue;
+
+              // 末尾単語（漢字/カタカナ末尾部分）の重複を即排除
+              const endingMatch = e.word.match(/[一-龯々ァ-ヶー]+$/);
+              if (endingMatch) {
+                const ending = endingMatch[0];
+                if (usedEndings.has(ending)) continue; // 既に使用済みの末尾単語
+              }
+
+              // 修飾部（前半部分）の重複を即排除（読みの前半4文字以上が一致）
+              if (r.length >= 6) {
+                const prefix4 = r.slice(0, 4);
+                let prefixDup = false;
+                for (const existing of words) {
+                  if (existing.reading.startsWith(prefix4) && existing.reading.length >= 6) {
+                    prefixDup = true;
+                    break;
+                  }
+                }
+                if (prefixDup) continue;
+              }
+
               globalBatchSeen.add(e.word);
               words.push(e);
               accumulatedExclusions.add(e.word);
+
+              // 末尾単語を登録
+              if (endingMatch) usedEndings.add(endingMatch[0]);
             }
           }
         }
@@ -335,7 +366,58 @@ ${lines}
         }
         words = quickCharCheck(furiOut);
 
-        // --- 末尾体言・末尾単語・修飾部の重複チェック → 重複箇所を置き換え ---
+        // --- プログラム的な体言止め違反の即排除 ---
+        const beforeTaigen = words.length;
+        words = words.filter(w => {
+          const r = w.reading;
+          // 〜い、〜ない、〜しない、〜てる、〜する、〜とる で終わるワードは体言止め違反
+          if (r.endsWith("い") && !r.endsWith("あい") && !r.endsWith("かい") && !r.endsWith("がい")) return false;
+          if (r.endsWith("ない") && !w.word.endsWith("ない")) return false; // 「〜ない」名詞は除く
+          if (r.endsWith("しない") || r.endsWith("できない") || r.endsWith("されない")) return false;
+          if (r.endsWith("てる") || r.endsWith("する") || r.endsWith("とる")) return false;
+          if (w.word.endsWith("な") && !w.word.endsWith("だな") && w.word.length > 2) return false;
+          return true;
+        });
+        console.log(`[REVIEW] Taigen filter: ${beforeTaigen} → ${words.length} (${beforeTaigen - words.length} removed)`);
+
+        // --- プログラム的な末尾単語の一意性チェック（漢字/カタカナ末尾） ---
+        const endingSeenInBatch = new Map<string, string>(); // ending → first word
+        const beforeEndingDedup = words.length;
+        words = words.filter(w => {
+          const m = w.word.match(/[一-龯々ァ-ヶー]+$/);
+          if (!m) return true;
+          const ending = m[0];
+          if (ending.length < 1) return true;
+          // usedEndingsにも登録済みならスキップ
+          if (usedEndings.has(ending)) {
+            console.log(`[REVIEW] Ending dup (global): "${w.word}" ending="${ending}"`);
+            return false;
+          }
+          if (endingSeenInBatch.has(ending)) {
+            console.log(`[REVIEW] Ending dup (batch): "${w.word}" ending="${ending}" dup of "${endingSeenInBatch.get(ending)}"`);
+            return false;
+          }
+          endingSeenInBatch.set(ending, w.word);
+          return true;
+        });
+        console.log(`[REVIEW] Ending dedup: ${beforeEndingDedup} → ${words.length} (${beforeEndingDedup - words.length} removed)`);
+
+        // --- 修飾部（前半4文字以上）の一意性チェック ---
+        const prefixSeenInBatch = new Map<string, string>();
+        const beforePrefixDedup = words.length;
+        words = words.filter(w => {
+          if (w.reading.length < 6) return true;
+          const prefix = w.reading.slice(0, 4);
+          if (prefixSeenInBatch.has(prefix)) {
+            console.log(`[REVIEW] Prefix dup: "${w.word}" prefix="${prefix}" dup of "${prefixSeenInBatch.get(prefix)}"`);
+            return false;
+          }
+          prefixSeenInBatch.set(prefix, w.word);
+          return true;
+        });
+        console.log(`[REVIEW] Prefix dedup: ${beforePrefixDedup} → ${words.length} (${beforePrefixDedup - words.length} removed)`);
+
+        // --- 末尾体言・末尾単語・修飾部の重複チェック（AI補完） → 残りの重複箇所を置き換え ---
         const END_BATCH = 80;
         const END_PARALLEL = 5;
         type PartInfo = { word: string; ending: string; endingReading: string; modifier: string; modifierReading: string; lastChar: string; lastCharReading: string };
@@ -1927,6 +2009,65 @@ JSON配列で出力（全ワード分必須）:
       }
       send("check3", `ローマ字一致: ${romajiDupCount}件`);
 
+      // --- check3b: プログラム的な末尾単語（漢字/カタカナ末尾）重複 ---
+      send("check3b", "末尾単語（漢字/カタカナ）重複を検出中...");
+      const endingSeen = new Map<string, { id: number; word: string }>();
+      let endingDupCount = 0;
+      for (const w of allWords) {
+        if (toDelete.has(w.id)) continue;
+        const m = w.word.match(/[一-龯々ァ-ヶー]+$/);
+        if (!m || m[0].length < 1) continue;
+        const ending = m[0];
+        const existing = endingSeen.get(ending);
+        if (existing) {
+          toDelete.add(w.id);
+          endingDupCount++;
+          send("check3b", `末尾「${ending}」重複: "${w.word}" → "${existing.word}"残し`);
+        } else {
+          endingSeen.set(ending, { id: w.id, word: w.word });
+        }
+      }
+      send("check3b", `末尾単語重複: ${endingDupCount}件`);
+
+      // --- check3c: プログラム的な体言止め違反 ---
+      send("check3c", "体言止め違反を検出中...");
+      let taigenViolationCount = 0;
+      for (const w of allWords) {
+        if (toDelete.has(w.id)) continue;
+        const r = w.reading;
+        const isViolation =
+          (r.endsWith("い") && !r.endsWith("あい") && !r.endsWith("かい") && !r.endsWith("がい") && !r.endsWith("ぜい") && !r.endsWith("ざい")) ||
+          (r.endsWith("ない") && !w.word.match(/なし$|ない$/)) ||
+          r.endsWith("しない") || r.endsWith("できない") || r.endsWith("されない") ||
+          r.endsWith("てる") || r.endsWith("する") || r.endsWith("とる") ||
+          (w.word.endsWith("な") && w.word.length > 2);
+        if (isViolation) {
+          toDelete.add(w.id);
+          taigenViolationCount++;
+          send("check3c", `体言止め違反: "${w.word}"(${r})`);
+        }
+      }
+      send("check3c", `体言止め違反: ${taigenViolationCount}件`);
+
+      // --- check3d: 修飾部（前半4文字以上）の重複 ---
+      send("check3d", "修飾部（前半部分）重複を検出中...");
+      const prefixSeen = new Map<string, { id: number; word: string }>();
+      let prefixDupCountDedup = 0;
+      for (const w of allWords) {
+        if (toDelete.has(w.id)) continue;
+        if (w.reading.length < 6) continue;
+        const prefix = w.reading.slice(0, 4);
+        const existing = prefixSeen.get(prefix);
+        if (existing) {
+          toDelete.add(w.id);
+          prefixDupCountDedup++;
+          send("check3d", `前半部「${prefix}」重複: "${w.word}" → "${existing.word}"残し`);
+        } else {
+          prefixSeen.set(prefix, { id: w.id, word: w.word });
+        }
+      }
+      send("check3d", `修飾部重複: ${prefixDupCountDedup}件`);
+
       // --- check4: 末尾名詞重複（protected無視）---
       send("check4", "末尾名詞重複を検出中（protect無視）...");
       const dedupItems = allWords
@@ -2052,11 +2193,11 @@ ${wordList}`, { maxOutputTokens: 8192 });
 
       send("check5", `広義重複: ${broadDupCount}件（前半部一致${prefixDupCount}件含む）`);
 
-      const total = wordDupCount + readingDupCount + romajiDupCount + tailResult.deletedCount + broadDupCount;
+      const total = wordDupCount + readingDupCount + romajiDupCount + endingDupCount + taigenViolationCount + prefixDupCountDedup + tailResult.deletedCount + broadDupCount;
       if (total === 0) {
         send("done", "重複なし。データベースはクリーンな状態です。");
       } else {
-        send("delete", `合計 ${total}件 (表記:${wordDupCount} + 読み:${readingDupCount} + ローマ字:${romajiDupCount} + 末尾名詞:${tailResult.deletedCount} + 広義重複:${broadDupCount}) を削除中...`);
+        send("delete", `合計 ${total}件 (表記:${wordDupCount} + 読み:${readingDupCount} + ローマ字:${romajiDupCount} + 末尾単語:${endingDupCount} + 体言止め違反:${taigenViolationCount} + 修飾部:${prefixDupCountDedup} + 末尾名詞AI:${tailResult.deletedCount} + 広義重複:${broadDupCount}) を削除中...`);
         await deleteWords([...toDelete]);
       }
 
