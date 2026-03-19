@@ -749,8 +749,13 @@ JSON配列で出力:
     }
   });
 
-  app.get("/api/favorites", async (_req, res) => {
+  app.get("/api/favorites", async (req, res) => {
     try {
+      // フィルタリングパラメータ
+      const filterGroup = (req.query.group as string) || "";     // 末尾2母音グループ（例: "ae", "ou"）
+      const filterTier = (req.query.tier as string) || "";       // 一致数ティア（例: "perfect", "legendary"）
+      const filterMinMatch = parseInt(req.query.minMatch as string) || 0; // 最小一致母音数
+
       const allWords = await getAllWords();
       const items = allWords.map(w => {
         const vowels = extractTaigenVowels(w.word, w.reading, w.romaji);
@@ -888,7 +893,40 @@ JSON配列で出力:
         return bTotal - aTotal;
       });
 
-      res.json({ groups, total: allWords.length });
+      // フィルタリング適用
+      let filteredGroups = groups;
+
+      if (filterGroup) {
+        // 特定の末尾2母音グループのみ
+        filteredGroups = filteredGroups.filter(g => g.vowels === `*${filterGroup}` || g.vowels.endsWith(filterGroup));
+      }
+
+      if (filterTier) {
+        // 特定のティアのみ表示
+        filteredGroups = filteredGroups.map(g => ({
+          ...g,
+          hardRhymes: g.hardRhymes.filter(hr => hr.tier === filterTier),
+          words: filterTier === "base" ? g.words : [], // "base"指定時のみ未分類を表示
+        })).filter(g => g.hardRhymes.length > 0 || g.words.length > 0);
+      }
+
+      if (filterMinMatch > 0) {
+        // 最小一致母音数でフィルタ
+        filteredGroups = filteredGroups.map(g => ({
+          ...g,
+          hardRhymes: g.hardRhymes.filter(hr => hr.suffix.length >= filterMinMatch),
+        })).filter(g => g.hardRhymes.length > 0 || g.words.length > 0);
+      }
+
+      // 利用可能なフィルタ値をレスポンスに含める
+      const availableGroups = [...new Set(groups.map(g => g.vowels.replace("*", "")))].sort();
+      const availableTiers = [...new Set(groups.flatMap(g => g.hardRhymes.map(hr => hr.tier)))].sort();
+
+      res.json({
+        groups: filteredGroups,
+        total: allWords.length,
+        filters: { availableGroups, availableTiers },
+      });
     } catch (error) { console.error("Favorites fetch error:", error); res.status(500).json({ error: "お気に入りの取得に失敗しました" }); }
   });
 
@@ -1273,28 +1311,82 @@ ${wordList}
         res.write(`data: ${JSON.stringify({ type: "progress", step, detail, elapsed })}\n\n`);
       };
 
-      send("init", "グループ検査: 全ワードを取得中...");
+      send("init", "グループ整理: 全ワードを取得中...");
       const allWords = await getAllWords();
+      let readingFixed = 0;
+      let romajiFixed = 0;
       let vowelFixed = 0;
 
-      const groupCounts: Record<string, number> = {};
-      for (const w of allWords) {
-        const key = w.vowels.length >= 2 ? w.vowels.slice(-2) : w.vowels || "_";
-        groupCounts[key] = (groupCounts[key] || 0) + 1;
-      }
-      const groupSummary = Object.entries(groupCounts).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}:${v}`).join(", ");
-      send("check", `${allWords.length}語を${Object.keys(groupCounts).length}グループで検査中... (${groupSummary})`);
+      // PHASE1: 読み・ローマ字の正確性をClaudeで検証
+      send("check", `PHASE1: ${allWords.length}語の読み・ローマ字を検証中...`);
+      const CHECK_BATCH = 80;
+      const CHECK_PARALLEL = 3;
+      const checkBatches: typeof allWords[] = [];
+      for (let i = 0; i < allWords.length; i += CHECK_BATCH) checkBatches.push(allWords.slice(i, i + CHECK_BATCH));
 
+      for (let r = 0; r < Math.ceil(checkBatches.length / CHECK_PARALLEL); r++) {
+        if (disconnected) break;
+        const chunk = checkBatches.slice(r * CHECK_PARALLEL, (r + 1) * CHECK_PARALLEL);
+        await Promise.all(chunk.map(async (batch) => {
+          const lines = batch.map((w, i) => `${i + 1}. ${w.word}（${w.reading}）[${w.romaji}]`).join("\n");
+          const prompt = `以下のワードの「読み（ふりがな）」と「ローマ字」が正しいか検証せよ。
+
+【ローマ字ルール】
+- 「ん」→n（母音扱い）、それ以外の子音は必ず母音付き
+- 「っ」→次子音重複、「ー」→前母音重複
+- 半角小文字英字のみ
+
+ワード一覧:
+${lines}
+
+間違いのみJSON配列で出力。全て正しければ[]:
+[{"idx":1,"reading":"正しい読み","romaji":"正しいローマ字"}]
+※readingかromajiのうち修正が必要な方だけ含めよ`;
+          try {
+            const result = await claudeGenerate(prompt, { maxOutputTokens: 4096 });
+            const text = result?.text || "";
+            const jsonMatch = text.match(/\[[\s\S]*?\]/);
+            if (!jsonMatch) return;
+            type Fix = { idx: number; reading?: string; romaji?: string };
+            const fixes = JSON.parse(jsonMatch[0]) as Fix[];
+            for (const f of fixes) {
+              const idx = f.idx - 1;
+              if (idx < 0 || idx >= batch.length) continue;
+              const w = batch[idx];
+              let newReading = w.reading;
+              let newRomaji = w.romaji;
+              if (f.reading && /^[ぁ-ゟー]+$/.test(f.reading.trim()) && f.reading.trim() !== w.reading) {
+                newReading = f.reading.trim();
+                readingFixed++;
+              }
+              if (f.romaji) {
+                const nr = f.romaji.toLowerCase().replace(/[^a-z]/g, "");
+                if (nr && nr !== w.romaji) { newRomaji = nr; romajiFixed++; }
+              }
+              if (newReading !== w.reading || newRomaji !== w.romaji) {
+                const newVowels = extractTaigenVowels(w.word, newReading, newRomaji);
+                await updateWord(w.id, { word: w.word, reading: newReading, romaji: newRomaji, vowels: newVowels, charCount: countMoraVowels(newReading) });
+                send("fix", `修正:「${w.word}」読み:${w.reading}→${newReading}, ローマ字:${w.romaji}→${newRomaji}`);
+              }
+            }
+          } catch {}
+        }));
+        send("check", `PHASE1: ${Math.min((r + 1) * CHECK_PARALLEL, checkBatches.length)}/${checkBatches.length}バッチ完了...`);
+      }
+
+      // PHASE2: 母音フィールドを再計算してクラスタリング修正
+      send("regroup", `PHASE2: 母音フィールドを再計算してクラスタリング中...`);
+      const updatedWords = await getAllWords(); // 修正後のデータを再取得
       const vowelFixUpdates: { id: number; word: string; reading: string; romaji: string; vowels: string; charCount: number }[] = [];
 
-      for (const w of allWords) {
+      for (const w of updatedWords) {
         const computedVowels = extractTaigenVowels(w.word, w.reading, w.romaji);
         if (computedVowels !== w.vowels) {
           const oldGroup = w.vowels.length >= 2 ? `*${w.vowels.slice(-2)}` : w.vowels;
           const newGroup = computedVowels.length >= 2 ? `*${computedVowels.slice(-2)}` : computedVowels;
-          const groupChange = oldGroup !== newGroup ? ` [${oldGroup}→${newGroup}]` : ` [母音フィールド更新]`;
+          const groupChange = oldGroup !== newGroup ? ` [${oldGroup}→${newGroup}]` : ` [母音更新]`;
           vowelFixUpdates.push({ id: w.id, word: w.word, reading: w.reading, romaji: w.romaji, vowels: computedVowels, charCount: w.charCount });
-          send("vowel", `グループ再配属:「${w.word}」 ${w.vowels}→${computedVowels}${groupChange}`);
+          send("vowel", `再配属:「${w.word}」 ${w.vowels}→${computedVowels}${groupChange}`);
         }
       }
 
@@ -1303,13 +1395,9 @@ ${wordList}
         vowelFixed++;
       }
 
-      if (vowelFixed === 0) {
-        send("done", `グループ検査完了: ${allWords.length}語すべて正常（母音不一致なし）`);
-      } else {
-        send("done", `グループ検査完了: ${allWords.length}語検査、グループ再配属${vowelFixed}語`);
-      }
+      send("done", `グループ整理完了: ${updatedWords.length}語検査、読み修正${readingFixed}、ローマ字修正${romajiFixed}、再配属${vowelFixed}語`);
       const elapsedMs = Date.now() - startTime;
-      if (!disconnected) res.write(`data: ${JSON.stringify({ type: "result", checked: allWords.length, vowelFixed, elapsedMs })}\n\n`);
+      if (!disconnected) res.write(`data: ${JSON.stringify({ type: "result", checked: updatedWords.length, readingFixed, romajiFixed, vowelFixed, elapsedMs })}\n\n`);
     } catch (error) {
       console.error("Group check error:", error);
       if (!disconnected) res.write(`data: ${JSON.stringify({ type: "error", error: "グループ検査に失敗しました" })}\n\n`);
@@ -1773,11 +1861,64 @@ JSON配列で出力（全ワード分必須）:
       }
       const tailResult = await aiTailDedup(dedupBuckets, toDelete, send, true);
 
-      const total = wordDupCount + readingDupCount + romajiDupCount + tailResult.deletedCount;
+      // --- check5: グループ内の同じ意味の言葉をClaudeで検出 ---
+      send("check5", "グループ内の同義語・同意語を検出中...");
+      let meaningDupCount = 0;
+      const liveWords = allWords.filter(w => !toDelete.has(w.id));
+
+      // 末尾2母音でグループ化
+      const meaningBuckets: Record<string, typeof liveWords> = {};
+      for (const w of liveWords) {
+        const key = w.vowels.length >= 2 ? w.vowels.slice(-2) : "_";
+        (meaningBuckets[key] ??= []).push(w);
+      }
+
+      const MEANING_PARALLEL = 3;
+      const meaningTasks = Object.entries(meaningBuckets).filter(([, ws]) => ws.length >= 2);
+
+      for (let m = 0; m < meaningTasks.length; m += MEANING_PARALLEL) {
+        if (disconnected) break;
+        const chunk = meaningTasks.slice(m, m + MEANING_PARALLEL);
+        await Promise.all(chunk.map(async ([key, groupWords]) => {
+          if (groupWords.length < 2) return;
+          const wordList = groupWords.map(w => `${w.id}:${w.word}`).join("\n");
+          try {
+            const result = await claudeGenerate(`以下のワードグループ内で「同じ意味」「ほぼ同じ表現」の重複ペアを見つけよ。
+
+【重複の例】
+- 「うっせーよ」と「うるせえよ」→ 同じ意味の別表現
+- 「生きてる価値なし」と「生きる価値なし」→ 活用違い
+- 「存在価値なし」と「生きる価値なし」→ 同じ概念
+
+重複がなければ「なし」とだけ出力。
+重複があれば、削除すべきワードのIDをJSON配列で出力（残す方のIDは含めない）:
+[{"deleteId":123,"reason":"「○○」と同義"}]
+
+ワードグループ（${key}グループ）:
+${wordList}`, { maxOutputTokens: 4096 });
+            const text = (result?.text || "").trim();
+            if (text === "なし" || text.includes("なし")) return;
+            const jsonMatch = text.match(/\[[\s\S]*?\]/);
+            if (!jsonMatch) return;
+            type MR = { deleteId: number; reason: string };
+            const duplicates = JSON.parse(jsonMatch[0]) as MR[];
+            for (const d of duplicates) {
+              if (d.deleteId && !toDelete.has(d.deleteId)) {
+                toDelete.add(d.deleteId);
+                meaningDupCount++;
+                send("check5", `同義語削除: id:${d.deleteId} (${d.reason})`);
+              }
+            }
+          } catch {}
+        }));
+      }
+      send("check5", `同義語・同意語: ${meaningDupCount}件`);
+
+      const total = wordDupCount + readingDupCount + romajiDupCount + tailResult.deletedCount + meaningDupCount;
       if (total === 0) {
         send("done", "重複なし。データベースはクリーンな状態です。");
       } else {
-        send("delete", `合計 ${total}件 (表記:${wordDupCount} + 読み:${readingDupCount} + ローマ字:${romajiDupCount} + 末尾名詞:${tailResult.deletedCount}) を削除中...`);
+        send("delete", `合計 ${total}件 (表記:${wordDupCount} + 読み:${readingDupCount} + ローマ字:${romajiDupCount} + 末尾名詞:${tailResult.deletedCount} + 同義語:${meaningDupCount}) を削除中...`);
         await deleteWords([...toDelete]);
       }
 
