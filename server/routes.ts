@@ -335,11 +335,11 @@ ${lines}
         }
         words = quickCharCheck(furiOut);
 
-        // --- 末尾体言重複チェック（重複ワードは削除） ---
-        const END_BATCH = 100;
+        // --- 末尾体言・末尾単語・修飾部の重複チェック → 重複箇所を置き換え ---
+        const END_BATCH = 80;
         const END_PARALLEL = 5;
-        type EndingInfo = { word: string; ending: string; endingReading: string };
-        const allEndings: EndingInfo[] = [];
+        type PartInfo = { word: string; ending: string; endingReading: string; modifier: string; modifierReading: string; lastChar: string; lastCharReading: string };
+        const allParts: PartInfo[] = [];
         const endBatches: WordEntry[][] = [];
         for (let i = 0; i < words.length; i += END_BATCH) endBatches.push(words.slice(i, i + END_BATCH));
 
@@ -348,64 +348,177 @@ ${lines}
           const chunk = endBatches.slice(b, b + END_PARALLEL);
           const endResults = await Promise.all(chunk.map(async (batch) => {
             const batchLines = batch.map(w => `${w.word}（${w.reading}）`).join("\n");
-            const prompt = `以下の悪口ワードの「末尾の体言（名詞部分）」を特定せよ。
+            const prompt = `以下の悪口ワードを分析し、3つの要素を特定せよ。
 
-【判定ルール】
-- 末尾が漢字1文字で直前がひらがな → その漢字単体
-- 末尾が漢字で直前も漢字 → 複合語全体
-- 末尾がカタカナ → カタカナ部分
-- 末尾がひらがな → 末尾の意味単位
+【分析する3要素】
+1. 末尾体言: ワードの末尾にある名詞・名詞句（例：「だらしない男」→「男」）
+2. 末尾単語: ワードの最後の1文字が漢字で、その直前が漢字でない場合、その漢字1文字（例：「だらしない男」→「男」、「肉体」→直前が漢字なので""）
+3. 修飾部: 末尾体言を除いた前半部分（例：「だらしない男」→「だらしない」、「ポンコツ野郎」→「ポンコツ」）
 
 ワード一覧:
 ${batchLines}
 
 JSON配列で全ワード分出力:
-[{"w":"元のワード","t":"末尾体言","tr":"読み（ひらがな）"}]`;
+[{"w":"元のワード","t":"末尾体言","tr":"末尾体言の読み","m":"修飾部","mr":"修飾部の読み","lc":"末尾単語（漢字1文字、該当なしは空）","lcr":"末尾単語の読み"}]`;
             try {
               const result = await claudeGenerate(prompt, { maxOutputTokens: 4096 });
               const text = result?.text || "";
               const jsonMatch = text.match(/\[[\s\S]*?\]/);
-              if (!jsonMatch) return [] as EndingInfo[];
-              type EP = { w: string; t: string; tr: string };
+              if (!jsonMatch) return [] as PartInfo[];
+              type EP = { w: string; t: string; tr: string; m: string; mr: string; lc: string; lcr: string };
               const pairs = JSON.parse(jsonMatch[0]) as EP[];
-              const out: EndingInfo[] = [];
+              const out: PartInfo[] = [];
               for (const p of pairs) {
                 if (!batch.find(x => x.word === p.w)) continue;
-                const tr = (p.tr || "").trim();
-                if (tr.length >= 1) out.push({ word: p.w, ending: p.t || "", endingReading: tr });
+                out.push({
+                  word: p.w,
+                  ending: p.t || "", endingReading: (p.tr || "").trim(),
+                  modifier: p.m || "", modifierReading: (p.mr || "").trim(),
+                  lastChar: p.lc || "", lastCharReading: (p.lcr || "").trim(),
+                });
               }
               return out;
-            } catch { return [] as EndingInfo[]; }
+            } catch { return [] as PartInfo[]; }
           }));
-          for (const items of endResults) allEndings.push(...items);
+          for (const items of endResults) allParts.push(...items);
         }
 
-        // 末尾体言でグループ化し、既存の末尾体言と重複するもの＋新規内で重複するものを削除
-        const norm = (r: string) => r.replace(/ー/g, "").replace(/[ぁぃぅぇぉっ]/g, (c: string) =>
+        const normR = (r: string) => r.replace(/ー/g, "").replace(/[ぁぃぅぇぉっ]/g, (c: string) =>
           ({ "ぁ": "あ", "ぃ": "い", "ぅ": "う", "ぇ": "え", "ぉ": "お", "っ": "つ" }[c] || c));
 
-        const endingGroups = new Map<string, EndingInfo[]>();
-        for (const e of allEndings) {
-          const n = norm(e.endingReading);
-          if (!n) continue;
-          const g = endingGroups.get(n) || [];
-          g.push(e);
-          endingGroups.set(n, g);
-        }
+        // 3種類の重複を検出: 末尾体言、末尾単語（漢字1文字）、修飾部
+        const endingGroups = new Map<string, PartInfo[]>();
+        const lastCharGroups = new Map<string, PartInfo[]>();
+        const modifierGroups = new Map<string, PartInfo[]>();
 
-        const toRemove = new Set<string>();
-        for (const [n, group] of endingGroups) {
-          if (usedEndings.has(n)) {
-            // 既存の確定済み末尾体言と重複 → 全て削除
-            for (const e of group) toRemove.add(e.word);
-          } else if (group.length > 1) {
-            // 新規内で重複 → 先頭1個だけ残す
-            for (let i = 1; i < group.length; i++) toRemove.add(group[i].word);
+        for (const p of allParts) {
+          if (p.endingReading) {
+            const n = normR(p.endingReading);
+            if (n) { const g = endingGroups.get(n) || []; g.push(p); endingGroups.set(n, g); }
+          }
+          if (p.lastCharReading) {
+            const n = normR(p.lastCharReading);
+            if (n) { const g = lastCharGroups.get(n) || []; g.push(p); lastCharGroups.set(n, g); }
+          }
+          if (p.modifierReading && p.modifierReading.length >= 2) {
+            const n = normR(p.modifierReading);
+            if (n) { const g = modifierGroups.get(n) || []; g.push(p); modifierGroups.set(n, g); }
           }
         }
 
-        words = words.filter(w => !toRemove.has(w.word));
-        console.log(`[REVIEW] Ending dedup: removed ${toRemove.size}, remaining ${words.length}`);
+        // 重複ワードを収集（末尾体言・末尾単語・修飾部の3種類）
+        const wordsToFix: { word: string; type: string; duplicateWith: string; part: string }[] = [];
+        const keepWords = new Set<string>();
+
+        // 末尾体言の重複
+        for (const [n, group] of endingGroups) {
+          if (usedEndings.has(n)) {
+            for (const p of group) wordsToFix.push({ word: p.word, type: "末尾体言", duplicateWith: "既存確定済み", part: p.ending });
+          } else if (group.length > 1) {
+            keepWords.add(group[0].word);
+            for (let i = 1; i < group.length; i++) {
+              wordsToFix.push({ word: group[i].word, type: "末尾体言", duplicateWith: group[0].word, part: group[i].ending });
+            }
+          }
+        }
+
+        // 末尾単語（漢字1文字）の重複
+        for (const [n, group] of lastCharGroups) {
+          if (group.length > 1) {
+            const alreadyKept = group.find(p => keepWords.has(p.word));
+            const keeper = alreadyKept || group[0];
+            if (!alreadyKept) keepWords.add(keeper.word);
+            for (const p of group) {
+              if (p.word !== keeper.word && !wordsToFix.find(f => f.word === p.word)) {
+                wordsToFix.push({ word: p.word, type: "末尾単語", duplicateWith: keeper.word, part: p.lastChar });
+              }
+            }
+          }
+        }
+
+        // 修飾部の重複
+        for (const [n, group] of modifierGroups) {
+          if (group.length > 1) {
+            const alreadyKept = group.find(p => keepWords.has(p.word));
+            const keeper = alreadyKept || group[0];
+            if (!alreadyKept) keepWords.add(keeper.word);
+            for (const p of group) {
+              if (p.word !== keeper.word && !wordsToFix.find(f => f.word === p.word)) {
+                wordsToFix.push({ word: p.word, type: "修飾部", duplicateWith: keeper.word, part: p.modifier });
+              }
+            }
+          }
+        }
+
+        if (wordsToFix.length > 0) {
+          console.log(`[REVIEW] Found ${wordsToFix.length} duplicates to fix`);
+
+          // 重複ワードの問題箇所をClaudeに置き換えさせる
+          const FIX_BATCH = 50;
+          const fixBatches: typeof wordsToFix[] = [];
+          for (let i = 0; i < wordsToFix.length; i += FIX_BATCH) fixBatches.push(wordsToFix.slice(i, i + FIX_BATCH));
+
+          const fixMap = new Map<string, { replaced: string; reading: string }>();
+
+          for (const fixBatch of fixBatches) {
+            if (disconnected) break;
+            const fixList = fixBatch.map(f =>
+              `${f.word}（問題: ${f.type}「${f.part}」が「${f.duplicateWith}」と重複）`
+            ).join("\n");
+
+            const allUsedEndings = [...usedEndings, ...([...endingGroups.keys()].filter(k => !wordsToFix.find(f => normR(allParts.find(p => p.word === f.word)?.endingReading || "") === k)))];
+            const allUsedModifiers = [...modifierGroups.entries()].filter(([,g]) => g.length >= 1).map(([k]) => k);
+
+            try {
+              const result = await claudeGenerate(`以下のワードは重複箇所があります。問題箇所を、まだ使われていない別の言葉に置き換えよ。
+
+【置き換えルール】
+- 末尾体言/末尾単語が重複 → その末尾を別の名詞に置き換え（ワードの意味・辛辣さを維持）
+- 修飾部が重複 → 修飾部を別の表現に置き換え（末尾体言はそのまま維持）
+- 6つのルールを厳守（[1]小学生語彙 [2]悪口・挑発 [3]体言止め [4]商標禁止 [5]リズム [6]重複禁止）
+- ひらがな換算4〜10文字
+
+使用済み末尾体言（使用禁止）: ${allUsedEndings.slice(0, 100).join("、")}
+使用済み修飾部（使用禁止）: ${allUsedModifiers.slice(0, 80).join("、")}
+
+置き換えが必要なワード:
+${fixList}
+
+JSON配列で出力:
+[{"original":"元のワード","replaced":"置き換え後のワード","reading":"読み（ひらがな）"}]`, { maxOutputTokens: 8192 });
+
+              const text = result?.text || "";
+              const jsonMatch = text.match(/\[[\s\S]*?\]/);
+              if (jsonMatch) {
+                type RE = { original: string; replaced: string; reading: string };
+                const replacements = JSON.parse(jsonMatch[0]) as RE[];
+                for (const r of replacements) {
+                  if (r.original && r.replaced && r.reading) {
+                    fixMap.set(r.original, { replaced: r.replaced, reading: r.reading });
+                  }
+                }
+              }
+            } catch (err) {
+              console.log(`[REVIEW] Fix batch error:`, err);
+            }
+          }
+
+          // 置き換えを適用。置き換えできなかったものは削除
+          const fixedSet = new Set(wordsToFix.map(f => f.word));
+          words = words.map(w => {
+            if (!fixedSet.has(w.word)) return w;
+            const fix = fixMap.get(w.word);
+            if (fix) {
+              console.log(`[REVIEW] Fix: "${w.word}" → "${fix.replaced}"`);
+              return { ...w, word: fix.replaced, reading: fix.reading, romaji: hiraganaToRomaji(fix.reading) };
+            }
+            return null; // 置き換え不可 → 削除
+          }).filter((w): w is WordEntry => w !== null);
+          words = quickCharCheck(words);
+          console.log(`[REVIEW] After fix: ${words.length} words (${fixMap.size} replaced, ${wordsToFix.length - fixMap.size} removed)`);
+        } else {
+          console.log(`[REVIEW] No duplicates found`);
+        }
 
         // --- 6つのルール全チェック ---
         const RULE_BATCH = 100;
@@ -500,8 +613,7 @@ ${wordList}
         const reviewed = await runClaudeReview(rawWords);
         logTiming(`cycle${cycle}-review`);
 
-        // 精査済みワードの末尾体言を確定リストに登録
-        // 再度末尾体言を簡易抽出して登録
+        // 精査済みワードの末尾体言・末尾単語・修飾部を確定リストに登録
         const END_REG_BATCH = 100;
         const regBatches: WordEntry[][] = [];
         for (let i = 0; i < reviewed.length; i += END_REG_BATCH) regBatches.push(reviewed.slice(i, i + END_REG_BATCH));
@@ -509,20 +621,23 @@ ${wordList}
         for (const batch of regBatches) {
           const batchLines = batch.map(w => `${w.word}（${w.reading}）`).join("\n");
           try {
-            const result = await claudeGenerate(`以下のワードの末尾体言の読みをひらがなで返せ。
+            const result = await claudeGenerate(`以下のワードの末尾体言・末尾単語（漢字1文字）・修飾部の読みを返せ。
+
 ワード一覧:
 ${batchLines}
 
 JSON配列で出力:
-[{"w":"ワード","tr":"末尾体言の読み"}]`, { maxOutputTokens: 4096 });
+[{"w":"ワード","tr":"末尾体言の読み","lcr":"末尾漢字1文字の読み（該当なしは空）","mr":"修飾部の読み"}]`, { maxOutputTokens: 4096 });
             const text = result?.text || "";
             const jsonMatch = text.match(/\[[\s\S]*?\]/);
             if (jsonMatch) {
-              type ER = { w: string; tr: string };
+              type ER = { w: string; tr: string; lcr?: string; mr?: string };
               const endings = JSON.parse(jsonMatch[0]) as ER[];
               for (const e of endings) {
                 const n = (e.tr || "").trim().replace(/ー/g, "");
                 if (n) usedEndings.add(n);
+                const lc = (e.lcr || "").trim().replace(/ー/g, "");
+                if (lc) usedEndings.add(lc);
               }
             }
           } catch {}
