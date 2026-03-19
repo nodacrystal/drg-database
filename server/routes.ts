@@ -298,6 +298,66 @@ ${lines}`;
       send("step2", `STEP2完了: ローマ字変換 ${finalWords.length}語`);
 
       // ============================================================
+      // STEP2b（Claude）: ふりがな（読み）の正確性を検証・修正
+      // ============================================================
+      send("step2b", `STEP2b: Claudeがふりがなを検証中... (${finalWords.length}語)`);
+      const FURIGANA_BATCH = 80;
+      const FURIGANA_PARALLEL = 5;
+      const furiganaChecked: WordEntry[] = [];
+      const furiganaBatches: WordEntry[][] = [];
+      for (let i = 0; i < finalWords.length; i += FURIGANA_BATCH) {
+        furiganaBatches.push(finalWords.slice(i, i + FURIGANA_BATCH));
+      }
+      let furiganaFixCount = 0;
+
+      for (let r = 0; r < Math.ceil(furiganaBatches.length / FURIGANA_PARALLEL); r++) {
+        if (disconnected) break;
+        const chunk = furiganaBatches.slice(r * FURIGANA_PARALLEL, (r + 1) * FURIGANA_PARALLEL);
+        const results = await Promise.all(chunk.map(async (batch) => {
+          const lines = batch.map((w, i) => `${i + 1}. ${w.word}（${w.reading}）`).join("\n");
+          const prompt = `以下のワードの「読み（ふりがな）」が正しいか検証せよ。
+
+【検証ルール】
+- 漢字の読みが正しいか（例：「悪口」→「わるくち」or「わるぐち」、「体」→「からだ」）
+- カタカナはそのままひらがなに変換されているか
+- 造語の場合も、各漢字・文字の読みが自然か
+- 読みは全てひらがなであること
+
+ワード一覧:
+${lines}
+
+読みが間違っているもののみJSON配列で出力。全て正しければ[]のみ:
+[{"idx":1,"reading":"正しい読み（ひらがな）"}]`;
+          try {
+            const result = await claudeGenerate(prompt, { maxOutputTokens: 4096 });
+            const text = result?.text || "";
+            const jsonMatch = text.match(/\[[\s\S]*?\]/);
+            if (!jsonMatch) return batch;
+            type FC = { idx: number; reading: string };
+            const fixes = JSON.parse(jsonMatch[0]) as FC[];
+            const fixBatch = [...batch];
+            for (const f of fixes) {
+              const idx = f.idx - 1;
+              if (idx >= 0 && idx < fixBatch.length && f.reading) {
+                const newReading = f.reading.trim();
+                if (newReading && /^[ぁ-ゟー]+$/.test(newReading) && newReading !== fixBatch[idx].reading) {
+                  console.log(`[STEP2b] Furigana fix: "${fixBatch[idx].word}" ${fixBatch[idx].reading}→${newReading}`);
+                  fixBatch[idx] = { ...fixBatch[idx], reading: newReading, romaji: hiraganaToRomaji(newReading) };
+                  furiganaFixCount++;
+                }
+              }
+            }
+            return fixBatch;
+          } catch { return batch; }
+        }));
+        for (const batch of results) furiganaChecked.push(...batch);
+        send("step2b", `STEP2b: ${Math.min((r + 1) * FURIGANA_PARALLEL, furiganaBatches.length)}/${furiganaBatches.length}バッチ完了...`);
+      }
+      finalWords = quickCharCheck(furiganaChecked);
+      logTiming("step2b-furigana");
+      send("step2b", `STEP2b完了: ふりがな検証 ${furiganaFixCount}個修正 → ${finalWords.length}語`);
+
+      // ============================================================
       // STEP3（Claude）: 末尾体言の重複チェック → 重複ゼロまで繰り返し
       // ============================================================
       send("step3", `STEP3: Claudeが末尾体言の重複チェック中...`);
@@ -309,8 +369,9 @@ ${lines}`;
         if (disconnected) break;
         send("step3", `STEP3: 末尾体言重複チェック [ラウンド${dedupIteration}] (${finalWords.length}語)`);
 
-        // 3a: 全ワードの末尾体言を抽出
-        const ENDING_BATCH = 60;
+        // 3a: 全ワードの末尾体言を抽出（バッチサイズ大・並列度高で高速化）
+        const ENDING_BATCH = 100;
+        const ENDING_PARALLEL = 5;
         type EndingInfo = { word: string; ending: string; endingReading: string };
         const allEndings: EndingInfo[] = [];
         const endingBatches: WordEntry[][] = [];
@@ -318,9 +379,9 @@ ${lines}`;
           endingBatches.push(finalWords.slice(i, i + ENDING_BATCH));
         }
 
-        for (let b = 0; b < endingBatches.length; b += ROMAJI_PARALLEL) {
+        for (let b = 0; b < endingBatches.length; b += ENDING_PARALLEL) {
           if (disconnected) break;
-          const chunk = endingBatches.slice(b, b + ROMAJI_PARALLEL);
+          const chunk = endingBatches.slice(b, b + ENDING_PARALLEL);
           const endingResults = await Promise.all(chunk.map(async (batch) => {
             const batchLines = batch.map(w => `${w.word}（${w.reading}）`).join("\n");
             const prompt = `以下の悪口ワードの「末尾の体言（名詞部分）」を特定せよ。
@@ -380,35 +441,48 @@ JSON配列で全ワード分出力:
 
         console.log(`[STEP3] Iteration ${dedupIteration}: ${duplicateGroups.size} duplicate groups found`);
 
-        // 3c: 各重複グループで最強パンチラインを残し、他のワードの末尾体言を変更
+        // 3c: 全重複グループを一括でClaudeに送り、最強パンチラインを選定（速度最適化）
         const wordsToReplace: { word: string; reason: string }[] = [];
         const wordsToKeep = new Set<string>();
 
-        for (const [norm, group] of duplicateGroups) {
-          // Claudeに最強のパンチラインを選ばせる
-          const candidates = group.map(e => e.word).join("\n");
-          try {
-            const result = await claudeGenerate(
-              `以下のワードは全て末尾体言「${norm}」が同じワードです。最も辛辣・強烈なパンチラインを1個だけ選べ。選んだワードだけを出力（説明不要）:\n${candidates}`,
-              { maxOutputTokens: 64 }
-            );
-            const best = (result?.text || "").trim().replace(/^「/, "").replace(/」$/, "").trim();
-            const bestMatch = group.find(e => e.word === best);
-            if (bestMatch) {
-              wordsToKeep.add(bestMatch.word);
-              for (const e of group) {
-                if (e.word !== bestMatch.word) {
-                  wordsToReplace.push({ word: e.word, reason: `末尾体言「${norm}」が「${bestMatch.word}」と重複` });
-                }
-              }
-            } else {
-              // マッチしなかった場合、先頭を残す
-              wordsToKeep.add(group[0].word);
-              for (let i = 1; i < group.length; i++) {
-                wordsToReplace.push({ word: group[i].word, reason: `末尾体言「${norm}」重複` });
+        // 全重複グループを一括プロンプトで処理
+        const groupEntries = [...duplicateGroups.entries()];
+        const groupPrompt = groupEntries.map(([norm, group], i) =>
+          `グループ${i + 1}（末尾体言「${norm}」）:\n${group.map(e => e.word).join("\n")}`
+        ).join("\n\n");
+
+        try {
+          const result = await claudeGenerate(
+            `以下の各グループは末尾体言が同じワードの集まりです。各グループから最も辛辣・強烈なパンチラインを1個だけ選べ。
+
+${groupPrompt}
+
+JSON配列で出力（グループ番号と選んだワード）:
+[{"group":1,"best":"選んだワード"}]`,
+            { maxOutputTokens: 4096 }
+          );
+          const text = (result?.text || "").trim();
+          const jsonMatch = text.match(/\[[\s\S]*?\]/);
+          type BestPick = { group: number; best: string };
+          const picks = jsonMatch ? JSON.parse(jsonMatch[0]) as BestPick[] : [];
+          const pickMap = new Map<number, string>();
+          for (const p of picks) pickMap.set(p.group, p.best);
+
+          for (let i = 0; i < groupEntries.length; i++) {
+            const [norm, group] = groupEntries[i];
+            const bestWord = pickMap.get(i + 1);
+            const bestMatch = bestWord ? group.find(e => e.word === bestWord) : null;
+            const keeper = bestMatch || group[0];
+            wordsToKeep.add(keeper.word);
+            for (const e of group) {
+              if (e.word !== keeper.word) {
+                wordsToReplace.push({ word: e.word, reason: `末尾体言「${norm}」が「${keeper.word}」と重複` });
               }
             }
-          } catch {
+          }
+        } catch {
+          // フォールバック: 各グループの先頭を残す
+          for (const [norm, group] of groupEntries) {
             wordsToKeep.add(group[0].word);
             for (let i = 1; i < group.length; i++) {
               wordsToReplace.push({ word: group[i].word, reason: `末尾体言「${norm}」重複` });
@@ -476,15 +550,14 @@ JSON配列で出力:
       // ============================================================
       send("step4", `STEP4: Claudeが6つのルール全チェック中... (${finalWords.length}語)`);
       const RULE_BATCH = 100;
+      const RULE_PARALLEL = 3;
       const ruleCheckedWords: WordEntry[] = [];
       const ruleBatches: WordEntry[][] = [];
       for (let i = 0; i < finalWords.length; i += RULE_BATCH) {
         ruleBatches.push(finalWords.slice(i, i + RULE_BATCH));
       }
 
-      for (let b = 0; b < ruleBatches.length; b++) {
-        if (disconnected) break;
-        const batch = ruleBatches[b];
+      const processRuleBatch = async (batch: WordEntry[]) => {
         const wordList = batch.map((w, i) => `${i + 1}. ${w.word}（${w.reading}）`).join("\n");
         const prompt = `以下の${batch.length}個のワードが、6つのルールを全て守っているか確認せよ。
 違反しているワードは問題箇所を他の言葉に置き換えよ。
@@ -516,48 +589,125 @@ ${wordList}
           if (jsonMatch) {
             type RuleResult = { idx: number; word: string; reading: string; fixed: boolean };
             const ruleResults = JSON.parse(jsonMatch[0]) as RuleResult[];
+            const out: WordEntry[] = [];
             for (const rr of ruleResults) {
               const idx = rr.idx - 1;
               if (idx >= 0 && idx < batch.length) {
                 if (rr.fixed && rr.word && rr.reading) {
                   console.log(`[STEP4] Fixed: "${batch[idx].word}" → "${rr.word}"`);
-                  ruleCheckedWords.push({
-                    ...batch[idx],
-                    word: rr.word,
-                    reading: rr.reading,
-                    romaji: hiraganaToRomaji(rr.reading),
-                  });
+                  out.push({ ...batch[idx], word: rr.word, reading: rr.reading, romaji: hiraganaToRomaji(rr.reading) });
                 } else {
-                  ruleCheckedWords.push(batch[idx]);
+                  out.push(batch[idx]);
                 }
               }
             }
-            // AIが返さなかった分はそのまま追加
-            if (ruleResults.length < batch.length) {
-              const returnedIndices = new Set(ruleResults.map(rr => rr.idx - 1));
-              for (let i = 0; i < batch.length; i++) {
-                if (!returnedIndices.has(i)) ruleCheckedWords.push(batch[i]);
-              }
+            const returnedIndices = new Set(ruleResults.map(rr => rr.idx - 1));
+            for (let i = 0; i < batch.length; i++) {
+              if (!returnedIndices.has(i)) out.push(batch[i]);
             }
-          } else {
-            ruleCheckedWords.push(...batch);
+            return out;
           }
-        } catch {
-          ruleCheckedWords.push(...batch);
-        }
-        send("step4", `STEP4: ${b + 1}/${ruleBatches.length}バッチ完了...`);
+          return batch;
+        } catch { return batch; }
+      };
+
+      // ルールチェックを並列実行
+      for (let r = 0; r < Math.ceil(ruleBatches.length / RULE_PARALLEL); r++) {
+        if (disconnected) break;
+        const chunk = ruleBatches.slice(r * RULE_PARALLEL, (r + 1) * RULE_PARALLEL);
+        const results = await Promise.all(chunk.map(processRuleBatch));
+        for (const batch of results) ruleCheckedWords.push(...batch);
+        send("step4", `STEP4: ${Math.min((r + 1) * RULE_PARALLEL, ruleBatches.length)}/${ruleBatches.length}バッチ完了...`);
       }
       finalWords = quickCharCheck(ruleCheckedWords);
       logTiming("step4-rules");
       send("step4", `STEP4完了: ルールチェック → ${finalWords.length}語`);
 
       // ============================================================
+      // STEP4b（Claude）: 造語の意味チェック — 意味が通じる造語かを検証
+      // ============================================================
+      send("step4b", `STEP4b: Claudeが造語の意味チェック中... (${finalWords.length}語)`);
+      const ZOUGO_BATCH = 100;
+      const ZOUGO_PARALLEL = 3;
+      const zougoChecked: WordEntry[] = [];
+      const zougoBatches: WordEntry[][] = [];
+      for (let i = 0; i < finalWords.length; i += ZOUGO_BATCH) {
+        zougoBatches.push(finalWords.slice(i, i + ZOUGO_BATCH));
+      }
+      let zougoFixCount = 0;
+      let zougoRemoveCount = 0;
+
+      const processZougoBatch = async (batch: WordEntry[]) => {
+        const wordList = batch.map((w, i) => `${i + 1}. ${w.word}（${w.reading}）`).join("\n");
+        const prompt = `以下のワードの中に「造語」が含まれている場合、その造語が意味の通じるものかチェックせよ。
+
+【判定基準】
+- 造語であっても、日本語話者が聞いてすぐ意味がわかるならOK（例：「ブサイク顔」→造語だが意味明瞭→OK）
+- 造語だが意味不明・何を言いたいかわからないものはNG（例：「ムリクソ棒」→意味不明→NG）
+- 既存の日本語の単語・慣用句はそのままOK
+- 組み合わせが不自然で悪口として機能しないものはNG
+
+ワード一覧:
+${wordList}
+
+全ワードについてJSON配列で出力:
+[{"idx":1,"status":"ok"または"fix"または"remove","word":"修正後ワード（fixの場合のみ）","reading":"修正後読み（fixの場合のみ）","reason":"NGの理由（removeの場合のみ）"}]
+- ok: 問題なし
+- fix: 意味が通じるよう修正（悪口としての機能を維持）
+- remove: 修正不可能なほど意味不明`;
+
+        try {
+          const result = await claudeGenerate(prompt, { maxOutputTokens: 8192 });
+          const text = result?.text || "";
+          const jsonMatch = text.match(/\[[\s\S]*?\]/);
+          if (jsonMatch) {
+            type ZougoResult = { idx: number; status: string; word?: string; reading?: string; reason?: string };
+            const zougoResults = JSON.parse(jsonMatch[0]) as ZougoResult[];
+            const out: WordEntry[] = [];
+            const processedIndices = new Set<number>();
+            for (const zr of zougoResults) {
+              const idx = zr.idx - 1;
+              if (idx < 0 || idx >= batch.length) continue;
+              processedIndices.add(idx);
+              if (zr.status === "remove") {
+                console.log(`[STEP4b] Remove: "${batch[idx].word}" (${zr.reason})`);
+                zougoRemoveCount++;
+              } else if (zr.status === "fix" && zr.word && zr.reading) {
+                console.log(`[STEP4b] Fix: "${batch[idx].word}" → "${zr.word}"`);
+                out.push({ ...batch[idx], word: zr.word, reading: zr.reading, romaji: hiraganaToRomaji(zr.reading) });
+                zougoFixCount++;
+              } else {
+                out.push(batch[idx]);
+              }
+            }
+            for (let i = 0; i < batch.length; i++) {
+              if (!processedIndices.has(i)) out.push(batch[i]);
+            }
+            return out;
+          }
+          return batch;
+        } catch { return batch; }
+      };
+
+      for (let r = 0; r < Math.ceil(zougoBatches.length / ZOUGO_PARALLEL); r++) {
+        if (disconnected) break;
+        const chunk = zougoBatches.slice(r * ZOUGO_PARALLEL, (r + 1) * ZOUGO_PARALLEL);
+        const results = await Promise.all(chunk.map(processZougoBatch));
+        for (const batch of results) zougoChecked.push(...batch);
+        send("step4b", `STEP4b: ${Math.min((r + 1) * ZOUGO_PARALLEL, zougoBatches.length)}/${zougoBatches.length}バッチ完了...`);
+      }
+      finalWords = quickCharCheck(zougoChecked);
+      logTiming("step4b-zougo");
+      send("step4b", `STEP4b完了: 造語チェック ${zougoFixCount}個修正, ${zougoRemoveCount}個除外 → ${finalWords.length}語`);
+
+      // ============================================================
       // STEP5（Claude）: 各ワードの末尾体言をタグ付け + 母音グループ化
       // ============================================================
       send("step5", `STEP5: Claudeが末尾体言タグ付け + 母音グルーピング中...`);
 
-      // 最終的な末尾体言抽出（STEP3と同じロジック）
-      const FINAL_BATCH = 60;
+      // 最終的な末尾体言抽出（バッチサイズ大・並列度高で高速化）
+      const FINAL_BATCH = 100;
+      const FINAL_PARALLEL = 5;
       type FinalEnding = { word: string; ending: string; endingReading: string };
       const finalEndings: FinalEnding[] = [];
       const finalBatches: WordEntry[][] = [];
@@ -565,9 +715,9 @@ ${wordList}
         finalBatches.push(finalWords.slice(i, i + FINAL_BATCH));
       }
 
-      for (let b = 0; b < finalBatches.length; b += ROMAJI_PARALLEL) {
+      for (let b = 0; b < finalBatches.length; b += FINAL_PARALLEL) {
         if (disconnected) break;
-        const chunk = finalBatches.slice(b, b + ROMAJI_PARALLEL);
+        const chunk = finalBatches.slice(b, b + FINAL_PARALLEL);
         const endingResults = await Promise.all(chunk.map(async (batch) => {
           const batchLines = batch.map(w => `${w.word}（${w.reading}）`).join("\n");
           const prompt = `以下のワードの末尾体言を特定せよ。
