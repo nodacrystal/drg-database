@@ -865,23 +865,39 @@ JSON配列で出力:
       const groups: { vowels: string; words: typeof items; hardRhymes: RhymeGroup[] }[] = [];
 
       // ── 韻の定義: 末尾母音が一致しているが、母音一致箇所が意味の異なる言葉 ──
-      // 同じ言葉（読み）が母音一致箇所に含まれている場合、それは韻ではない
+      // 同じ言葉が母音一致箇所に含まれている場合、それは韻ではない
+
+      // 2つの文字列の最長共通部分文字列の長さを返す
+      const longestCommonSubstring = (s1: string, s2: string): number => {
+        let maxLen = 0;
+        for (let i = 0; i < s1.length; i++) {
+          for (let j = 0; j < s2.length; j++) {
+            let k = 0;
+            while (i + k < s1.length && j + k < s2.length && s1[i + k] === s2[j + k]) k++;
+            if (k > maxLen) maxLen = k;
+          }
+        }
+        return maxLen;
+      };
+
       const isValidRhymePair = (a: typeof items[0], b: typeof items[0], matchLen: number): boolean => {
-        // 末尾matchLen母音に対応する読みの末尾部分を比較
-        // 読みの末尾matchLen文字が同じなら、同じ言葉で一致しているだけ → 韻ではない
+        // 1. 読みの末尾部分が同じ → 同じ言葉で一致しているだけ → 韻ではない
         const aReadTail = a.reading.slice(-matchLen);
         const bReadTail = b.reading.slice(-matchLen);
-        if (aReadTail === bReadTail) return false; // 同じ読みの末尾 → 韻ではない
+        if (aReadTail === bReadTail) return false;
 
-        // ワードの末尾部分が同じ文字列かチェック（漢字表記）
-        const aWordTail = a.word.slice(-Math.ceil(matchLen / 2));
-        const bWordTail = b.word.slice(-Math.ceil(matchLen / 2));
-        if (aWordTail.length >= 2 && aWordTail === bWordTail) return false; // 同じ漢字末尾 → 韻ではない
+        // 2. ワード（表記）に3文字以上の共通部分文字列がある → 同じ言葉を共有 → 韻ではない
+        const commonWordLen = longestCommonSubstring(a.word, b.word);
+        if (commonWordLen >= 3) return false;
 
-        // 前半部（読み）が同じなら重複（自己評価甘 vs 自己評価高 のパターン）
+        // 3. 読みに3文字以上の共通部分文字列がある → 同じ言葉を共有 → 韻ではない
+        const commonReadLen = longestCommonSubstring(a.reading, b.reading);
+        if (commonReadLen >= 3) return false;
+
+        // 4. 前半部（読み）が同じ → 重複（自己評価甘 vs 自己評価高）
         const aPrefix = a.reading.slice(0, -Math.max(2, Math.ceil(matchLen * 0.4)));
         const bPrefix = b.reading.slice(0, -Math.max(2, Math.ceil(matchLen * 0.4)));
-        if (aPrefix.length >= 4 && aPrefix === bPrefix) return false; // 前半部同一 → 韻ではない
+        if (aPrefix.length >= 3 && aPrefix === bPrefix) return false;
 
         return true; // 母音は一致するが異なる言葉 → 有効な韻
       };
@@ -2158,14 +2174,23 @@ JSON配列で出力（全ワード分必須）:
             const result = await claudeGenerate(`以下のワードリストから重複を全て検出し、削除すべきIDを返せ。
 
 【重複の定義（以下の全てが重複）】
-1. 表記違いの同一語: 「独りよがり」「独り善がり」「一人よがり」→ 同じ読み・同じ意味→1個残して他は削除
-2. 同じ前半部+似た末尾: 「自己評価甘」「自己評価高」→ 前半部「自己評価」が同じ→1個残す
-3. 同じ前半部+似た末尾: 「顔面廃棄」「顔面麻痺」→ 前半部「顔面」が同じ→1個残す
-4. 同じ概念の言い換え: 「社会不適応」「社会不適合」→ ほぼ同義→1個残す
-5. 同じ概念の言い換え: 「友達不毛」「友達不要」→ 同じ概念→1個残す
-6. 濁音/半濁音の違いだけ: 「一人ぼっち」「一人ぽっち」→ ほぼ同一→1個残す
-7. 漢字違いの同一語: 「無駄飯喰い」「無駄飯食い」→ 同じ→1個残す
-8. 6つのルール違反: 「プライド高い」（形容詞語尾）「カビ生えとる」（方言）→ 削除
+1. 表記違いの同一語: 「独りよがり」「独り善がり」「一人よがり」→ 1個残す
+2. 同じ前半部+似た末尾: 「自己評価甘」「自己評価高」→ 前半部同一→1個残す
+3. 同じ末尾表現を共有: 「顔の小ささ」「気の小ささ」「目の小ささ」→ 末尾「の小ささ」同一→1個残す
+4. 同じ末尾表現を共有: 「汚点そのもの」「公害そのもの」→ 末尾「そのもの」同一→1個残す
+5. 同じ末尾表現を共有: 「能力なし」「実力なし」「行動力なし」→ 末尾「力なし」同一→1個残す
+6. 同じ末尾表現を共有: 「恩知らず」「恥知らず」「世間知らず」→ 末尾「知らず」同一→1個残す
+7. 同じ末尾表現を共有: 「不安な顔つき」「陰気な顔つき」→ 末尾「顔つき」同一→1個残す
+8. 同じ概念の言い換え: 「社会不適応」「社会不適合」→ ほぼ同義→1個残す
+9. 濁音/半濁音/活用の違いだけ: 「すぐ音を上げる」「すぐに音を上げる」→ 1個残す
+10. ワード内に3文字以上の共通部分がある2つのワード→ 同じ言葉を共有→1個残す
+11. 6つのルール違反: 「プライド高い」（形容詞語尾）「カビ生えとる」（方言）→ 削除
+
+【韻の定義（最重要）】
+韻とは「末尾母音が一致しているが、母音一致箇所が意味の異なる言葉」である。
+同じ言葉で母音が一致しているのは韻ではない。
+したがって末尾の表現（〜の小ささ、〜そのもの、〜知らず、〜力なし、〜顔つき等）が
+同じワードが複数存在してはならない。各末尾表現は1個だけ残せ。
 
 【重要】各重複グループで最もインパクトのある1個を残し、それ以外のIDを返せ。
 重複がなければ空配列[]を返せ。
