@@ -17,6 +17,11 @@ import {
 } from "./lib/words";
 
 import { ALLOWED_VOWEL_SUFFIXES, DISS_ANGLES, LEVEL_CONFIGS } from "./lib/generate";
+import {
+  SIX_RULES, RHYME_DEFINITION, DUPLICATE_DEFINITION,
+  isTaigenViolation, extractEndingWord, extractModifierPrefix,
+  sanitizeReading, longestCommonSubstring, isValidRhymePairCheck,
+} from "./lib/rules";
 
 const dissRequestSchema = z.object({
   target: z.string().min(1),
@@ -188,12 +193,7 @@ ${angle}
 - 意味不明な造語は禁止。誰が聞いてもすぐ意味がわかる悪口にせよ
 
 【悪口の6つのルール（絶対厳守）】
-[1] 小学生でもわかる言葉のみを使う。漢語・専門用語・難読語は一切禁止
-[2] ターゲットの特徴から、悪口・指摘・挑発になる言葉を作成する
-[3] 言葉は必ず「体言止め」にすること。名詞・名詞句で終わる。助詞・助動詞・形容詞語尾（〜い）・動詞活用形で終わるのは絶対禁止
-[4] 商標権のある名前、有名人の名前などは使用しないこと
-[5] 言葉のリズムが良いこと。声に出したとき語呂が良い
-[6] 一度使われた単語は使用しないこと。同じ末尾の体言を持つワードを複数生成するな
+${SIX_RULES}
 
 【文字数制限】ひらがな換算で4文字〜10文字
 【関西弁・方言禁止】標準語のみ
@@ -257,19 +257,12 @@ ${angle}
               if (len < 3 || len > 10) continue;
               if (!isHiragana) e.reading = e.word;
 
-              // 体言止め違反を即排除（〜い、〜ない、〜しない、〜される、〜な で終わる）
-              const r = e.reading;
-              if (r.endsWith("い") || r.endsWith("ない") || r.endsWith("しない") ||
-                  r.endsWith("される") || r.endsWith("されない") || r.endsWith("できない") ||
-                  r.endsWith("とる") || r.endsWith("てる") || r.endsWith("する") ||
-                  e.word.endsWith("な")) continue;
+              // 体言止め違反を即排除（共通ルール）
+              if (isTaigenViolation(e.word, e.reading)) continue;
 
-              // 末尾単語（漢字/カタカナ末尾部分）の重複を即排除
-              const endingMatch = e.word.match(/[一-龯々ァ-ヶー]+$/);
-              if (endingMatch) {
-                const ending = endingMatch[0];
-                if (usedEndings.has(ending)) continue; // 既に使用済みの末尾単語
-              }
+              // 末尾単語の重複を即排除（共通ルール）
+              const endingWord = extractEndingWord(e.word);
+              if (endingWord && usedEndings.has(endingWord)) continue;
 
               // 修飾部（前半部分）の重複を即排除（読みの前半4文字以上が一致）
               if (r.length >= 6) {
@@ -289,7 +282,7 @@ ${angle}
               accumulatedExclusions.add(e.word);
 
               // 末尾単語を登録
-              if (endingMatch) usedEndings.add(endingMatch[0]);
+              if (endingWord) usedEndings.add(endingWord);
             }
           }
         }
@@ -395,52 +388,31 @@ ${lines}
         }
         words = quickCharCheck(furiOut);
 
-        // --- プログラム的な体言止め違反の即排除 ---
+        // --- プログラム的な体言止め違反の即排除（共通ルール） ---
         const beforeTaigen = words.length;
-        words = words.filter(w => {
-          const r = w.reading;
-          // 〜い、〜ない、〜しない、〜てる、〜する、〜とる で終わるワードは体言止め違反
-          if (r.endsWith("い") && !r.endsWith("あい") && !r.endsWith("かい") && !r.endsWith("がい")) return false;
-          if (r.endsWith("ない") && !w.word.endsWith("ない")) return false; // 「〜ない」名詞は除く
-          if (r.endsWith("しない") || r.endsWith("できない") || r.endsWith("されない")) return false;
-          if (r.endsWith("てる") || r.endsWith("する") || r.endsWith("とる")) return false;
-          if (w.word.endsWith("な") && !w.word.endsWith("だな") && w.word.length > 2) return false;
-          return true;
-        });
+        words = words.filter(w => !isTaigenViolation(w.word, w.reading));
         console.log(`[REVIEW] Taigen filter: ${beforeTaigen} → ${words.length} (${beforeTaigen - words.length} removed)`);
 
-        // --- プログラム的な末尾単語の一意性チェック（漢字/カタカナ末尾） ---
-        const endingSeenInBatch = new Map<string, string>(); // ending → first word
+        // --- プログラム的な末尾単語の一意性チェック（共通ルール） ---
+        const endingSeenInBatch = new Map<string, string>();
         const beforeEndingDedup = words.length;
         words = words.filter(w => {
-          const m = w.word.match(/[一-龯々ァ-ヶー]+$/);
-          if (!m) return true;
-          const ending = m[0];
-          if (ending.length < 1) return true;
-          // usedEndingsにも登録済みならスキップ
-          if (usedEndings.has(ending)) {
-            console.log(`[REVIEW] Ending dup (global): "${w.word}" ending="${ending}"`);
-            return false;
-          }
-          if (endingSeenInBatch.has(ending)) {
-            console.log(`[REVIEW] Ending dup (batch): "${w.word}" ending="${ending}" dup of "${endingSeenInBatch.get(ending)}"`);
-            return false;
-          }
+          const ending = extractEndingWord(w.word);
+          if (!ending) return true;
+          if (usedEndings.has(ending)) return false;
+          if (endingSeenInBatch.has(ending)) return false;
           endingSeenInBatch.set(ending, w.word);
           return true;
         });
         console.log(`[REVIEW] Ending dedup: ${beforeEndingDedup} → ${words.length} (${beforeEndingDedup - words.length} removed)`);
 
-        // --- 修飾部（前半4文字以上）の一意性チェック ---
+        // --- 修飾部の一意性チェック（共通ルール） ---
         const prefixSeenInBatch = new Map<string, string>();
         const beforePrefixDedup = words.length;
         words = words.filter(w => {
-          if (w.reading.length < 6) return true;
-          const prefix = w.reading.slice(0, 4);
-          if (prefixSeenInBatch.has(prefix)) {
-            console.log(`[REVIEW] Prefix dup: "${w.word}" prefix="${prefix}" dup of "${prefixSeenInBatch.get(prefix)}"`);
-            return false;
-          }
+          const prefix = extractModifierPrefix(w.reading);
+          if (!prefix) return true;
+          if (prefixSeenInBatch.has(prefix)) return false;
           prefixSeenInBatch.set(prefix, w.word);
           return true;
         });
@@ -1167,33 +1139,15 @@ JSON配列で出力:
       if (!parsed.success) return res.status(400).json({ error: "不正なデータです" });
       const ngList = await getNgWordStrings();
       const ngFiltered = parsed.data.words.filter(w => !ngList.some(ng => w.word.endsWith(ng)));
-      // readingの検証・修正: スラッシュ混入やひらがな以外を修正
+      // readingの検証・修正（共通ルール: sanitizeReading）
       const sanitized = ngFiltered.map(w => {
-        let reading = w.reading;
-        let word = w.word;
-        let romaji = w.romaji;
-        // readingにスラッシュが含まれる場合（パースバグ）→ 後半部分のみ使用
-        if (reading.includes("/") || reading.includes("／")) {
-          const parts = reading.split(/[\/／]/);
-          word = parts[0].trim(); // 前半がワード表記
-          reading = parts[parts.length - 1].trim();
+        const s = sanitizeReading(w.word, w.reading, w.romaji);
+        let romaji = s.romaji;
+        // readingが正しいひらがななら、romajiを再生成
+        if (s.changed && /^[ぁ-ゟー]+$/.test(s.reading)) {
+          romaji = hiraganaToRomaji(s.reading);
         }
-        // カタカナをひらがなに変換
-        reading = reading.replace(/[ァ-ヶ]/g, (c: string) => String.fromCharCode(c.charCodeAt(0) - 0x60));
-        // ひらがな以外が残っていたらromajiから推定（readingはwordのまま）
-        if (!/^[ぁ-ゟー]+$/.test(reading)) {
-          reading = word; // フォールバック
-        }
-        // romajiにワード部分が重複している場合は修正
-        if (romaji.length > 20) {
-          const half = Math.floor(romaji.length / 2);
-          const first = romaji.slice(0, half);
-          const second = romaji.slice(half);
-          if (first.length >= 4 && second.startsWith(first.slice(0, 4))) {
-            romaji = second; // 後半だけ使用
-          }
-        }
-        return { ...w, word, reading, romaji };
+        return { ...w, word: s.word, reading: s.reading, romaji };
       });
       const filtered = quickCharCheck(sanitized);
       const added = await addWords(filtered.map(w => ({
@@ -1576,62 +1530,29 @@ ${wordList}
       let romajiFixed = 0;
       let vowelFixed = 0;
 
-      // PHASE0: プログラム的なreadingの異常を検出・修正
+      // PHASE0: readingの異常を検出・修正（共通ルール: sanitizeReading）
       send("fix", `PHASE0: ${allWords.length}語のreadingを検証中...`);
       let phase0Fixed = 0;
       for (const w of allWords) {
-        let newWord = w.word;
-        let newReading = w.reading;
-        let newRomaji = w.romaji;
-        let changed = false;
+        const sanitized = sanitizeReading(w.word, w.reading, w.romaji);
+        if (!sanitized.changed) continue;
 
-        // カタカナ→ひらがな変換ヘルパー
-        const kata2hira = (s: string) => s.replace(/[ァ-ヶ]/g, (c: string) => String.fromCharCode(c.charCodeAt(0) - 0x60));
-
-        // wordまたはreadingにスラッシュが含まれる場合 → 前半=word, 後半=reading
-        const hasSlash = (s: string) => s.includes("/") || s.includes("／");
-        if (hasSlash(newWord) || hasSlash(newReading)) {
-          // wordとreadingが同じ値の場合もある（例: "アホの極み/アホのきわみ"）
-          const source = hasSlash(newWord) ? newWord : newReading;
-          const parts = source.split(/[\/／]/);
-          newWord = parts[0].trim();
-          let readingCandidate = kata2hira(parts[parts.length - 1].trim());
-          if (/^[ぁ-ゟー]+$/.test(readingCandidate)) {
-            newReading = readingCandidate;
-          }
-          changed = true;
-        }
-
-        // readingがひらがなでない（漢字・カタカナ混入）
-        if (!/^[ぁ-ゟー]+$/.test(newReading)) {
-          let converted = kata2hira(newReading);
-          // まだひらがなでなければ、wordをカタカナ変換してみる
-          if (!/^[ぁ-ゟー]+$/.test(converted)) {
-            converted = kata2hira(newWord);
-          }
-          // それでもダメならreadingはwordのまま（Claude PHASE1で修正される）
-          if (!/^[ぁ-ゟー]+$/.test(converted)) {
-            converted = newWord;
-          }
-          if (converted !== w.reading) { newReading = converted; changed = true; }
-        }
+        let { word: newWord, reading: newReading, romaji: newRomaji } = sanitized;
 
         // readingが正しいひらがなになった場合、romajiをreadingから再生成
-        if (changed && /^[ぁ-ゟー]+$/.test(newReading)) {
+        if (/^[ぁ-ゟー]+$/.test(newReading)) {
           newRomaji = hiraganaToRomaji(newReading);
         }
 
-        if (changed) {
-          try {
-            const newVowels = extractTaigenVowels(newWord, newReading, newRomaji);
-            await updateWord(w.id, { word: newWord, reading: newReading, romaji: newRomaji, vowels: newVowels, charCount: countMoraVowels(newReading) });
-            phase0Fixed++;
-            if (phase0Fixed <= 20 || phase0Fixed % 50 === 0) {
-              send("fix", `修正(${phase0Fixed}): "${w.word}" → reading="${newReading}" romaji="${newRomaji}"`);
-            }
-          } catch (err) {
-            console.log(`[PHASE0] Error updating id:${w.id} word:${w.word}:`, err);
+        try {
+          const newVowels = extractTaigenVowels(newWord, newReading, newRomaji);
+          await updateWord(w.id, { word: newWord, reading: newReading, romaji: newRomaji, vowels: newVowels, charCount: countMoraVowels(newReading) });
+          phase0Fixed++;
+          if (phase0Fixed <= 20 || phase0Fixed % 50 === 0) {
+            send("fix", `修正(${phase0Fixed}): "${w.word}" → reading="${newReading}" romaji="${newRomaji}"`);
           }
+        } catch (err) {
+          console.log(`[PHASE0] Error updating id:${w.id} word:${w.word}:`, err);
         }
       }
       send("fix", `PHASE0完了: ${phase0Fixed}語を修正`);
@@ -2168,15 +2089,14 @@ JSON配列で出力（全ワード分必須）:
       }
       send("check3", `ローマ字一致: ${romajiDupCount}件`);
 
-      // --- check3b: プログラム的な末尾単語（漢字/カタカナ末尾）重複 ---
-      send("check3b", "末尾単語（漢字/カタカナ）重複を検出中...");
+      // --- check3b: 末尾単語重複（共通ルール） ---
+      send("check3b", "末尾単語重複を検出中...");
       const endingSeen = new Map<string, { id: number; word: string }>();
       let endingDupCount = 0;
       for (const w of allWords) {
         if (toDelete.has(w.id)) continue;
-        const m = w.word.match(/[一-龯々ァ-ヶー]+$/);
-        if (!m || m[0].length < 1) continue;
-        const ending = m[0];
+        const ending = extractEndingWord(w.word);
+        if (!ending) continue;
         const existing = endingSeen.get(ending);
         if (existing) {
           toDelete.add(w.id);
@@ -2188,34 +2108,27 @@ JSON配列で出力（全ワード分必須）:
       }
       send("check3b", `末尾単語重複: ${endingDupCount}件`);
 
-      // --- check3c: プログラム的な体言止め違反 ---
+      // --- check3c: 体言止め違反（共通ルール） ---
       send("check3c", "体言止め違反を検出中...");
       let taigenViolationCount = 0;
       for (const w of allWords) {
         if (toDelete.has(w.id)) continue;
-        const r = w.reading;
-        const isViolation =
-          (r.endsWith("い") && !r.endsWith("あい") && !r.endsWith("かい") && !r.endsWith("がい") && !r.endsWith("ぜい") && !r.endsWith("ざい")) ||
-          (r.endsWith("ない") && !w.word.match(/なし$|ない$/)) ||
-          r.endsWith("しない") || r.endsWith("できない") || r.endsWith("されない") ||
-          r.endsWith("てる") || r.endsWith("する") || r.endsWith("とる") ||
-          (w.word.endsWith("な") && w.word.length > 2);
-        if (isViolation) {
+        if (isTaigenViolation(w.word, w.reading)) {
           toDelete.add(w.id);
           taigenViolationCount++;
-          send("check3c", `体言止め違反: "${w.word}"(${r})`);
+          send("check3c", `体言止め違反: "${w.word}"(${w.reading})`);
         }
       }
       send("check3c", `体言止め違反: ${taigenViolationCount}件`);
 
-      // --- check3d: 修飾部（前半4文字以上）の重複 ---
-      send("check3d", "修飾部（前半部分）重複を検出中...");
+      // --- check3d: 修飾部重複（共通ルール） ---
+      send("check3d", "修飾部重複を検出中...");
       const prefixSeen = new Map<string, { id: number; word: string }>();
       let prefixDupCountDedup = 0;
       for (const w of allWords) {
         if (toDelete.has(w.id)) continue;
-        if (w.reading.length < 6) continue;
-        const prefix = w.reading.slice(0, 4);
+        const prefix = extractModifierPrefix(w.reading);
+        if (!prefix) continue;
         const existing = prefixSeen.get(prefix);
         if (existing) {
           toDelete.add(w.id);
