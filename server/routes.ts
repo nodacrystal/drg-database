@@ -1585,37 +1585,35 @@ ${wordList}
         let newRomaji = w.romaji;
         let changed = false;
 
-        // readingにスラッシュが含まれる（パースバグ）
-        if (newReading.includes("/") || newReading.includes("／")) {
-          const parts = newReading.split(/[\/／]/);
-          newWord = parts[0].trim();
-          newReading = parts[parts.length - 1].trim();
-          // カタカナをひらがなに変換
-          newReading = newReading.replace(/[ァ-ヶ]/g, (c: string) => String.fromCharCode(c.charCodeAt(0) - 0x60));
-          changed = true;
-        }
+        // カタカナ→ひらがな変換ヘルパー
+        const kata2hira = (s: string) => s.replace(/[ァ-ヶ]/g, (c: string) => String.fromCharCode(c.charCodeAt(0) - 0x60));
 
-        // wordにスラッシュが含まれる
-        if (newWord.includes("/") || newWord.includes("／")) {
-          const parts = newWord.split(/[\/／]/);
+        // wordまたはreadingにスラッシュが含まれる場合 → 前半=word, 後半=reading
+        const hasSlash = (s: string) => s.includes("/") || s.includes("／");
+        if (hasSlash(newWord) || hasSlash(newReading)) {
+          // wordとreadingが同じ値の場合もある（例: "アホの極み/アホのきわみ"）
+          const source = hasSlash(newWord) ? newWord : newReading;
+          const parts = source.split(/[\/／]/);
           newWord = parts[0].trim();
-          if (!/^[ぁ-ゟー]+$/.test(newReading)) {
-            let r = parts[parts.length - 1].trim();
-            r = r.replace(/[ァ-ヶ]/g, (c: string) => String.fromCharCode(c.charCodeAt(0) - 0x60));
-            if (/^[ぁ-ゟー]+$/.test(r)) { newReading = r; changed = true; }
+          let readingCandidate = kata2hira(parts[parts.length - 1].trim());
+          if (/^[ぁ-ゟー]+$/.test(readingCandidate)) {
+            newReading = readingCandidate;
           }
           changed = true;
         }
 
         // readingがひらがなでない（漢字・カタカナ混入）
         if (!/^[ぁ-ゟー]+$/.test(newReading)) {
-          // カタカナをひらがなに変換してみる
-          let converted = newReading.replace(/[ァ-ヶ]/g, (c: string) => String.fromCharCode(c.charCodeAt(0) - 0x60));
-          // まだひらがなでなければwordをそのまま使う
+          let converted = kata2hira(newReading);
+          // まだひらがなでなければ、wordをカタカナ変換してみる
+          if (!/^[ぁ-ゟー]+$/.test(converted)) {
+            converted = kata2hira(newWord);
+          }
+          // それでもダメならreadingはwordのまま（Claude PHASE1で修正される）
           if (!/^[ぁ-ゟー]+$/.test(converted)) {
             converted = newWord;
           }
-          if (converted !== newReading) { newReading = converted; changed = true; }
+          if (converted !== w.reading) { newReading = converted; changed = true; }
         }
 
         // readingが正しいひらがなになった場合、romajiをreadingから再生成
